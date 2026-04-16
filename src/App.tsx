@@ -6,6 +6,11 @@ import { Ring } from './world/Ring'
 import { AxisPicker } from './world/AxisPicker'
 import { Controls } from './Controls'
 import { InputHandler } from './InputHandler'
+import { usePlanet } from './world/store'
+
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  ;(window as unknown as Record<string, unknown>).__planet = usePlanet
+}
 
 export default function App() {
   return (
