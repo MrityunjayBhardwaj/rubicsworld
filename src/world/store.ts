@@ -23,9 +23,11 @@ interface PlanetStore {
   anim: AnimState | null
   drag: DragState | null
   showLabels: boolean
+  showRing: boolean
   onPlanet: boolean
 
   setShowLabels: (v: boolean) => void
+  setShowRing: (v: boolean) => void
   setOnPlanet: (v: boolean) => void
 
   beginDragAt: (axis: Axis, slice: number) => void
@@ -63,10 +65,12 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   solved: true,
   anim: null,
   drag: null,
-  showLabels: true,
+  showLabels: false,
+  showRing: false,
   onPlanet: false,
 
   setShowLabels: v => set({ showLabels: v }),
+  setShowRing: v => set({ showRing: v }),
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
 
   beginDragAt: (axis, slice) =>

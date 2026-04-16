@@ -15,6 +15,12 @@ const INNER_ROT: Record<Axis, [number, number, number]> = {
 }
 
 export function Ring() {
+  const showRing = usePlanet(s => s.showRing)
+  if (!showRing) return null
+  return <RingMesh />
+}
+
+function RingMesh() {
   const drag = usePlanet(s => s.drag)
   const anim = usePlanet(s => s.anim)
 

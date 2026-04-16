@@ -8,10 +8,15 @@ export function Controls() {
   const scrambleAnimated = usePlanet(s => s.scrambleAnimated)
   const reset = usePlanet(s => s.reset)
   const setShowLabels = usePlanet(s => s.setShowLabels)
+  const setShowRing = usePlanet(s => s.setShowRing)
 
   useControls({
+    Ring: {
+      value: false,
+      onChange: (v: boolean) => setShowRing(v),
+    },
     'Tile numbers': {
-      value: true,
+      value: false,
       onChange: (v: boolean) => setShowLabels(v),
     },
     Scramble: button(() => scramble(20)),
