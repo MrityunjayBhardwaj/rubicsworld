@@ -44,6 +44,9 @@ const _hitEnd = new THREE.Vector3()
 const _proj = new THREE.Vector3()
 const _hitScreen = new THREE.Vector2()
 const _endScreen = new THREE.Vector2()
+const _destWorld = new THREE.Vector3()
+const _destScreen = new THREE.Vector2()
+const _quat = new THREE.Quaternion()
 
 function project3ToScreen(
   v: THREE.Vector3,
@@ -110,16 +113,29 @@ export function Interaction() {
           if (dist < DRAG_COMMIT_PX) return
 
           const hit = pending.current.hit
-          let bestAxis: Axis = 'y'
-          let bestScore = -Infinity
-          let bestTangent = new THREE.Vector2(1, 0)
-
           project3ToScreen(hit, camera, width(), height(), _hitScreen)
+
+          // Which face is the hit on? Whichever axis has the largest
+          // absolute hit component. This axis gets preference — its
+          // rotations keep the tile on the same face, which matches
+          // the user's intuition of "tile moves to adjacent slot".
+          const ax = Math.abs(hit.x), ay = Math.abs(hit.y), az = Math.abs(hit.z)
+          const faceAxis: Axis = ax >= ay && ax >= az ? 'x' : ay >= az ? 'y' : 'z'
+
+          const dragUx = dx / dist
+          const dragUy = dy / dist
+
+          let bestFaceAxis: Axis | null = null
+          let bestFaceScore = -Infinity
+          let bestFaceTangent = new THREE.Vector2(1, 0)
+          let bestAnyAxis: Axis = 'y'
+          let bestAnyScore = -Infinity
+          let bestAnyTangent = new THREE.Vector2(1, 0)
+
           for (const av of AXIS_VECS) {
-            // World tangent = axis × hit — the CCW-rotation velocity of
-            // the hit point. Keep the unit vector in THIS mathematical
-            // direction; don't flip it to match drag. The sign of the
-            // projection onto it is what encodes CW vs CCW.
+            // Mathematical CCW tangent — this is what we'll store to
+            // drive the continued drag. Don't flip it; the sign of the
+            // drag projection onto it encodes CW vs CCW.
             _tangentWorld.crossVectors(av.vec, hit)
             if (_tangentWorld.lengthSq() < 1e-8) continue
             _tangentWorld.normalize()
@@ -128,16 +144,46 @@ export function Interaction() {
             const tx = _endScreen.x - _hitScreen.x
             const ty = _endScreen.y - _hitScreen.y
             const tlen = Math.hypot(tx, ty)
-            if (tlen < 0.3) continue // axis nearly view-aligned
+            if (tlen < 0.3) continue // axis almost view-aligned
 
-            const dot = tx * dx + ty * dy
-            const score = Math.abs(dot) / (tlen * dist)
-            if (score > bestScore) {
-              bestScore = score
-              bestAxis = av.key
-              bestTangent = new THREE.Vector2(tx / tlen, ty / tlen)
+            const tangent = new THREE.Vector2(tx / tlen, ty / tlen)
+
+            // Consider both ±90° rotations around this axis. For each,
+            // compute the DESTINATION chord (where the tile lands on
+            // screen) and score the alignment against the drag.
+            for (const sign of [1, -1] as const) {
+              _quat.setFromAxisAngle(av.vec, (sign * Math.PI) / 2)
+              _destWorld.copy(hit).applyQuaternion(_quat)
+              project3ToScreen(_destWorld, camera, width(), height(), _destScreen)
+              const cdx = _destScreen.x - _hitScreen.x
+              const cdy = _destScreen.y - _hitScreen.y
+              const clen = Math.hypot(cdx, cdy)
+              if (clen < 1) continue
+
+              const cos = (cdx * dragUx + cdy * dragUy) / clen
+              if (cos <= 0) continue // chord points away from drag
+
+              // Face-axis preference kicks in only when the chord has a
+              // clear direction match (not projection noise). 0.5 is the
+              // 60-degree-alignment cutoff.
+              if (av.key === faceAxis && cos > 0.5) {
+                if (cos > bestFaceScore) {
+                  bestFaceScore = cos
+                  bestFaceAxis = av.key
+                  bestFaceTangent = tangent
+                }
+              }
+              if (cos > bestAnyScore) {
+                bestAnyScore = cos
+                bestAnyAxis = av.key
+                bestAnyTangent = tangent
+              }
             }
           }
+
+          const useFace = bestFaceAxis !== null
+          const bestAxis: Axis = useFace ? bestFaceAxis! : bestAnyAxis
+          const bestTangent = useFace ? bestFaceTangent : bestAnyTangent
 
           const hitComp =
             bestAxis === 'x' ? hit.x : bestAxis === 'y' ? hit.y : hit.z
