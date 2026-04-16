@@ -1,4 +1,6 @@
 import { Canvas } from '@react-three/fiber'
+import { OrbitControls } from '@react-three/drei'
+import * as THREE from 'three'
 import { CubeSphere } from './world/CubeSphere'
 import { Ring } from './world/Ring'
 import { Controls } from './Controls'
@@ -19,6 +21,16 @@ export default function App() {
         <directionalLight position={[4, 5, 3]} intensity={1.1} />
         <CubeSphere />
         <Ring />
+        <OrbitControls
+          enablePan={false}
+          mouseButtons={{
+            LEFT: undefined as unknown as THREE.MOUSE,
+            MIDDLE: THREE.MOUSE.DOLLY,
+            RIGHT: THREE.MOUSE.ROTATE,
+          }}
+          minDistance={2.5}
+          maxDistance={8}
+        />
       </Canvas>
     </>
   )

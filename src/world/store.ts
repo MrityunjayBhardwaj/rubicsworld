@@ -23,7 +23,9 @@ interface PlanetStore {
   ring: { axis: Axis; slice: number }
   anim: AnimState | null
   drag: DragState | null
+  showLabels: boolean
 
+  setShowLabels: (v: boolean) => void
   setRingAxis: (axis: Axis) => void
   cycleRingSlice: () => void
 
@@ -57,6 +59,9 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   ring: { axis: 'x', slice: 0 },
   anim: null,
   drag: null,
+  showLabels: true,
+
+  setShowLabels: v => set({ showLabels: v }),
 
   setRingAxis: axis =>
     set(s => (s.ring.axis === axis ? {} : { ring: { ...s.ring, axis } })),

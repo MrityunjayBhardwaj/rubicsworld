@@ -7,8 +7,13 @@ export function Controls() {
   const scramble = usePlanet(s => s.scrambleAnimated)
   const reset = usePlanet(s => s.reset)
   const rotateInstant = usePlanet(s => s.rotateInstant)
+  const setShowLabels = usePlanet(s => s.setShowLabels)
 
   useControls({
+    'Tile numbers': {
+      value: true,
+      onChange: (v: boolean) => setShowLabels(v),
+    },
     Scramble: button(() => void scramble(20)),
     Reset: button(() => reset()),
     'Self-test (rotation math)': button(() => {

@@ -62,7 +62,7 @@ export function Ring() {
     <group rotation={outerRot}>
       <animated.group position={position as unknown as [number, number, number]} rotation={innerRot as unknown as [number, number, number]}>
         <mesh>
-          <torusGeometry args={[1.06, 0.025, 20, 128]} />
+          <torusGeometry args={[1.35, 0.04, 24, 160]} />
           <meshStandardMaterial
             color={color}
             emissive="#ffb56b"
