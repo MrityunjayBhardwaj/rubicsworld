@@ -24,11 +24,13 @@ interface PlanetStore {
   anim: AnimState | null
   drag: DragState | null
   showLabels: boolean
+  onPlanet: boolean
 
   setShowLabels: (v: boolean) => void
   setRingAxis: (axis: Axis) => void
   setRing: (axis: Axis, slice: number) => void
   cycleRingSlice: () => void
+  setOnPlanet: (v: boolean) => void
 
   beginDrag: () => void
   updateDrag: (angle: number) => void
@@ -61,8 +63,10 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   anim: null,
   drag: null,
   showLabels: true,
+  onPlanet: false,
 
   setShowLabels: v => set({ showLabels: v }),
+  setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
 
   setRingAxis: axis =>
     set(s => (s.ring.axis === axis ? {} : { ring: { ...s.ring, axis } })),

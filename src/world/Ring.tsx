@@ -20,6 +20,7 @@ export function Ring() {
   const ring = usePlanet(s => s.ring)
   const drag = usePlanet(s => s.drag)
   const anim = usePlanet(s => s.anim)
+  const onPlanet = usePlanet(s => s.onPlanet)
 
   const axisTuple = AXIS_TUPLE[ring.axis]
   const offset = ring.slice === 0 ? -0.5 : 0.5
@@ -30,25 +31,21 @@ export function Ring() {
   ]
   const targetInnerRot = INNER_ROT[ring.axis]
 
-  // Axis/slice transitions are tweened so the ring glides rather than pops.
-  const { position, innerRot } = useSpring({
+  // Keep the ring present while anything active is happening — a
+  // committing spring mid-rotation or an in-progress drag — even if
+  // the cursor has strayed off the planet mid-gesture.
+  const shouldShow = onPlanet || !!drag || !!anim
+
+  const { position, innerRot, opacity } = useSpring({
     position: targetPos,
     innerRot: targetInnerRot,
-    config: { duration: 220, easing: easings.easeInOutCubic },
+    opacity: shouldShow ? 1 : 0,
+    config: { duration: 180, easing: easings.easeInOutCubic },
   })
 
-  // During drag or anim whose slice matches the ring's current selection,
-  // the ring spins around its axis with the slice. Programmatic anims
-  // (scramble) on OTHER slices leave the ring alone.
   const active = drag ?? anim
   const matches = active && active.axis === ring.axis && active.slice === ring.slice
-  let spinAngle = 0
-  if (matches) {
-    if (drag) spinAngle = drag.angle
-    // For anim we don't know current spring value here — let the tiles
-    // carry the visual during commit. Ring stays at 0 (or at drag.angle
-    // handed off until commit). Simpler + accurate enough.
-  }
+  const spinAngle = matches && drag ? drag.angle : 0
   const outerRot: [number, number, number] = [
     axisTuple[0] * spinAngle,
     axisTuple[1] * spinAngle,
@@ -60,15 +57,21 @@ export function Ring() {
 
   return (
     <group rotation={outerRot}>
-      <animated.group position={position as unknown as [number, number, number]} rotation={innerRot as unknown as [number, number, number]}>
-        <mesh>
+      <animated.group
+        position={position as unknown as [number, number, number]}
+        rotation={innerRot as unknown as [number, number, number]}
+      >
+        <mesh visible={shouldShow || opacity.get() > 0.01}>
           <torusGeometry args={[1.35, 0.04, 24, 160]} />
-          <meshStandardMaterial
+          <animated.meshStandardMaterial
             color={color}
             emissive="#ffb56b"
             emissiveIntensity={emissiveIntensity}
             metalness={0.55}
             roughness={0.35}
+            transparent
+            opacity={opacity}
+            depthWrite={false}
           />
         </mesh>
       </animated.group>

@@ -31,7 +31,7 @@ export default function App() {
         <OrbitControls
           enablePan={false}
           mouseButtons={{
-            LEFT: undefined as unknown as THREE.MOUSE,
+            LEFT: THREE.MOUSE.ROTATE,
             MIDDLE: THREE.MOUSE.DOLLY,
             RIGHT: THREE.MOUSE.ROTATE,
           }}

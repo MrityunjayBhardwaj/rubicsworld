@@ -21,7 +21,8 @@ import type { Axis } from './rotation'
 //    direction heuristic; don't touch slice.
 
 const ORIGIN = new THREE.Vector3(0, 0, 0)
-const SPHERE = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 1)
+const PLANET_SPHERE = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 1)
+const RING_RADIUS_PAD = 1.42 // just outside the 1.35 torus major radius
 
 const AXIS_VECS: { key: Axis; vec: THREE.Vector3 }[] = [
   { key: 'x', vec: new THREE.Vector3(1, 0, 0) },
@@ -34,11 +35,13 @@ const _ndc = new THREE.Vector2()
 const _hit = new THREE.Vector3()
 const _originNdc = new THREE.Vector3()
 const _axisNdc = new THREE.Vector3()
+const _ringSphere = new THREE.Sphere(new THREE.Vector3(), RING_RADIUS_PAD)
 
 export function AxisPicker() {
   const { camera, gl, size } = useThree()
   const setRing = usePlanet(s => s.setRing)
   const setRingAxis = usePlanet(s => s.setRingAxis)
+  const setOnPlanet = usePlanet(s => s.setOnPlanet)
   const drag = usePlanet(s => s.drag)
   const dragRef = useRef(drag)
   dragRef.current = drag
@@ -87,33 +90,64 @@ export function AxisPicker() {
     const pick = (e: PointerEvent) => {
       if (dragRef.current) return
 
+      // Ignore events over Leva DOM — they're not canvas pointer events
+      const tgt = e.target as HTMLElement | null
+      if (tgt && tgt.closest('[id^="leva"]')) {
+        setOnPlanet(false)
+        return
+      }
+
       const rect = canvas.getBoundingClientRect()
       const cx = e.clientX - rect.left
       const cy = e.clientY - rect.top
 
-      // 1) Raycast against the planet's unit sphere
+      if (cx < 0 || cy < 0 || cx > size.width || cy > size.height) {
+        setOnPlanet(false)
+        return
+      }
+
       _ndc.set((cx / size.width) * 2 - 1, -((cy / size.height) * 2 - 1))
       _ray.setFromCamera(_ndc, camera)
-      const hasHit = !!_ray.ray.intersectSphere(SPHERE, _hit)
+
+      // 1) Raycast against the planet's unit sphere
+      const hasHit = !!_ray.ray.intersectSphere(PLANET_SPHERE, _hit)
 
       if (hasHit) {
+        setOnPlanet(true)
         const ax = Math.abs(_hit.x)
         const ay = Math.abs(_hit.y)
         const az = Math.abs(_hit.z)
         if (ay > ax && ay > az) {
-          // Hit on +Y or -Y face: pick X or Z from the screen heuristic
           const axis = pickByScreen(['x', 'z'] as const, cx, cy)
           const slice =
             axis === 'x' ? (_hit.x > 0 ? 1 : 0) : (_hit.z > 0 ? 1 : 0)
           setRing(axis, slice)
         } else {
-          // Hit on a side face — the natural motion wraps the Y belt
           setRing('y', _hit.y > 0 ? 1 : 0)
         }
         return
       }
 
-      // 2) No hit: screen-direction heuristic picks axis, slice stays
+      // 2) No planet hit — check if the ray passes through the current
+      //    ring's bounding region. If so, consider ourselves still "on
+      //    planet" for ring visibility + input routing, but leave axis
+      //    and slice alone.
+      const ringState = usePlanet.getState().ring
+      const offset = ringState.slice === 0 ? -0.5 : 0.5
+      _ringSphere.center.set(
+        ringState.axis === 'x' ? offset : 0,
+        ringState.axis === 'y' ? offset : 0,
+        ringState.axis === 'z' ? offset : 0,
+      )
+      const nearRing = _ray.ray.intersectsSphere(_ringSphere)
+      if (nearRing) {
+        setOnPlanet(true)
+        return
+      }
+
+      // 3) Cursor is out in empty space — release the ring and let
+      //    OrbitControls own left-click.
+      setOnPlanet(false)
       setRingAxis(pickByScreen(['x', 'y', 'z'] as const, cx, cy))
     }
 
@@ -130,7 +164,7 @@ export function AxisPicker() {
       window.removeEventListener('pointermove', onMove)
       if (rafId) cancelAnimationFrame(rafId)
     }
-  }, [camera, gl, size.width, size.height, setRing, setRingAxis])
+  }, [camera, gl, size.width, size.height, setRing, setRingAxis, setOnPlanet])
 
   return null
 }

@@ -44,13 +44,19 @@ export function InputHandler() {
     return () => window.removeEventListener('keydown', onKey)
   }, [setRingAxis, cycleRingSlice])
 
-  // Drag: primary pointer button, left-right motion rotates the active slice
+  // Drag: primary pointer button, left-right motion rotates the active slice.
+  // Registered with capture=true so we run BEFORE OrbitControls (which is on
+  // the canvas element). If we claim the event (cursor on planet), we
+  // stopPropagation → OrbitControls never sees it. Otherwise we do nothing
+  // and OrbitControls rotates the camera as its default LEFT action.
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
       if (e.button !== 0) return
-      // ignore drags originating on Leva DOM
       const tgt = e.target as HTMLElement | null
       if (tgt && tgt.closest('[id^="leva"]')) return
+      const { onPlanet } = usePlanet.getState()
+      if (!onPlanet) return // let OrbitControls handle camera orbit
+      e.stopPropagation()
       dragStart.current = { x: e.clientX, y: e.clientY }
       beginDrag()
     }
@@ -64,12 +70,12 @@ export function InputHandler() {
       dragStart.current = null
       void endDrag()
     }
-    window.addEventListener('pointerdown', onDown)
+    window.addEventListener('pointerdown', onDown, { capture: true })
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
     window.addEventListener('pointercancel', onUp)
     return () => {
-      window.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('pointerdown', onDown, { capture: true })
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
