@@ -4,6 +4,9 @@ import * as THREE from 'three'
 import { CubeSphere } from './world/CubeSphere'
 import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
+import { Lights } from './world/Lights'
+import { PostFx } from './world/PostFx'
+import { AiSeed } from './world/AiSeed'
 import { Controls } from './Controls'
 import { usePlanet } from './world/store'
 
@@ -31,11 +34,12 @@ export default function App() {
         dpr={[1, 2]}
       >
         <color attach="background" args={['#0a0d12']} />
-        <ambientLight intensity={0.35} />
-        <directionalLight position={[4, 5, 3]} intensity={1.1} />
+        <Lights />
         <CubeSphere />
         <Ring />
         <Interaction />
+        <AiSeed />
+        <PostFx />
         <OrbitControls
           enablePan={false}
           mouseButtons={{

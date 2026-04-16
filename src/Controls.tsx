@@ -10,6 +10,7 @@ export function Controls() {
   const setShowLabels = usePlanet(s => s.setShowLabels)
   const setShowRing = usePlanet(s => s.setShowRing)
   const setCommitThreshold = usePlanet(s => s.setCommitThreshold)
+  const setAiEnabled = usePlanet(s => s.setAiEnabled)
 
   useControls({
     Ring: {
@@ -19,6 +20,10 @@ export function Controls() {
     'Tile numbers': {
       value: false,
       onChange: (v: boolean) => setShowLabels(v),
+    },
+    'AI seed': {
+      value: true,
+      onChange: (v: boolean) => setAiEnabled(v),
     },
     'Commit threshold (°)': {
       value: 6.5,
@@ -39,9 +44,16 @@ export function Controls() {
   })
 
   useEffect(() => {
-    const handler = () => console.log('[event] planet:settled')
-    window.addEventListener('planet:settled', handler)
-    return () => window.removeEventListener('planet:settled', handler)
+    const log = (name: string) => () => console.log(`[event] ${name}`)
+    const handlers: Array<[string, () => void]> = [
+      ['planet:settled', log('planet:settled')],
+      ['planet:ai-pulse', log('planet:ai-pulse')],
+      ['planet:ai-tone', log('planet:ai-tone')],
+    ]
+    for (const [name, h] of handlers) window.addEventListener(name, h)
+    return () => {
+      for (const [name, h] of handlers) window.removeEventListener(name, h)
+    }
   }, [])
 
   return null
