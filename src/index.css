@@ -1,0 +1,13 @@
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: #0a0d12;
+  overflow: hidden;
+}
+
+canvas {
+  display: block;
+  touch-action: none;
+}
