@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react'
 import { usePlanet } from './world/store'
-import type { Axis } from './world/rotation'
 
 const DRAG_PX_PER_RADIAN = 180 // ~π radians per 565 px of horizontal travel
 
+// Axis-from-cursor lives in world/AxisPicker.tsx (inside Canvas — it
+// needs the live camera). Drag / keyboard / scroll stay here.
 export function InputHandler() {
-  const ring = usePlanet(s => s.ring)
   const setRingAxis = usePlanet(s => s.setRingAxis)
   const cycleRingSlice = usePlanet(s => s.cycleRingSlice)
   const beginDrag = usePlanet(s => s.beginDrag)
@@ -13,32 +13,6 @@ export function InputHandler() {
   const endDrag = usePlanet(s => s.endDrag)
 
   const dragStart = useRef<{ x: number; y: number } | null>(null)
-  const ringRef = useRef(ring)
-  ringRef.current = ring
-
-  // Axis from cursor third of screen. Only re-assigns when idle.
-  useEffect(() => {
-    let rafId = 0
-    let pending: Axis | null = null
-    const onMove = (e: PointerEvent) => {
-      if (dragStart.current) return
-      const frac = e.clientX / window.innerWidth
-      const axis: Axis = frac < 1 / 3 ? 'x' : frac < 2 / 3 ? 'y' : 'z'
-      if (axis === ringRef.current.axis) return
-      pending = axis
-      if (rafId) return
-      rafId = requestAnimationFrame(() => {
-        rafId = 0
-        if (pending && !dragStart.current) setRingAxis(pending)
-        pending = null
-      })
-    }
-    window.addEventListener('pointermove', onMove)
-    return () => {
-      window.removeEventListener('pointermove', onMove)
-      if (rafId) cancelAnimationFrame(rafId)
-    }
-  }, [setRingAxis])
 
   // Scroll wheel cycles slice (N=2 → toggle)
   useEffect(() => {

@@ -3,6 +3,7 @@ import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { CubeSphere } from './world/CubeSphere'
 import { Ring } from './world/Ring'
+import { AxisPicker } from './world/AxisPicker'
 import { Controls } from './Controls'
 import { InputHandler } from './InputHandler'
 
@@ -21,6 +22,7 @@ export default function App() {
         <directionalLight position={[4, 5, 3]} intensity={1.1} />
         <CubeSphere />
         <Ring />
+        <AxisPicker />
         <OrbitControls
           enablePan={false}
           mouseButtons={{
