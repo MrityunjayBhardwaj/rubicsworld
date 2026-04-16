@@ -8,8 +8,6 @@ const AXIS_TUPLE: Record<Axis, [number, number, number]> = {
   z: [0, 0, 1],
 }
 
-// Torus's natural axis is +Z. Rotate the inner group so its axis
-// aligns with the ring axis.
 const INNER_ROT: Record<Axis, [number, number, number]> = {
   x: [0, Math.PI / 2, 0],
   y: [Math.PI / 2, 0, 0],
@@ -17,43 +15,38 @@ const INNER_ROT: Record<Axis, [number, number, number]> = {
 }
 
 export function Ring() {
-  const ring = usePlanet(s => s.ring)
   const drag = usePlanet(s => s.drag)
   const anim = usePlanet(s => s.anim)
-  const onPlanet = usePlanet(s => s.onPlanet)
 
-  const axisTuple = AXIS_TUPLE[ring.axis]
-  const offset = ring.slice === 0 ? -0.5 : 0.5
+  const active = drag ?? anim
+  // Pick a persistent fallback so the ring can continue animating its
+  // opacity to 0 after active becomes null, without the position
+  // snapping to a default.
+  const axis: Axis = active?.axis ?? 'y'
+  const slice = active?.slice ?? 0
+
+  const axisTuple = AXIS_TUPLE[axis]
+  const offset = slice === 0 ? -0.5 : 0.5
   const targetPos: [number, number, number] = [
     axisTuple[0] * offset,
     axisTuple[1] * offset,
     axisTuple[2] * offset,
   ]
-  const targetInnerRot = INNER_ROT[ring.axis]
-
-  // Keep the ring present while anything active is happening — a
-  // committing spring mid-rotation or an in-progress drag — even if
-  // the cursor has strayed off the planet mid-gesture.
-  const shouldShow = onPlanet || !!drag || !!anim
+  const targetInnerRot = INNER_ROT[axis]
 
   const { position, innerRot, opacity } = useSpring({
     position: targetPos,
     innerRot: targetInnerRot,
-    opacity: shouldShow ? 1 : 0,
-    config: { duration: 180, easing: easings.easeInOutCubic },
+    opacity: active ? 1 : 0,
+    config: { duration: 160, easing: easings.easeInOutCubic },
   })
 
-  const active = drag ?? anim
-  const matches = active && active.axis === ring.axis && active.slice === ring.slice
-  const spinAngle = matches && drag ? drag.angle : 0
+  const spinAngle = drag ? drag.angle : 0
   const outerRot: [number, number, number] = [
     axisTuple[0] * spinAngle,
     axisTuple[1] * spinAngle,
     axisTuple[2] * spinAngle,
   ]
-
-  const emissiveIntensity = matches ? 0.85 : 0.45
-  const color = ring.slice === 0 ? '#f3d7a3' : '#f7c77c'
 
   return (
     <group rotation={outerRot}>
@@ -61,12 +54,12 @@ export function Ring() {
         position={position as unknown as [number, number, number]}
         rotation={innerRot as unknown as [number, number, number]}
       >
-        <mesh visible={shouldShow || opacity.get() > 0.01}>
+        <mesh>
           <torusGeometry args={[1.35, 0.04, 24, 160]} />
           <animated.meshStandardMaterial
-            color={color}
+            color="#f3d7a3"
             emissive="#ffb56b"
-            emissiveIntensity={emissiveIntensity}
+            emissiveIntensity={0.8}
             metalness={0.55}
             roughness={0.35}
             transparent

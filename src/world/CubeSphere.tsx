@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useSpring, animated, easings } from '@react-spring/three'
@@ -59,6 +59,7 @@ function TileMesh({
   geom: TileMeshDef
   showLabel: boolean
 }) {
+  const [hovered, setHovered] = useState(false)
   const q: [number, number, number, number] = [
     tile.orientation.x,
     tile.orientation.y,
@@ -69,10 +70,24 @@ function TileMesh({
     () => tileCentroid(tile.homeFace, tile.homeU, tile.homeV),
     [tile.homeFace, tile.homeU, tile.homeV],
   )
+  const { emissive } = useSpring({
+    emissive: hovered ? 0.18 : 0,
+    config: { duration: 120 },
+  })
   return (
     <group quaternion={q}>
-      <mesh geometry={geom.geometry}>
-        <meshStandardMaterial color={geom.color} roughness={0.7} metalness={0.05} />
+      <mesh
+        geometry={geom.geometry}
+        onPointerOver={() => setHovered(true)}
+        onPointerOut={() => setHovered(false)}
+      >
+        <animated.meshStandardMaterial
+          color={geom.color}
+          roughness={0.7}
+          metalness={0.05}
+          emissive="#ffb56b"
+          emissiveIntensity={emissive}
+        />
       </mesh>
       {showLabel && <TileLabel homePos={home} id={tile.id} />}
     </group>

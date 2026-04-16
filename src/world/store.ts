@@ -8,7 +8,7 @@ export interface AnimState {
   slice: number
   from: number
   to: number
-  commitDir: Direction | 0 // 0 = no commit (snap back), otherwise commit this direction
+  commitDir: Direction | 0 // 0 = snap back (no commit), otherwise commit direction
 }
 
 export interface DragState {
@@ -20,25 +20,22 @@ export interface DragState {
 interface PlanetStore {
   tiles: Tile[]
   solved: boolean
-  ring: { axis: Axis; slice: number }
   anim: AnimState | null
   drag: DragState | null
   showLabels: boolean
   onPlanet: boolean
 
   setShowLabels: (v: boolean) => void
-  setRingAxis: (axis: Axis) => void
-  setRing: (axis: Axis, slice: number) => void
-  cycleRingSlice: () => void
   setOnPlanet: (v: boolean) => void
 
-  beginDrag: () => void
+  beginDragAt: (axis: Axis, slice: number) => void
   updateDrag: (angle: number) => void
   endDrag: () => Promise<void>
 
   rotateAnimated: (m: Move) => Promise<void>
   rotateInstant: (m: Move) => void
   reset: () => void
+  scrambleInstant: (n?: number) => void
   scrambleAnimated: (n?: number) => Promise<void>
 
   _finishAnim: () => void
@@ -47,7 +44,12 @@ interface PlanetStore {
 let animCounter = 0
 let animResolver: (() => void) | null = null
 
-function applyRotation(s: Pick<PlanetStore, 'tiles' | 'solved'>, axis: Axis, slice: number, dir: Direction) {
+function applyRotation(
+  s: Pick<PlanetStore, 'tiles' | 'solved'>,
+  axis: Axis,
+  slice: number,
+  dir: Direction,
+) {
   const newTiles = rotateSlice(s.tiles, axis, slice, dir)
   const nowSolved = isSolved(newTiles)
   if (!s.solved && nowSolved) {
@@ -59,7 +61,6 @@ function applyRotation(s: Pick<PlanetStore, 'tiles' | 'solved'>, axis: Axis, sli
 export const usePlanet = create<PlanetStore>((set, get) => ({
   tiles: buildSolvedTiles(),
   solved: true,
-  ring: { axis: 'x', slice: 0 },
   anim: null,
   drag: null,
   showLabels: true,
@@ -68,21 +69,10 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   setShowLabels: v => set({ showLabels: v }),
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
 
-  setRingAxis: axis =>
-    set(s => (s.ring.axis === axis ? {} : { ring: { ...s.ring, axis } })),
-  setRing: (axis, slice) =>
-    set(s =>
-      s.ring.axis === axis && s.ring.slice === slice
-        ? {}
-        : { ring: { axis, slice } },
-    ),
-  cycleRingSlice: () =>
-    set(s => ({ ring: { ...s.ring, slice: s.ring.slice === 0 ? 1 : 0 } })),
-
-  beginDrag: () =>
+  beginDragAt: (axis, slice) =>
     set(s => {
       if (s.anim || s.drag) return {}
-      return { drag: { axis: s.ring.axis, slice: s.ring.slice, angle: 0 } }
+      return { drag: { axis, slice, angle: 0 } }
     }),
   updateDrag: angle =>
     set(s => {
@@ -99,7 +89,6 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
       }
       const a = s.drag.angle
       if (Math.abs(a) < 1e-3) {
-        // trivial click with no meaningful drag — just clear and return
         set({ drag: null })
         resolve()
         return
@@ -141,11 +130,23 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
       })
     }),
 
-  rotateInstant: m =>
-    set(s => applyRotation(s, m.axis, m.slice, m.dir)),
+  rotateInstant: m => set(s => applyRotation(s, m.axis, m.slice, m.dir)),
 
   reset: () =>
     set({ tiles: buildSolvedTiles(), solved: true, anim: null, drag: null }),
+
+  scrambleInstant: (n = 20) =>
+    set(() => {
+      let tiles = buildSolvedTiles()
+      let prev: Move | undefined
+      for (let i = 0; i < n; i++) {
+        const m = randomMove(Math.random, prev)
+        tiles = rotateSlice(tiles, m.axis, m.slice, m.dir)
+        prev = m
+      }
+      // Not firing planet:settled here — puzzle is now unsolved
+      return { tiles, solved: isSolved(tiles), anim: null, drag: null }
+    }),
 
   scrambleAnimated: async (n = 20) => {
     const { reset, rotateAnimated } = get()
