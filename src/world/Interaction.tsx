@@ -113,11 +113,13 @@ export function Interaction() {
           let bestAxis: Axis = 'y'
           let bestScore = -Infinity
           let bestTangent = new THREE.Vector2(1, 0)
-          let bestDirSign = 1
 
           project3ToScreen(hit, camera, width(), height(), _hitScreen)
           for (const av of AXIS_VECS) {
-            // World tangent = axis × hit (CCW rotation around axis)
+            // World tangent = axis × hit — the CCW-rotation velocity of
+            // the hit point. Keep the unit vector in THIS mathematical
+            // direction; don't flip it to match drag. The sign of the
+            // projection onto it is what encodes CW vs CCW.
             _tangentWorld.crossVectors(av.vec, hit)
             if (_tangentWorld.lengthSq() < 1e-8) continue
             _tangentWorld.normalize()
@@ -126,20 +128,16 @@ export function Interaction() {
             const tx = _endScreen.x - _hitScreen.x
             const ty = _endScreen.y - _hitScreen.y
             const tlen = Math.hypot(tx, ty)
-            if (tlen < 0.3) continue // axis nearly view-aligned — poor screen tangent
+            if (tlen < 0.3) continue // axis nearly view-aligned
 
             const dot = tx * dx + ty * dy
-            const cosSim = dot / (tlen * dist) // signed
-            const score = Math.abs(cosSim)
+            const score = Math.abs(dot) / (tlen * dist)
             if (score > bestScore) {
               bestScore = score
               bestAxis = av.key
               bestTangent = new THREE.Vector2(tx / tlen, ty / tlen)
-              bestDirSign = dot >= 0 ? 1 : -1
             }
           }
-
-          if (bestDirSign < 0) bestTangent.multiplyScalar(-1)
 
           const hitComp =
             bestAxis === 'x' ? hit.x : bestAxis === 'y' ? hit.y : hit.z
