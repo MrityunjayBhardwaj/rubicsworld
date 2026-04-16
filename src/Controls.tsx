@@ -9,6 +9,7 @@ export function Controls() {
   const reset = usePlanet(s => s.reset)
   const setShowLabels = usePlanet(s => s.setShowLabels)
   const setShowRing = usePlanet(s => s.setShowRing)
+  const setCommitThreshold = usePlanet(s => s.setCommitThreshold)
 
   useControls({
     Ring: {
@@ -18,6 +19,13 @@ export function Controls() {
     'Tile numbers': {
       value: false,
       onChange: (v: boolean) => setShowLabels(v),
+    },
+    'Commit threshold (°)': {
+      value: 22.5,
+      min: 5,
+      max: 45,
+      step: 0.5,
+      onChange: (v: number) => setCommitThreshold((v * Math.PI) / 180),
     },
     Scramble: button(() => scramble(20)),
     'Scramble (animated)': button(() => void scrambleAnimated(20)),

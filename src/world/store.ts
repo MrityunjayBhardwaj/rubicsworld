@@ -25,10 +25,12 @@ interface PlanetStore {
   showLabels: boolean
   showRing: boolean
   onPlanet: boolean
+  commitThreshold: number // radians; drag past this and release → commit
 
   setShowLabels: (v: boolean) => void
   setShowRing: (v: boolean) => void
   setOnPlanet: (v: boolean) => void
+  setCommitThreshold: (v: number) => void
 
   beginDragAt: (axis: Axis, slice: number) => void
   updateDrag: (angle: number) => void
@@ -68,10 +70,12 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   showLabels: false,
   showRing: false,
   onPlanet: false,
+  commitThreshold: Math.PI / 8, // ~22.5°, much lighter than physical 45°
 
   setShowLabels: v => set({ showLabels: v }),
   setShowRing: v => set({ showRing: v }),
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
+  setCommitThreshold: v => set({ commitThreshold: v }),
 
   beginDragAt: (axis, slice) =>
     set(s => {
@@ -97,8 +101,9 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
         resolve()
         return
       }
+      const threshold = s.commitThreshold
       const commitDir: Direction | 0 =
-        a >= Math.PI / 4 ? 1 : a <= -Math.PI / 4 ? -1 : 0
+        a >= threshold ? 1 : a <= -threshold ? -1 : 0
       const to = commitDir === 0 ? 0 : commitDir * (Math.PI / 2)
       animResolver = resolve
       set({
