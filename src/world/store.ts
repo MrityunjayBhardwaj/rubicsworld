@@ -70,7 +70,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   showLabels: false,
   showRing: false,
   onPlanet: false,
-  commitThreshold: Math.PI / 8, // ~22.5°, much lighter than physical 45°
+  commitThreshold: (6.5 * Math.PI) / 180, // 6.5° — tuned for a light digital feel
 
   setShowLabels: v => set({ showLabels: v }),
   setShowRing: v => set({ showRing: v }),

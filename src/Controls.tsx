@@ -21,8 +21,8 @@ export function Controls() {
       onChange: (v: boolean) => setShowLabels(v),
     },
     'Commit threshold (°)': {
-      value: 22.5,
-      min: 5,
+      value: 6.5,
+      min: 3,
       max: 45,
       step: 0.5,
       onChange: (v: number) => setCommitThreshold((v * Math.PI) / 180),
