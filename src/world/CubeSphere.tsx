@@ -1,11 +1,11 @@
 import { useMemo } from 'react'
 import { useSpring, animated, easings } from '@react-spring/three'
 import { buildAllTileGeometries, type TileMeshDef } from './tileGeometry'
-import { usePlanet, type ActiveRotation } from './store'
+import { usePlanet, type AnimState, type DragState } from './store'
 import { tileInSlice, type Axis } from './rotation'
 import type { Tile } from './tile'
 
-const ROTATE_MS = 400
+const ROTATE_MS = 380
 
 const AXIS_TUPLE: Record<Axis, [number, number, number]> = {
   x: [1, 0, 0],
@@ -27,34 +27,43 @@ function TileMesh({ tile, geom }: { tile: Tile; geom: TileMeshDef }) {
   )
 }
 
-function ActiveSlice({
+function useSlicedIds(tiles: readonly Tile[], axis: Axis, slice: number) {
+  return useMemo(() => {
+    const set = new Set<number>()
+    for (const t of tiles) if (tileInSlice(t, axis, slice)) set.add(t.id)
+    return set
+  }, [tiles, axis, slice])
+}
+
+function StaticPlanet({ tiles, geoms }: { tiles: readonly Tile[]; geoms: TileMeshDef[] }) {
+  return (
+    <>
+      {tiles.map(t => (
+        <TileMesh key={t.id} tile={t} geom={geoms[t.id]} />
+      ))}
+    </>
+  )
+}
+
+function AnimSlice({
   tiles,
   geoms,
-  active,
-  onDone,
+  anim,
+  onRest,
 }: {
   tiles: readonly Tile[]
   geoms: TileMeshDef[]
-  active: ActiveRotation
-  onDone: () => void
+  anim: AnimState
+  onRest: () => void
 }) {
-  const targetAngle = (active.dir * Math.PI) / 2
-  const axisTuple = AXIS_TUPLE[active.axis]
-
+  const axisTuple = AXIS_TUPLE[anim.axis]
   const { rot } = useSpring({
-    from: { rot: 0 },
-    to: { rot: targetAngle },
+    from: { rot: anim.from },
+    to: { rot: anim.to },
     config: { duration: ROTATE_MS, easing: easings.easeInOutCubic },
-    onRest: onDone,
+    onRest,
   })
-
-  const slicedIds = useMemo(() => {
-    const set = new Set<number>()
-    for (const t of tiles) {
-      if (tileInSlice(t, active.axis, active.slice)) set.add(t.id)
-    }
-    return set
-  }, [tiles, active.axis, active.slice])
+  const slicedIds = useSlicedIds(tiles, anim.axis, anim.slice)
 
   return (
     <>
@@ -76,24 +85,50 @@ function ActiveSlice({
   )
 }
 
+function DragSlice({
+  tiles,
+  geoms,
+  drag,
+}: {
+  tiles: readonly Tile[]
+  geoms: TileMeshDef[]
+  drag: DragState
+}) {
+  const axisTuple = AXIS_TUPLE[drag.axis]
+  const r = drag.angle
+  const rot: [number, number, number] = [axisTuple[0] * r, axisTuple[1] * r, axisTuple[2] * r]
+  const slicedIds = useSlicedIds(tiles, drag.axis, drag.slice)
+
+  return (
+    <>
+      {tiles.map(t => {
+        const g = geoms[t.id]
+        if (!slicedIds.has(t.id)) return <TileMesh key={t.id} tile={t} geom={g} />
+        return (
+          <group key={t.id} rotation={rot}>
+            <TileMesh tile={t} geom={g} />
+          </group>
+        )
+      })}
+    </>
+  )
+}
+
 export function CubeSphere() {
   const geoms = useMemo(() => buildAllTileGeometries(), [])
   const tiles = usePlanet(s => s.tiles)
-  const active = usePlanet(s => s.active)
-  const commit = usePlanet(s => s.commitActive)
+  const anim = usePlanet(s => s.anim)
+  const drag = usePlanet(s => s.drag)
+  const finishAnim = usePlanet(s => s._finishAnim)
 
   return (
     <group>
-      {active ? (
-        <ActiveSlice
-          key={active.id}
-          tiles={tiles}
-          geoms={geoms}
-          active={active}
-          onDone={commit}
-        />
+      {anim ? (
+        <AnimSlice key={anim.id} tiles={tiles} geoms={geoms} anim={anim} onRest={finishAnim} />
+      ) : drag ? (
+        <DragSlice tiles={tiles} geoms={geoms} drag={drag} />
       ) : (
-        tiles.map(t => <TileMesh key={t.id} tile={t} geom={geoms[t.id]} />)
+        <StaticPlanet tiles={tiles} geoms={geoms} />
       )}
     </group>
   )
