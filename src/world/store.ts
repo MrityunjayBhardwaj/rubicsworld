@@ -44,6 +44,7 @@ interface PlanetStore {
   rotateAnimated: (m: Move) => Promise<void>
   rotateInstant: (m: Move) => void
   reset: () => void
+  solve: () => void
   scrambleInstant: (n?: number) => void
   scrambleAnimated: (n?: number) => Promise<void>
 
@@ -177,6 +178,24 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
       aiHasFired: false,
       lastPlayerActionAt: performance.now(),
     }),
+
+  solve: () => {
+    // Snap to the canonical solved state. Unlike reset(), this fires the
+    // planet:settled event so the warmth/bloom ramp in PostFx triggers —
+    // same payoff the player gets from an organic solve.
+    const s = get()
+    const wasSolved = s.solved
+    set({
+      tiles: buildSolvedTiles(),
+      solved: true,
+      anim: null,
+      drag: null,
+      lastPlayerActionAt: performance.now(),
+    })
+    if (!wasSolved) {
+      window.dispatchEvent(new CustomEvent('planet:settled'))
+    }
+  },
 
   scrambleInstant: (n = 20) =>
     set(() => {
