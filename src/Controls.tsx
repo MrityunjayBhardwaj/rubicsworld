@@ -3,7 +3,15 @@ import { button, useControls } from 'leva'
 import { usePlanet } from './world/store'
 import { runRotationSelfTest } from './world/selfTest'
 
-export function Controls() {
+type PreviewMode = false | 'grid' | 'split' | 'cube'
+
+export function Controls({
+  dioramaPreview,
+  setDioramaPreview,
+}: {
+  dioramaPreview: PreviewMode
+  setDioramaPreview: (v: PreviewMode) => void
+}) {
   const scramble = usePlanet(s => s.scrambleInstant)
   const scrambleAnimated = usePlanet(s => s.scrambleAnimated)
   const reset = usePlanet(s => s.reset)
@@ -13,6 +21,9 @@ export function Controls() {
   const setAiEnabled = usePlanet(s => s.setAiEnabled)
 
   useControls({
+    'Diorama (grid)': button(() => setDioramaPreview(dioramaPreview === 'grid' ? false : 'grid')),
+    'Diorama (split)': button(() => setDioramaPreview(dioramaPreview === 'split' ? false : 'split')),
+    'Diorama (cube)': button(() => setDioramaPreview(dioramaPreview === 'cube' ? false : 'cube')),
     Ring: {
       value: false,
       onChange: (v: boolean) => setShowRing(v),

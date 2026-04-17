@@ -1,12 +1,14 @@
+import { useState, useCallback } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
-import { CubeSphere } from './world/CubeSphere'
 import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
 import { Lights } from './world/Lights'
-import { PostFx } from './world/PostFx'
 import { AiSeed } from './world/AiSeed'
+import { TileGrid } from './diorama/TileGrid'
+import { DioramaGrid } from './diorama/DioramaGrid'
+import { BezierCurveEditor } from './diorama/BezierCurveEditor'
 import { Controls } from './Controls'
 import { usePlanet } from './world/store'
 
@@ -24,31 +26,55 @@ function Cursor() {
 }
 
 export default function App() {
+  const [preview, setPreview] = useState<false | 'grid' | 'split' | 'cube'>(false)
+  const [bezier, setBezier] = useState({ cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 })
+  const onBezierChange = useCallback((cx1: number, cy1: number, cx2: number, cy2: number) => {
+    setBezier({ cx1, cy1, cx2, cy2 })
+  }, [])
+
   return (
     <>
-      <Controls />
+      <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />
       <Cursor />
+      {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <Canvas
-        camera={{ position: [2.4, 1.6, 2.8], fov: 45 }}
-        gl={{ antialias: true }}
+        camera={{
+          position: preview ? [0, 14, 0.1] : [2.4, 1.6, 2.8],
+          fov: preview ? 50 : 45,
+        }}
+        shadows={!!preview}
+        gl={{ antialias: true, stencil: true }}
         dpr={[1, 2]}
       >
         <color attach="background" args={['#0a0d12']} />
-        <Lights />
-        <CubeSphere />
-        <Ring />
-        <Interaction />
-        <AiSeed />
-        <PostFx />
+        {preview === 'grid' ? (
+          <>
+            <DioramaGrid />
+            <gridHelper args={[4, 8, '#333', '#222']} position={[0, -0.02, 0]} />
+          </>
+        ) : preview === 'split' || preview === 'cube' ? (
+          <>
+            <TileGrid mode={preview} />
+            <gridHelper args={[8, 16, '#333', '#222']} position={[0, -0.02, 0]} />
+          </>
+        ) : (
+          <>
+            <Lights />
+            <TileGrid mode="sphere" bezier={bezier} />
+            <Ring />
+            <Interaction />
+            <AiSeed />
+          </>
+        )}
         <OrbitControls
-          enablePan={false}
+          enablePan={!!preview}
           mouseButtons={{
             LEFT: THREE.MOUSE.ROTATE,
             MIDDLE: THREE.MOUSE.DOLLY,
-            RIGHT: THREE.MOUSE.ROTATE,
+            RIGHT: preview ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE,
           }}
-          minDistance={2.5}
-          maxDistance={8}
+          minDistance={preview ? 0.5 : 2.5}
+          maxDistance={preview ? 20 : 8}
         />
       </Canvas>
     </>
