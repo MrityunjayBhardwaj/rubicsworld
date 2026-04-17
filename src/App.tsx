@@ -6,6 +6,7 @@ import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
 import { Lights } from './world/Lights'
 import { AiSeed } from './world/AiSeed'
+import { PostFx } from './world/PostFx'
 import { TileGrid } from './diorama/TileGrid'
 import { DioramaGrid } from './diorama/DioramaGrid'
 import { BezierCurveEditor } from './diorama/BezierCurveEditor'
@@ -65,6 +66,7 @@ export default function App() {
             <Ring />
             <Interaction />
             <AiSeed />
+            <PostFx />
           </>
         )}
         <OrbitControls

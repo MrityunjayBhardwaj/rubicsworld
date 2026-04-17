@@ -7,9 +7,10 @@
  * ONE diorama — rendered 24 times with different clip planes + transform.
  */
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
+import { useFBO } from '@react-three/drei'
 import { buildDiorama, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
 import { COLS, ROWS, CELL, cellFace } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
@@ -412,6 +413,32 @@ export function TileGrid({ mode = 'split', bezier }: {
   const rendersRef = useRef<CellRender[]>([])
   const sphereUniformsRef = useRef<SphereUniforms | null>(null)
   const animStartRef = useRef<{ id: number; start: number } | null>(null)
+  const quadRef = useRef<THREE.Mesh | null>(null)
+
+  // Offscreen target for the 24-pass sphere output. Post-fx runs on a
+  // fullscreen quad sampling this texture, so bloom/vignette can coexist
+  // with the custom render loop.
+  const sphereTarget = useFBO()
+
+  const quadMaterial = useMemo(() => new THREE.ShaderMaterial({
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = vec4(position.xy, 0.0, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D uMap;
+      varying vec2 vUv;
+      void main() {
+        gl_FragColor = texture2D(uMap, vUv);
+      }
+    `,
+    uniforms: { uMap: { value: sphereTarget.texture } },
+    depthTest: false,
+    depthWrite: false,
+  }), [sphereTarget])
 
   useEffect(() => {
     gl.localClippingEnabled = true
@@ -486,6 +513,16 @@ export function TileGrid({ mode = 'split', bezier }: {
 
     const prevAutoClear = gl.autoClear
     gl.autoClear = false
+
+    // In sphere mode, render everything to an offscreen target so PostFx
+    // can post-process the composited result via a fullscreen quad.
+    // The quad lives in the same R3F scene — hide it for this pass to
+    // avoid sampling itself.
+    const renderingToTarget = mode === 'sphere'
+    if (renderingToTarget) {
+      if (quadRef.current) quadRef.current.visible = false
+      gl.setRenderTarget(sphereTarget)
+    }
 
     gl.clear(true, true, true)
 
@@ -594,8 +631,24 @@ export function TileGrid({ mode = 'split', bezier }: {
     }
 
     gl.clippingPlanes = []
+    if (renderingToTarget) {
+      gl.setRenderTarget(null)
+      if (quadRef.current) quadRef.current.visible = true
+    }
     gl.autoClear = prevAutoClear
   }, 1)
 
+  if (mode === 'sphere') {
+    return (
+      <mesh
+        ref={quadRef}
+        material={quadMaterial}
+        renderOrder={-1000}
+        frustumCulled={false}
+      >
+        <planeGeometry args={[2, 2]} />
+      </mesh>
+    )
+  }
   return null
 }
