@@ -352,9 +352,8 @@ function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUnifor
       // Correct normals for sphere curvature
       #ifdef USE_NORMAL
         vec3 sphereNormal = normalize(sphereBase);
-        // Blend object normal with sphere normal based on height
-        // Ground-level geometry follows sphere, tall objects keep their own normals
-        float normalBlend = clamp(1.0 - height * 2.0, 0.0, 1.0);
+        // Ground-level geometry follows the sphere, tall objects keep their own normals.
+        float normalBlend = clamp(1.0 - normalizedH * 2.0, 0.0, 1.0);
         vNormal = normalize(mix(vNormal, normalMatrix * sphereNormal, normalBlend));
       #endif
 
