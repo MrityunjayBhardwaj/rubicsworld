@@ -14,7 +14,14 @@ import { buildDiorama, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
 import { COLS, ROWS, CELL, cellFace } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
 import { usePlanet } from '../world/store'
+import { AXIS_VEC, tileInSlice, type Axis } from '../world/rotation'
 import type { Tile } from '../world/tile'
+
+const SLICE_ROT_MS = 380
+
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+}
 
 export type TileMode = 'split' | 'cube' | 'sphere'
 
@@ -404,6 +411,7 @@ export function TileGrid({ mode = 'split', bezier }: {
   const overlaySceneRef = useRef<THREE.Scene | null>(null)
   const rendersRef = useRef<CellRender[]>([])
   const sphereUniformsRef = useRef<SphereUniforms | null>(null)
+  const animStartRef = useRef<{ id: number; start: number } | null>(null)
 
   useEffect(() => {
     gl.localClippingEnabled = true
@@ -498,18 +506,70 @@ export function TileGrid({ mode = 'split', bezier }: {
     }
 
     if (mode === 'sphere') {
-      // Read tile state from the store — tiles move when scrambled
-      const tiles = usePlanet.getState().tiles
+      // Read tile state plus any in-flight drag/anim from the store.
+      const state = usePlanet.getState()
+      const { tiles, drag, anim } = state
+
+      // Resolve the active rotation (drag wins over anim). Angle is applied
+      // as an extra rotation around the origin to every tile in the slice.
+      let activeAxis: Axis | null = null
+      let activeSlice = 0
+      let activeAngle = 0
+
+      if (drag) {
+        activeAxis = drag.axis
+        activeSlice = drag.slice
+        activeAngle = drag.angle
+        animStartRef.current = null
+      } else if (anim) {
+        if (animStartRef.current?.id !== anim.id) {
+          animStartRef.current = { id: anim.id, start: clock.elapsedTime }
+        }
+        const elapsed = clock.elapsedTime - animStartRef.current.start
+        const t = Math.min(1, elapsed / (SLICE_ROT_MS / 1000))
+        const eased = easeInOutCubic(t)
+        activeAxis = anim.axis
+        activeSlice = anim.slice
+        activeAngle = anim.from + (anim.to - anim.from) * eased
+        if (t >= 1) {
+          animStartRef.current = null
+          // Commit the rotation to tiles; takes effect next frame.
+          state._finishAnim()
+        }
+      } else {
+        animStartRef.current = null
+      }
+
+      const sliceQuat = activeAxis && activeAngle !== 0
+        ? new THREE.Quaternion().setFromAxisAngle(AXIS_VEC[activeAxis], activeAngle)
+        : null
+
       for (const tile of tiles) {
         const r = storeTileCubeRender(tile, SPHERE_GAP)
-        gl.clippingPlanes = r.clipPlanes
+        let position = r.position
+        let quaternion = r.quaternion
+        let clipPlanes = r.clipPlanes
+        let faceNormal = FACES[tile.face].normal
 
-        if (su) {
-          su.uFaceNormal.value.copy(FACES[tile.face].normal)
+        if (sliceQuat && activeAxis && tileInSlice(tile, activeAxis, activeSlice)) {
+          // Rotate around origin: position rotates, plane normals rotate,
+          // plane constants stay the same (dot products invariant under
+          // origin-centered rotation), and the face-normal uniform follows
+          // so the sphere projection computes the same per-vertex height.
+          position = position.clone().applyQuaternion(sliceQuat)
+          quaternion = sliceQuat.clone().multiply(quaternion)
+          clipPlanes = clipPlanes.map(p => new THREE.Plane(
+            p.normal.clone().applyQuaternion(sliceQuat),
+            p.constant,
+          ))
+          faceNormal = faceNormal.clone().applyQuaternion(sliceQuat)
         }
 
-        diorama.root.quaternion.copy(r.quaternion)
-        diorama.root.position.copy(r.position)
+        gl.clippingPlanes = clipPlanes
+        if (su) su.uFaceNormal.value.copy(faceNormal)
+
+        diorama.root.quaternion.copy(quaternion)
+        diorama.root.position.copy(position)
         diorama.root.updateMatrix()
         diorama.root.updateMatrixWorld(true)
         gl.render(dScene, camera)
