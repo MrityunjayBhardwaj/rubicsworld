@@ -41,6 +41,7 @@ export default function App() {
         camera={{
           position: preview ? [0, 14, 0.1] : [2.4, 1.6, 2.8],
           fov: preview ? 50 : 45,
+          near: 0.01,
         }}
         shadows={!!preview}
         gl={{ antialias: true, stencil: true }}

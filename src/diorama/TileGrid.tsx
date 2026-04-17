@@ -412,6 +412,12 @@ export function TileGrid({ mode = 'split', bezier }: {
     const diorama = buildDiorama()
     dioramaRef.current = diorama
 
+    // Disable frustum culling — the sphere projection shader moves vertices
+    // to positions that differ from the bounding sphere Three.js computes
+    // from cube-space geometry. Without this, objects near the screen edge
+    // get incorrectly culled.
+    diorama.root.traverse(child => { child.frustumCulled = false })
+
     const dScene = new THREE.Scene()
     dScene.add(diorama.root)
     dScene.add(new THREE.AmbientLight(0xffffff, 0.5))

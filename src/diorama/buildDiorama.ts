@@ -40,9 +40,8 @@ function buildTerrain(): THREE.Mesh {
     const x = pos.getX(i)
     const z = pos.getZ(i)
     const rawH = pseudoNoise(x, z)
-    const h = Math.max(0, rawH) // geometry stays above Y=0
-    pos.setY(i, h)
-    const g1 = 0.38 + rawH * 2.5 + Math.sin(x * 11 + z * 7) * 0.06 // color uses raw noise (dark in low areas)
+    pos.setY(i, 0) // flat terrain
+    const g1 = 0.38 + rawH * 2.5 + Math.sin(x * 11 + z * 7) * 0.06 // color still varies (dark in low areas)
     colors[i * 3] = 0.28 + Math.sin(x * 5) * 0.04
     colors[i * 3 + 1] = g1
     colors[i * 3 + 2] = 0.12
