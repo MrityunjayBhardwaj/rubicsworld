@@ -76,8 +76,13 @@ function storeTileCubeRender(tile: Tile, gap: number): CellRender {
     .addScaledVector(currentFace.right, uOff)
     .addScaledVector(currentFace.up, vOff)
 
-  // Rotation to current face
-  const faceQuat = faceQuaternion(currentFace)
+  // Root rotation = tile.orientation · faceQuaternion(homeFace). orientation
+  // is the cumulative world-space rotation applied to this tile since the
+  // solved state, so this composes to the same value the animated path
+  // produces at anim-end — no pop on commit. At identity orientation (solved
+  // home tile, homeFace == currentFace) it reduces to faceQuaternion(currentFace).
+  const faceQuat = tile.orientation.clone()
+    .multiply(faceQuaternion(FACES[tile.homeFace]))
 
   // Position: align HOME content with CURRENT cube position
   const homeOffset = new THREE.Vector3(-home.homeX, 0, -home.homeZ)
