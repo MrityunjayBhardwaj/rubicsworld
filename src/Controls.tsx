@@ -16,6 +16,7 @@ export function Controls({
   const scrambleAnimated = usePlanet(s => s.scrambleAnimated)
   const reset = usePlanet(s => s.reset)
   const solve = usePlanet(s => s.solve)
+  const solveAnimated = usePlanet(s => s.solveAnimated)
   const setShowLabels = usePlanet(s => s.setShowLabels)
   const setShowRing = usePlanet(s => s.setShowRing)
   const setCommitThreshold = usePlanet(s => s.setCommitThreshold)
@@ -48,6 +49,7 @@ export function Controls({
     Scramble: button(() => scramble(20)),
     'Scramble (animated)': button(() => void scrambleAnimated(20)),
     Solve: button(() => solve()),
+    'Solve (animated)': button(() => void solveAnimated()),
     Reset: button(() => reset()),
     'Self-test (rotation math)': button(() => {
       const r = runRotationSelfTest(200, 30)

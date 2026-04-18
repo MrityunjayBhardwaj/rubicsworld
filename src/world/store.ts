@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { buildSolvedTiles, isSolved, type Tile } from './tile'
-import { rotateSlice, randomMove, type Axis, type Direction, type Move } from './rotation'
+import { rotateSlice, randomMove, inverseMove, type Axis, type Direction, type Move } from './rotation'
 
 export interface AnimState {
   id: number
@@ -29,6 +29,7 @@ interface PlanetStore {
   aiEnabled: boolean
   aiHasFired: boolean // per-playthrough latch; resets on scramble/reset
   lastPlayerActionAt: number // ms timestamp of last committed player rotation
+  history: Move[] // moves applied since last reset/solve — replayed in reverse by solveAnimated
 
   setShowLabels: (v: boolean) => void
   setShowRing: (v: boolean) => void
@@ -45,31 +46,34 @@ interface PlanetStore {
   rotateInstant: (m: Move) => void
   reset: () => void
   solve: () => void
+  solveAnimated: () => Promise<void>
   scrambleInstant: (n?: number) => void
   scrambleAnimated: (n?: number) => Promise<void>
 
   _finishAnim: () => void
 }
 
-function makeScrambledTiles(n: number): Tile[] {
+function makeScrambledTiles(n: number): { tiles: Tile[]; moves: Move[] } {
   let tiles = buildSolvedTiles()
   let prev: Move | undefined
+  const moves: Move[] = []
   for (let i = 0; i < n; i++) {
     const m = randomMove(Math.random, prev)
     tiles = rotateSlice(tiles, m.axis, m.slice, m.dir)
+    moves.push(m)
     prev = m
   }
-  return tiles
+  return { tiles, moves }
 }
 
 const INITIAL_SCRAMBLE_MOVES = 20
-const initialTiles = makeScrambledTiles(INITIAL_SCRAMBLE_MOVES)
+const initialScramble = makeScrambledTiles(INITIAL_SCRAMBLE_MOVES)
 
 let animCounter = 0
 let animResolver: (() => void) | null = null
 
 function applyRotation(
-  s: Pick<PlanetStore, 'tiles' | 'solved'>,
+  s: Pick<PlanetStore, 'tiles' | 'solved' | 'history'>,
   axis: Axis,
   slice: number,
   dir: Direction,
@@ -79,12 +83,16 @@ function applyRotation(
   if (!s.solved && nowSolved) {
     window.dispatchEvent(new CustomEvent('planet:settled'))
   }
-  return { tiles: newTiles, solved: nowSolved }
+  return {
+    tiles: newTiles,
+    solved: nowSolved,
+    history: [...s.history, { axis, slice, dir }],
+  }
 }
 
 export const usePlanet = create<PlanetStore>((set, get) => ({
-  tiles: initialTiles,
-  solved: isSolved(initialTiles),
+  tiles: initialScramble.tiles,
+  solved: isSolved(initialScramble.tiles),
   anim: null,
   drag: null,
   showLabels: false,
@@ -94,6 +102,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   aiEnabled: true,
   aiHasFired: false,
   lastPlayerActionAt: typeof performance !== 'undefined' ? performance.now() : 0,
+  history: initialScramble.moves,
 
   setShowLabels: v => set({ showLabels: v }),
   setShowRing: v => set({ showRing: v }),
@@ -177,6 +186,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
       drag: null,
       aiHasFired: false,
       lastPlayerActionAt: performance.now(),
+      history: [],
     }),
 
   solve: () => {
@@ -191,15 +201,36 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
       anim: null,
       drag: null,
       lastPlayerActionAt: performance.now(),
+      history: [],
     })
     if (!wasSolved) {
       window.dispatchEvent(new CustomEvent('planet:settled'))
     }
   },
 
+  solveAnimated: async () => {
+    // Play the recorded history in reverse, each move inverted — lands the
+    // puzzle back at solved with one animated slice per step.
+    const s = get()
+    if (s.solved || s.anim || s.drag) return
+    const history = s.history.slice()
+    // Clear history first so each rotateAnimated's applyRotation appends
+    // fresh inverse moves (keeps state self-consistent if interrupted).
+    set({ history: [] })
+    const { rotateAnimated } = get()
+    for (let i = history.length - 1; i >= 0; i--) {
+      // Stop early if the user interacted mid-solve.
+      const cur = get()
+      if (cur.drag) break
+      const inv = inverseMove(history[i])
+      // eslint-disable-next-line no-await-in-loop
+      await rotateAnimated(inv)
+    }
+  },
+
   scrambleInstant: (n = 20) =>
     set(() => {
-      const tiles = makeScrambledTiles(n)
+      const { tiles, moves } = makeScrambledTiles(n)
       // Not firing planet:settled here — puzzle is now unsolved
       return {
         tiles,
@@ -208,6 +239,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
         drag: null,
         aiHasFired: false,
         lastPlayerActionAt: performance.now(),
+        history: moves,
       }
     }),
 
