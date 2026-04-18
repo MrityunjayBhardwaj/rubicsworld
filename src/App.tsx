@@ -7,6 +7,7 @@ import { Interaction } from './world/Interaction'
 import { Lights } from './world/Lights'
 import { AiSeed } from './world/AiSeed'
 import { PostFx } from './world/PostFx'
+import { TileLabels } from './world/TileLabels'
 import { TileGrid } from './diorama/TileGrid'
 import { DioramaGrid } from './diorama/DioramaGrid'
 import { BezierCurveEditor } from './diorama/BezierCurveEditor'
@@ -53,11 +54,13 @@ export default function App() {
           <>
             <DioramaGrid />
             <gridHelper args={[4, 8, '#333', '#222']} position={[0, -0.02, 0]} />
+            <TileLabels mode="grid" />
           </>
         ) : preview === 'split' || preview === 'cube' ? (
           <>
             <TileGrid mode={preview} />
             <gridHelper args={[8, 16, '#333', '#222']} position={[0, -0.02, 0]} />
+            <TileLabels mode={preview} />
           </>
         ) : (
           <>
@@ -66,6 +69,7 @@ export default function App() {
             <Ring />
             <Interaction />
             <AiSeed />
+            <TileLabels mode="sphere" />
             <PostFx />
           </>
         )}
