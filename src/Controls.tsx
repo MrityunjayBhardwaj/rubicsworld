@@ -22,9 +22,10 @@ export function Controls({
   const setAiEnabled = usePlanet(s => s.setAiEnabled)
 
   useControls({
-    'Diorama (grid)': button(() => setDioramaPreview(dioramaPreview === 'grid' ? false : 'grid')),
-    'Diorama (split)': button(() => setDioramaPreview(dioramaPreview === 'split' ? false : 'split')),
-    'Diorama (cube)': button(() => setDioramaPreview(dioramaPreview === 'cube' ? false : 'cube')),
+    'View: Cube net': button(() => setDioramaPreview(dioramaPreview === 'grid' ? false : 'grid')),
+    'View: Split': button(() => setDioramaPreview(dioramaPreview === 'split' ? false : 'split')),
+    'View: Cube': button(() => setDioramaPreview(dioramaPreview === 'cube' ? false : 'cube')),
+    'View: Sphere (planet)': button(() => setDioramaPreview(false)),
     Ring: {
       value: false,
       onChange: (v: boolean) => setShowRing(v),
