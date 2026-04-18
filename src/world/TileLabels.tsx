@@ -34,8 +34,11 @@ export const FACE_LABEL_COLORS = [
   '#7a8aa0', // F  -Z
 ] as const
 
+// Index within a face follows reading order (top-left = 1, top-right = 2,
+// bottom-left = 3, bottom-right = 4) when the face is viewed from outside
+// the cube with face.up pointing up on screen.
 function labelFor(face: number, u: number, v: number): string {
-  const idx = v * 2 + u + 1
+  const idx = (1 - v) * 2 + u + 1
   return `${FACE_LETTERS[face]}${idx}`
 }
 
