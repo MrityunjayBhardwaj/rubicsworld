@@ -427,17 +427,6 @@ function buildRocks(): THREE.Group {
   return g
 }
 
-// ── base boundary ────────────────────────────────────────────────────
-
-function buildBase(): THREE.Mesh {
-  const g = new THREE.PlaneGeometry(BASE_W, BASE_H, 48, 32)
-  g.rotateX(-Math.PI / 2)
-  const m = new THREE.Mesh(g, mat({ color: '#3a2a1a', roughness: 1 }))
-  m.position.y = -0.001
-  m.name = 'base'
-  return m
-}
-
 // ── compose ──────────────────────────────────────────────────────────
 
 export interface DioramaScene {
@@ -460,7 +449,6 @@ export function buildDiorama(): DioramaScene {
   // Chimney smoke from the hut on E.
   const smoke = buildSmoke(-1.0, -0.7)
 
-  root.add(buildBase())
   root.add(buildTerrain())
   root.add(pond.mesh)
   root.add(stream.mesh)
