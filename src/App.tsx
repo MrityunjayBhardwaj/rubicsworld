@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { Canvas } from '@react-three/fiber'
-import { OrbitControls } from '@react-three/drei'
+import { OrbitControls, TrackballControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
@@ -76,16 +76,31 @@ export default function App() {
             <PostFx />
           </>
         )}
-        <OrbitControls
-          enablePan={!!preview}
-          mouseButtons={{
-            LEFT: THREE.MOUSE.ROTATE,
-            MIDDLE: THREE.MOUSE.DOLLY,
-            RIGHT: preview ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE,
-          }}
-          minDistance={preview ? 0.5 : 2.5}
-          maxDistance={preview ? 20 : 8}
-        />
+        {preview ? (
+          <OrbitControls
+            enablePan={true}
+            mouseButtons={{
+              LEFT: THREE.MOUSE.ROTATE,
+              MIDDLE: THREE.MOUSE.DOLLY,
+              RIGHT: THREE.MOUSE.PAN,
+            }}
+            minDistance={0.5}
+            maxDistance={20}
+          />
+        ) : (
+          // Trackball for the sphere — quaternion-based, no up-vector lock,
+          // so dragging past the poles wraps seamlessly for a true 360° orbit.
+          <TrackballControls
+            rotateSpeed={3}
+            zoomSpeed={1}
+            panSpeed={0.8}
+            noPan={true}
+            minDistance={2.5}
+            maxDistance={8}
+            staticMoving={false}
+            dynamicDampingFactor={0.15}
+          />
+        )}
       </Canvas>
     </>
   )
