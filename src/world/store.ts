@@ -37,6 +37,10 @@ interface PlanetStore {
   showRing: boolean
   onPlanet: boolean
   hoveredTile: HoveredTile | null
+  /** True at t=0 (HUD covers entire planet as a tutorial attract). Flips
+   *  to false on the first successful player commit. TileGrid's useFrame
+   *  reads this and eases the shader's uHudOpacity uniform 1→0. */
+  hudAttractMode: boolean
   commitThreshold: number // radians; drag past this and release → commit
   aiEnabled: boolean
   aiHasFired: boolean // per-playthrough latch; resets on scramble/reset
@@ -86,7 +90,7 @@ let animCounter = 0
 let animResolver: (() => void) | null = null
 
 function applyRotation(
-  s: Pick<PlanetStore, 'tiles' | 'solved' | 'history'>,
+  s: Pick<PlanetStore, 'tiles' | 'solved' | 'history' | 'hudAttractMode'>,
   axis: Axis,
   slice: number,
   dir: Direction,
@@ -100,6 +104,9 @@ function applyRotation(
     tiles: newTiles,
     solved: nowSolved,
     history: [...s.history, { axis, slice, dir }],
+    // First player commit retires attract mode. TileGrid eases the shader
+    // uniform from 1 → 0 over ~1 s.
+    hudAttractMode: s.hudAttractMode ? false : s.hudAttractMode,
   }
 }
 
@@ -112,6 +119,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   showRing: false,
   onPlanet: false,
   hoveredTile: null,
+  hudAttractMode: true,
   commitThreshold: (6.5 * Math.PI) / 180, // 6.5° — tuned for a light digital feel
   aiEnabled: true,
   aiHasFired: false,

@@ -71,6 +71,30 @@ export const sliceRotUniforms = {
   uTileOriInv:  { value: _oriInvFlat },
 }
 
+/** Polka-dot HUD overlay uniforms, rendered by the global terrain's triplanar
+ *  fragment shader on top of the grass.
+ *
+ *  - uHudOpacity: global attract fade. 1.0 at t=0 (entire planet shows dots),
+ *    animated to 0.0 after first player commit — then only cursor reveals.
+ *  - uHudCursor: world-space cursor position, published by Interaction.tsx
+ *    on raycast hits.
+ *  - uHudCursorActive: 1.0 when cursor is on planet, 0.0 otherwise.
+ *  - uHudHoverRadius: world-space sigma of the gaussian cursor-proximity
+ *    falloff. 0.35 ≈ one-third of a cube face.
+ *  - uHudTileEdgeMask[96]: per-edge mask for L3 easy-mode correctness colors.
+ *    Layout: tileIdx * 4 + edgeIdx, where edge order is +right / -right /
+ *    +up / -up in face-local coords. 0 = correct neighbor, 1 = wrong.
+ *    All zeros in L2 (no-op); L3 wires it. */
+const _hudEdgeMaskFlat = new Float32Array(TILE_COUNT * 4)  // all zeros
+export const hudUniforms = {
+  uHudOpacity:       { value: 1.0 },
+  uHudCursor:        { value: new THREE.Vector3(0, 0, 0) },
+  uHudCursorActive:  { value: 0.0 },
+  uHudHoverRadius:   { value: 0.35 },
+  uHudTileEdgeMask:  { value: _hudEdgeMaskFlat },
+  uHudEasyMode:      { value: 0.0 },   // 0 = monochrome dots, 1 = green/red
+}
+
 /** Compose-safe fragment-shader patch that scales the indirect-specular
  *  radiance by uFresnelScale. Preserves any existing onBeforeCompile so
  *  it stacks with TileGrid's sphere-projection vertex patch.
@@ -133,6 +157,13 @@ function patchMaterialForTriplanar(material: THREE.Material, texture: THREE.Text
     shader.uniforms.uSliceSign = sliceRotUniforms.uSliceSign
     shader.uniforms.uSliceActive = sliceRotUniforms.uSliceActive
     shader.uniforms.uTileOriInv = sliceRotUniforms.uTileOriInv
+    // HUD overlay (dot pattern + cursor reveal + correctness colors)
+    shader.uniforms.uHudOpacity = hudUniforms.uHudOpacity
+    shader.uniforms.uHudCursor = hudUniforms.uHudCursor
+    shader.uniforms.uHudCursorActive = hudUniforms.uHudCursorActive
+    shader.uniforms.uHudHoverRadius = hudUniforms.uHudHoverRadius
+    shader.uniforms.uHudTileEdgeMask = hudUniforms.uHudTileEdgeMask
+    shader.uniforms.uHudEasyMode = hudUniforms.uHudEasyMode
 
     // Vertex: forward world-space position + normal to fragment.
     shader.vertexShader = shader.vertexShader.replace(
@@ -161,6 +192,12 @@ function patchMaterialForTriplanar(material: THREE.Material, texture: THREE.Text
        uniform float uSliceSign;
        uniform float uSliceActive;
        uniform vec4  uTileOriInv[24];
+       uniform float uHudOpacity;
+       uniform vec3  uHudCursor;
+       uniform float uHudCursorActive;
+       uniform float uHudHoverRadius;
+       uniform vec4  uHudTileEdgeMask[24];   // xyzw = +right, -right, +up, -up edge flags
+       uniform float uHudEasyMode;
        varying vec3 vTriWorldPos;
        varying vec3 vTriWorldNormal;
        vec3 rotateAxisAngle(vec3 p, vec3 axis, float ang) {
@@ -219,6 +256,11 @@ function patchMaterialForTriplanar(material: THREE.Material, texture: THREE.Text
          }
        }
        int tileIdx = computeTileIdx(worldP);
+       // Save post-slice-unwind, pre-orientation-unwind worldP for HUD.
+       // HUD dots anchor to the visible TILE's local frame (post-slice)
+       // but not to the tile's solved-state orientation (pre-ori) — this
+       // way dots sit on the tile as it rotates, same as the grass texture.
+       vec3 hudWorldP = worldP;
        vec4 oriInv = uTileOriInv[tileIdx];
        worldP = applyQuat(oriInv, worldP);
        worldN = applyQuat(oriInv, worldN);
@@ -229,7 +271,80 @@ function patchMaterialForTriplanar(material: THREE.Material, texture: THREE.Text
        vec4 triY = texture2D(uTriplanarMap, p.xz);
        vec4 triZ = texture2D(uTriplanarMap, p.xy);
        vec4 triCol = triX * triW.x + triY * triW.y + triZ * triW.z;
-       diffuseColor *= triCol;`,
+       diffuseColor *= triCol;
+
+       // ── HUD overlay ────────────────────────────────────────────
+       // 6×6 dot grid per tile, size boosted at tile edges and by
+       // cursor proximity. Global uHudOpacity drives attract mode
+       // (whole planet covered at t=0, fades to 0 after first commit).
+       {
+         // Re-derive face basis for hudWorldP (tile's visible cube cell).
+         vec3 absP = abs(hudWorldP);
+         vec3 fRight, fUp;
+         int hFace;
+         if (absP.x >= absP.y && absP.x >= absP.z) {
+           if (hudWorldP.x > 0.0) { hFace = 0; fRight = vec3(0.0, 0.0,-1.0); fUp = vec3(0.0, 1.0, 0.0); }
+           else                    { hFace = 1; fRight = vec3(0.0, 0.0, 1.0); fUp = vec3(0.0, 1.0, 0.0); }
+         } else if (absP.y >= absP.z) {
+           if (hudWorldP.y > 0.0) { hFace = 2; fRight = vec3(1.0, 0.0, 0.0); fUp = vec3(0.0, 0.0,-1.0); }
+           else                    { hFace = 3; fRight = vec3(1.0, 0.0, 0.0); fUp = vec3(0.0, 0.0, 1.0); }
+         } else {
+           if (hudWorldP.z > 0.0) { hFace = 4; fRight = vec3(1.0, 0.0, 0.0); fUp = vec3(0.0, 1.0, 0.0); }
+           else                    { hFace = 5; fRight = vec3(-1.0,0.0, 0.0); fUp = vec3(0.0, 1.0, 0.0); }
+         }
+         float dotR = dot(hudWorldP, fRight);
+         float dotU = dot(hudWorldP, fUp);
+         int tU = (dotR > 0.0) ? 1 : 0;
+         int tV = (dotU > 0.0) ? 0 : 1;
+         // Tile-local UV, each ∈ [-0.5, 0.5]. Uses the CELL=1 convention.
+         float uL = dotR - (float(tU) - 0.5);
+         float vL = dotU - (0.5 - float(tV));
+
+         // 6×6 dot grid per tile.
+         const float N_DOTS = 6.0;
+         float gU = floor(uL * N_DOTS + 0.5) / N_DOTS;
+         float gV = floor(vL * N_DOTS + 0.5) / N_DOTS;
+         float dotDist = length(vec2(uL - gU, vL - gV));
+
+         // Edge bias — dots near tile edges grow larger so boundaries emerge.
+         float edgeDist = min(0.5 - abs(uL), 0.5 - abs(vL));
+         float edgeBias = 1.0 - smoothstep(0.0, 0.15, edgeDist);
+
+         // Cursor proximity in world space (pre-slice-unwind cursor ↔
+         // pre-slice-unwind fragment position; use vTriWorldPos for the
+         // fragment so the cursor region doesn't shift mid-rotation).
+         float cd = distance(vTriWorldPos, uHudCursor);
+         float cursorW = uHudCursorActive * exp(-(cd*cd) / (uHudHoverRadius*uHudHoverRadius));
+
+         // Reveal = max(attract opacity, cursor proximity weight).
+         float reveal = max(uHudOpacity, cursorW);
+
+         // Dot radius scales with reveal and edge bias.
+         float baseR = 0.018;
+         float edgeR = 0.050;
+         float r = mix(baseR, edgeR, edgeBias) * reveal;
+         float dotMask = 1.0 - smoothstep(r * 0.55, r, dotDist);
+
+         // Easy-mode edge coloring (L3): sample the per-edge mask for this
+         // tile, pick whichever edge the fragment is nearest. In L2 the mask
+         // is all zeros → monochrome dots only.
+         vec4 mask = uHudTileEdgeMask[tileIdx];
+         float maskVal = (uL > 0.0 && edgeDist == 0.5 - abs(uL))
+           ? mask.x
+           : (uL < 0.0 && edgeDist == 0.5 - abs(uL))
+             ? mask.y
+             : (vL > 0.0 && edgeDist == 0.5 - abs(vL))
+               ? mask.z
+               : mask.w;
+         vec3 hudColMono = vec3(0.92, 0.95, 1.0);
+         vec3 hudColGood = vec3(0.55, 0.95, 0.55);
+         vec3 hudColBad  = vec3(0.95, 0.55, 0.45);
+         vec3 hudColEasy = mix(hudColGood, hudColBad, maskVal);
+         vec3 hudCol = mix(hudColMono, hudColEasy, uHudEasyMode * edgeBias);
+
+         float alpha = dotMask * reveal * 0.6;
+         diffuseColor.rgb = mix(diffuseColor.rgb, hudCol, alpha);
+       }`,
     )
   }
   material.customProgramCacheKey = () => (prevKey?.call(material) ?? '') + '|triplanar'

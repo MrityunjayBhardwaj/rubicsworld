@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useFBO } from '@react-three/drei'
-import { buildDiorama, buildSphereTerrain, fresnelUniform, sliceRotUniforms, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
+import { buildDiorama, buildSphereTerrain, fresnelUniform, sliceRotUniforms, hudUniforms, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
 import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
 import { usePlanet } from '../world/store'
@@ -652,6 +652,13 @@ export function TileGrid({ mode = 'split', bezier }: {
       if (m) applyIblKnobs(m)
     })
     if (terrainMeshRef.current) applyIblKnobs(terrainMeshRef.current.material)
+
+    // Ease HUD attract opacity toward its target. 1.0 while in attract mode
+    // (fresh session, no moves yet); 0.0 once the player commits their first
+    // rotation. ~1 s ease over the transition feels "aha, they got it."
+    const hudTarget = usePlanet.getState().hudAttractMode ? 1 : 0
+    const HUD_EASE = 0.04  // per-frame lerp factor ≈ 1s at 60fps
+    hudUniforms.uHudOpacity.value += (hudTarget - hudUniforms.uHudOpacity.value) * HUD_EASE
 
     diorama.update(clock.elapsedTime)
 

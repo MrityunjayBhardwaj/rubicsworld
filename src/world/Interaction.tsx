@@ -4,6 +4,7 @@ import * as THREE from 'three'
 import { usePlanet } from './store'
 import { centroidToFaceUV, tileCentroid, type Axis, type Direction, type Move } from './rotation'
 import { FACES, type FaceDef, type FaceIndex } from './faces'
+import { hudUniforms } from '../diorama/buildDiorama'
 
 // Pointer input lives here because both onPlanet tracking and drag-axis
 // resolution need the live camera for raycasting.
@@ -224,15 +225,18 @@ export function Interaction() {
 
       // No drag in progress — update onPlanet for orbit gating
       const tgt = e.target as HTMLElement | null
-      if (tgt && tgt.closest('[id^="leva"]')) {
+      if (tgt && typeof tgt.closest === 'function' && tgt.closest('[id^="leva"]')) {
         setOnPlanet(false)
         onPlanetRef.current = false
+        setHoveredTile(null)
+        hudUniforms.uHudCursorActive.value = 0
         return
       }
       if (cx < 0 || cy < 0 || cx > width() || cy > height()) {
         setOnPlanet(false)
         onPlanetRef.current = false
         setHoveredTile(null)
+        hudUniforms.uHudCursorActive.value = 0
         return
       }
 
@@ -244,6 +248,15 @@ export function Interaction() {
       // the ray actually hits the planet surface; the padded-ring region isn't
       // a tile, so pressing a key there would be ambiguous.
       setHoveredTile(hit ? sphereHitToTile(_hit) : null)
+      // Publish cursor world-pos to the HUD shader directly (no store churn
+      // per pointermove). When off-planet, mark cursor inactive so the
+      // terrain's gaussian proximity term zeros out.
+      if (hit) {
+        hudUniforms.uHudCursor.value.copy(_hit)
+        hudUniforms.uHudCursorActive.value = 1
+      } else {
+        hudUniforms.uHudCursorActive.value = 0
+      }
     }
 
     const onDown = (e: PointerEvent) => {
