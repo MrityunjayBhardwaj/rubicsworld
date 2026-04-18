@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useFBO } from '@react-three/drei'
-import { buildDiorama, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
+import { buildDiorama, buildSphereTerrain, fresnelUniform, sliceRotUniforms, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
 import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
 import { usePlanet } from '../world/store'
@@ -312,7 +312,19 @@ function createSphereUniforms(): SphereUniforms {
 }
 
 function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUniforms) {
-  material.onBeforeCompile = (shader) => {
+  // Compose with any existing onBeforeCompile (e.g. the Fresnel fragment
+  // patch applied in buildDiorama) so both patches coexist on the same
+  // material — last-wins assignment would silently drop Fresnel control.
+  // Idempotent: the bird flock shares one material across 30 meshes; without
+  // this guard every re-patch stacks another uniform declaration producing
+  // a duplicate-declaration GLSL compile error → invisible meshes.
+  const ud = material.userData as { __spherePatched?: boolean }
+  if (ud.__spherePatched) return
+  ud.__spherePatched = true
+  const prevOBC = material.onBeforeCompile
+  const prevKey = material.customProgramCacheKey
+  material.onBeforeCompile = (shader, renderer) => {
+    prevOBC?.call(material, shader, renderer)
     shader.uniforms.uFaceNormal = uniforms.uFaceNormal
 
     // Declare uniforms at top level (outside main)
@@ -379,12 +391,16 @@ function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUnifor
       vec3 sphereBase = normalize(basePoint);
       vec3 spherePos = sphereBase * (1.0 + curvedH);
 
-      // Correct normals for sphere curvature
+      // Correct normals for sphere curvature.
+      // sphereNormal is WORLD-space (radial from origin). To land in view
+      // space we apply mat3(viewMatrix), not normalMatrix — the latter
+      // expects object-space input and would yield a garbage direction,
+      // corrupting N·V and therefore Fresnel on ground geometry.
       #ifdef USE_NORMAL
         vec3 sphereNormal = normalize(sphereBase);
         // Ground-level geometry follows the sphere, tall objects keep their own normals.
         float normalBlend = clamp(1.0 - normalizedH * 2.0, 0.0, 1.0);
-        vNormal = normalize(mix(vNormal, normalMatrix * sphereNormal, normalBlend));
+        vNormal = normalize(mix(vNormal, mat3(viewMatrix) * sphereNormal, normalBlend));
       #endif
 
       vec4 mvPosition = viewMatrix * vec4(spherePos, 1.0);
@@ -403,7 +419,7 @@ function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUnifor
     )
   }
 
-  material.customProgramCacheKey = () => 'sphereProjectionAdditive'
+  material.customProgramCacheKey = () => (prevKey?.call(material) ?? '') + '|sphereProjectionAdditive'
   material.needsUpdate = true
 }
 
@@ -438,6 +454,10 @@ export function TileGrid({ mode = 'split', bezier }: {
   const quadRef = useRef<THREE.Mesh | null>(null)
   const ambientLightRef = useRef<THREE.AmbientLight | null>(null)
   const dirLightRef = useRef<THREE.DirectionalLight | null>(null)
+  const terrainSceneRef = useRef<THREE.Scene | null>(null)
+  const terrainMeshRef = useRef<THREE.Mesh | null>(null)
+  const terrainAmbientRef = useRef<THREE.AmbientLight | null>(null)
+  const terrainDirRef = useRef<THREE.DirectionalLight | null>(null)
 
   // Offscreen target for the 24-pass sphere output. Post-fx runs on a
   // fullscreen quad sampling this texture, so bloom/vignette can coexist
@@ -467,7 +487,11 @@ export function TileGrid({ mode = 'split', bezier }: {
   useEffect(() => {
     gl.localClippingEnabled = true
 
-    const diorama = buildDiorama()
+    // In sphere mode, terrain is rendered as a single global SphereGeometry
+    // mesh (see globalTerrainScene below) — omit it from the per-tile root
+    // to avoid double-drawing and so per-tile clip-plane rasterization gaps
+    // simply expose the continuous global sphere underneath.
+    const diorama = buildDiorama({ includeTerrain: mode !== 'sphere' })
     dioramaRef.current = diorama
 
     // Disable frustum culling — the sphere projection shader moves vertices
@@ -492,6 +516,29 @@ export function TileGrid({ mode = 'split', bezier }: {
     dScene.add(dir)
     dirLightRef.current = dir
     dioramaSceneRef.current = dScene
+
+    // Sphere mode only: build a separate scene holding the global sphere
+    // terrain. Rendered once per frame (no clip planes), giving a single
+    // continuous green base across all cube faces. Per-tile object passes
+    // render on top with their own clip planes.
+    if (mode === 'sphere') {
+      const terrainMesh = buildSphereTerrain()
+      terrainMesh.frustumCulled = false
+      const terrainScene = new THREE.Scene()
+      terrainScene.add(terrainMesh)
+      // Mirror dScene's lighting fallback so the terrain matches per-tile
+      // materials when physical lights are on. Same intensities — the
+      // ambient/dir refs already control intensity per frame.
+      const tAmbient = new THREE.AmbientLight(0xffffff, 0.35)
+      terrainScene.add(tAmbient)
+      const tDir = new THREE.DirectionalLight(0xffffff, 0.7)
+      tDir.position.set(3, 4, 2)
+      terrainScene.add(tDir)
+      terrainSceneRef.current = terrainScene
+      terrainMeshRef.current = terrainMesh
+      terrainAmbientRef.current = tAmbient
+      terrainDirRef.current = tDir
+    }
 
     const cells = buildCellDefs()
     cellsRef.current = cells
@@ -554,15 +601,57 @@ export function TileGrid({ mode = 'split', bezier }: {
     if (scene.environmentRotation && dScene.environmentRotation) {
       dScene.environmentRotation.copy(scene.environmentRotation)
     }
+    // Same env mirroring for the global terrain scene (sphere mode only).
+    const terrainScene = terrainSceneRef.current
+    if (terrainScene) {
+      terrainScene.environment = scene.environment
+      terrainScene.environmentIntensity = scene.environmentIntensity
+      if (scene.environmentRotation && terrainScene.environmentRotation) {
+        terrainScene.environmentRotation.copy(scene.environmentRotation)
+      }
+    }
 
     // Toggle the fallback direct lights driven by the store flag.
-    const physicalLights = useHdri.getState().physicalLights
+    const hs = useHdri.getState()
+    const physicalLights = hs.physicalLights
     if (ambientLightRef.current) {
       ambientLightRef.current.intensity = physicalLights ? 0.35 : 0
     }
     if (dirLightRef.current) {
       dirLightRef.current.intensity = physicalLights ? 0.7 : 0
     }
+    if (terrainAmbientRef.current) {
+      terrainAmbientRef.current.intensity = physicalLights ? 0.35 : 0
+    }
+    if (terrainDirRef.current) {
+      terrainDirRef.current.intensity = physicalLights ? 0.7 : 0
+    }
+
+    // Apply live Fresnel/IBL knobs to every MeshStandardMaterial in the
+    // diorama. envMapIntensity dampens IBL globally (incl. the specular
+    // Fresnel rim at grazing angles). Roughness boost softens the rim by
+    // blurring the specular IBL sample — original roughness is cached the
+    // first time we touch the material (userData.__baseRoughness) so the
+    // slider is additive rather than destructive.
+    const envI = hs.envMapIntensity
+    const roughBoost = hs.roughnessBoost
+    fresnelUniform.value = hs.fresnelEnabled ? 1 : 0
+    const applyIblKnobs = (mat: THREE.Material | THREE.Material[]) => {
+      const mats = Array.isArray(mat) ? mat : [mat]
+      for (const mm of mats) {
+        const std = mm as THREE.MeshStandardMaterial
+        if (typeof std.envMapIntensity !== 'number') continue
+        std.envMapIntensity = envI
+        const ud = std.userData as { __baseRoughness?: number }
+        if (ud.__baseRoughness === undefined) ud.__baseRoughness = std.roughness
+        std.roughness = Math.min(1, ud.__baseRoughness + roughBoost)
+      }
+    }
+    diorama.root.traverse(child => {
+      const m = (child as THREE.Mesh).material
+      if (m) applyIblKnobs(m)
+    })
+    if (terrainMeshRef.current) applyIblKnobs(terrainMeshRef.current.material)
 
     diorama.update(clock.elapsedTime)
 
@@ -635,6 +724,48 @@ export function TileGrid({ mode = 'split', bezier }: {
       const sliceQuat = activeAxis && activeAngle !== 0
         ? new THREE.Quaternion().setFromAxisAngle(AXIS_VEC[activeAxis], activeAngle)
         : null
+
+      // CRITICAL ORDERING: write the slice + per-tile-orientation uniforms
+      // BEFORE rendering the global terrain. The terrain's triplanar shader
+      // reads these uniforms during its render; writing them after would
+      // leave the terrain one frame stale, producing a visible "snap back"
+      // on the commit frame where the tiles' face/u/v just updated but the
+      // terrain hasn't caught up yet.
+      if (activeAxis && activeAngle !== 0) {
+        sliceRotUniforms.uSliceAxis.value.copy(AXIS_VEC[activeAxis])
+        sliceRotUniforms.uSliceAngle.value = activeAngle
+        sliceRotUniforms.uSliceSign.value = activeSlice === 1 ? 1 : -1
+        sliceRotUniforms.uSliceActive.value = 1
+      } else {
+        sliceRotUniforms.uSliceActive.value = 0
+      }
+
+      // Per-tile orientation array: indexed by CURRENT cube position
+      // (face*4 + v*2 + u). Used by the global terrain shader to sample the
+      // texture from each tile's solved-state position — texture stays
+      // painted on the tile across rotation commits.
+      //
+      // Flat Float32Array layout (4 floats per tile: x, y, z, w) so three.js
+      // uploads reliably as a vec4[24] uniform.
+      const oriArr = sliceRotUniforms.uTileOriInv.value as unknown as Float32Array
+      for (const tile of tiles) {
+        const idx = tile.face * 4 + tile.v * 2 + tile.u
+        const q = tile.orientation
+        const off = idx * 4
+        // Quaternion conjugate = inverse for unit quats.
+        oriArr[off]     = -q.x
+        oriArr[off + 1] = -q.y
+        oriArr[off + 2] = -q.z
+        oriArr[off + 3] =  q.w
+      }
+
+      // Render the global continuous-sphere terrain ONCE, no clipping.
+      // With the slice uniforms now up-to-date, the terrain's shader sees
+      // the current frame's rotation state and tile orientations.
+      if (terrainScene) {
+        gl.clippingPlanes = []
+        gl.render(terrainScene, camera)
+      }
 
       for (const tile of tiles) {
         const r = storeTileCubeRender(tile, SPHERE_GAP)

@@ -16,7 +16,7 @@
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { useFrame } from '@react-three/fiber'
-import { buildDiorama, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
+import { buildDiorama, fresnelUniform, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
 import { useHdri } from '../world/hdriStore'
 
 export const COLS = 8
@@ -172,9 +172,10 @@ export function DioramaGrid() {
 
   useFrame(({ clock }) => {
     dioramaRef.current?.update(clock.elapsedTime)
-    const physicalLights = useHdri.getState().physicalLights
-    if (ambientRef.current) ambientRef.current.intensity = physicalLights ? 0.5 : 0
-    if (dirRef.current) dirRef.current.intensity = physicalLights ? 1.2 : 0
+    const hs = useHdri.getState()
+    if (ambientRef.current) ambientRef.current.intensity = hs.physicalLights ? 0.5 : 0
+    if (dirRef.current) dirRef.current.intensity = hs.physicalLights ? 1.2 : 0
+    fresnelUniform.value = hs.fresnelEnabled ? 1 : 0
   })
 
   return <group ref={groupRef} />

@@ -73,8 +73,10 @@ async function buildHdriThumbnail(url: string, isExr: boolean): Promise<HTMLCanv
 export function HDRIPanel() {
   const {
     url, filename, preset,
-    blur, intensity, rotation, backgroundOpacity, physicalLights,
-    setUrl, setPreset, setBlur, setIntensity, setRotation, setBackgroundOpacity, setPhysicalLights,
+    blur, intensity, rotation, backgroundOpacity, physicalLights, uniformColor,
+    envMapIntensity, roughnessBoost, fresnelEnabled,
+    setUrl, setPreset, setBlur, setIntensity, setRotation, setBackgroundOpacity, setPhysicalLights, setUniformColor,
+    setEnvMapIntensity, setRoughnessBoost, setFresnelEnabled,
   } = useHdri()
 
   const fileRef = useRef<HTMLInputElement | null>(null)
@@ -89,10 +91,16 @@ export function HDRIPanel() {
     // Clear old preview
     while (wrap.firstChild) wrap.removeChild(wrap.firstChild)
     if (!url) {
-      const hint = document.createElement('div')
-      hint.textContent = 'preset: ' + preset
-      hint.style.cssText = 'color:#aaa;font-size:10px;padding:4px 0;'
-      wrap.appendChild(hint)
+      if (preset === 'uniform') {
+        const swatch = document.createElement('div')
+        swatch.style.cssText = `height:36px;background:${uniformColor};border-radius:3px;`
+        wrap.appendChild(swatch)
+      } else {
+        const hint = document.createElement('div')
+        hint.textContent = 'preset: ' + preset
+        hint.style.cssText = 'color:#aaa;font-size:10px;padding:4px 0;'
+        wrap.appendChild(hint)
+      }
       return
     }
     setPreviewBusy(true)
@@ -103,7 +111,7 @@ export function HDRIPanel() {
       canvas.style.cssText = 'width:100%;height:auto;display:block;border-radius:3px;'
       wrap.appendChild(canvas)
     })
-  }, [url, filename, preset])
+  }, [url, filename, preset, uniformColor])
 
   const onPickFile = () => fileRef.current?.click()
 
@@ -180,15 +188,33 @@ export function HDRIPanel() {
             style={{ display: 'none' }}
           />
           {!url && (
-            <Row label="Preset">
-              <select
-                value={preset}
-                onChange={e => setPreset(e.target.value as HdriPreset)}
-                style={selectStyle}
-              >
-                {HDRI_PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
-              </select>
-            </Row>
+            <>
+              <Row label="Preset">
+                <select
+                  value={preset}
+                  onChange={e => setPreset(e.target.value as HdriPreset)}
+                  style={selectStyle}
+                >
+                  {HDRI_PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </Row>
+              {preset === 'uniform' && (
+                <Row label="Color">
+                  <input
+                    type="color"
+                    value={uniformColor}
+                    onChange={e => setUniformColor(e.target.value)}
+                    style={{ flex: '0 0 36px', height: 22, padding: 0, border: '1px solid #2a3546', background: '#1b2330', cursor: 'pointer' }}
+                  />
+                  <input
+                    type="text"
+                    value={uniformColor}
+                    onChange={e => setUniformColor(e.target.value)}
+                    style={{ ...selectStyle, flex: 1, marginLeft: 6 }}
+                  />
+                </Row>
+              )}
+            </>
           )}
           <Row label="Physical lights">
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
@@ -213,6 +239,21 @@ export function HDRIPanel() {
             onChange={v => setRotation((v * Math.PI) / 180)}
           />
           <SliderRow label="BG opacity" value={backgroundOpacity} min={0} max={1} step={0.01} onChange={setBackgroundOpacity} />
+          <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid #222', opacity: 0.55, fontSize: 10, letterSpacing: 0.5 }}>FRESNEL / IBL</div>
+          <Row label="Fresnel">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={fresnelEnabled}
+                onChange={e => setFresnelEnabled(e.target.checked)}
+              />
+              <span style={{ opacity: 0.75, fontSize: 10 }}>
+                {fresnelEnabled ? 'on — specular rim' : 'off — diffuse only'}
+              </span>
+            </label>
+          </Row>
+          <SliderRow label="Env × mat" value={envMapIntensity} min={0} max={2} step={0.01} onChange={setEnvMapIntensity} />
+          <SliderRow label="Rough +" value={roughnessBoost} min={0} max={1} step={0.01} onChange={setRoughnessBoost} />
         </>
       )}
     </div>

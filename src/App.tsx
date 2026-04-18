@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { Canvas } from '@react-three/fiber'
-import { OrbitControls, TrackballControls } from '@react-three/drei'
+import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
@@ -78,27 +78,30 @@ export default function App() {
         )}
         {preview ? (
           <OrbitControls
-            enablePan={true}
+            key={`preview-${preview}`}
+            makeDefault
+            enablePan
             mouseButtons={{
               LEFT: THREE.MOUSE.ROTATE,
               MIDDLE: THREE.MOUSE.DOLLY,
               RIGHT: THREE.MOUSE.PAN,
             }}
             minDistance={0.5}
-            maxDistance={20}
+            maxDistance={60}
           />
         ) : (
-          // Trackball for the sphere — quaternion-based, no up-vector lock,
-          // so dragging past the poles wraps seamlessly for a true 360° orbit.
-          <TrackballControls
-            rotateSpeed={3}
-            zoomSpeed={1}
-            panSpeed={0.8}
-            noPan={true}
+          // OrbitControls for sphere — feels more natural (polar locking is
+          // a feature, not a bug, for a grounded "planet" sim). Trackball's
+          // free-roll past the poles disoriented more than it helped.
+          <OrbitControls
+            key="sphere"
+            makeDefault
+            enablePan={false}
             minDistance={2.5}
             maxDistance={8}
-            staticMoving={false}
-            dynamicDampingFactor={0.15}
+            rotateSpeed={0.8}
+            enableDamping
+            dampingFactor={0.08}
           />
         )}
       </Canvas>

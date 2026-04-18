@@ -1,8 +1,25 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useThree } from '@react-three/fiber'
 import { Environment } from '@react-three/drei'
 import * as THREE from 'three'
 import { useHdri } from './hdriStore'
+
+/** Small solid-colour equirect canvas. Three's renderer auto-PMREMs this
+ *  at bind-time when used as scene.environment (same path as drei presets,
+ *  which hand us a 1024×512 equirect — not a pre-PMREM'd cube-uv map). */
+function makeUniformEquirectTexture(hex: string): THREE.CanvasTexture {
+  const W = 256, H = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = W
+  canvas.height = H
+  const ctx = canvas.getContext('2d')!
+  ctx.fillStyle = hex
+  ctx.fillRect(0, 0, W, H)
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.mapping = THREE.EquirectangularReflectionMapping
+  tex.colorSpace = THREE.SRGBColorSpace
+  return tex
+}
 
 /**
  * HDRI-based image-based lighting. Wraps drei's <Environment> and exposes
@@ -21,7 +38,9 @@ export function HDRIEnvironment() {
   const intensity = useHdri(s => s.intensity)
   const rotation = useHdri(s => s.rotation)
   const backgroundOpacity = useHdri(s => s.backgroundOpacity)
+  const uniformColor = useHdri(s => s.uniformColor)
   const setEnvTexture = useHdri(s => s.setEnvTexture)
+  const useUniform = !url && preset === 'uniform'
 
   // Push live HDRI parameters onto the scene. three r155+ supports these
   // scene-level properties directly; doing it imperatively sidesteps drei's
@@ -51,6 +70,27 @@ export function HDRIEnvironment() {
   // effect above — 0 blends to black (matches the canvas clear colour), 1
   // shows the full HDRI. Changing the `background` prop dynamically doesn't
   // always reapply, whereas scene.backgroundIntensity is a live scalar.
+  // Uniform mode — build a tiny solid-colour equirect texture and assign it
+  // directly. Bypasses drei <Environment> (which expects a real HDR/preset).
+  // Memoised per hex so the colour picker doesn't churn GPU uploads.
+  const uniformTex = useMemo(
+    () => (useUniform ? makeUniformEquirectTexture(uniformColor) : null),
+    [useUniform, uniformColor],
+  )
+  useEffect(() => {
+    if (!uniformTex) return
+    const prevEnv = scene.environment
+    const prevBg = scene.background
+    scene.environment = uniformTex
+    scene.background = uniformTex
+    return () => {
+      if (scene.environment === uniformTex) scene.environment = prevEnv
+      if (scene.background === uniformTex) scene.background = prevBg
+      uniformTex.dispose()
+    }
+  }, [scene, uniformTex])
+
+  if (useUniform) return null
   if (url) {
     return <Environment key={`file:${url}`} files={url} background />
   }
