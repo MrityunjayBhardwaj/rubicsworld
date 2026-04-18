@@ -2,7 +2,8 @@ import { useEffect, useRef } from 'react'
 import { useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { usePlanet } from './store'
-import type { Axis } from './rotation'
+import { centroidToFaceUV, tileCentroid, type Axis, type Direction, type Move } from './rotation'
+import { FACES, type FaceDef, type FaceIndex } from './faces'
 
 // Pointer input lives here because both onPlanet tracking and drag-axis
 // resolution need the live camera for raycasting.
@@ -66,9 +67,69 @@ type PendingDrag =
       tangent: THREE.Vector2 // unit, in screen pixels
     }
 
+/** Map a sphere hit point to the (face, u, v) of the tile it lies in.
+ *  The hit is on the unit sphere; project onto the cube by dividing through
+ *  the max-abs component, then use centroidToFaceUV to pick the tile's cell.
+ *  Returns null for degenerate (origin) inputs. */
+function sphereHitToTile(hit: THREE.Vector3): { face: FaceIndex; u: number; v: number } | null {
+  const ax = Math.abs(hit.x), ay = Math.abs(hit.y), az = Math.abs(hit.z)
+  const m = Math.max(ax, ay, az)
+  if (m < 1e-6) return null
+  const cube = new THREE.Vector3(hit.x / m, hit.y / m, hit.z / m)
+  return centroidToFaceUV(cube)
+}
+
+/** Given a key + hovered face-local axes + tile centroid, derive the (axis,
+ *  slice, dir) Move. The 6 keys map to the 3 face-local axes × 2 directions:
+ *    Q/E  → rotate around face.normal (Q = CCW looking AT the face, E = CW)
+ *    W/S  → rotate around face.right  (W = tilt top away, S = tilt top toward)
+ *    A/D  → rotate around face.up     (A = left, D = right)
+ *  Slice is forced by the tile's world-axis component — there's only one
+ *  slice containing the hovered tile along each world axis. */
+function moveFromKey(key: string, face: FaceDef, tileUV: { u: number; v: number }): Move | null {
+  const centroid = tileCentroid(face.index, tileUV.u, tileUV.v)
+  const resolve = (dir: THREE.Vector3): { axis: Axis; worldSign: 1 | -1 } => {
+    const ax = Math.abs(dir.x), ay = Math.abs(dir.y), az = Math.abs(dir.z)
+    let axis: Axis
+    if (ax > 0.5) axis = 'x'
+    else if (ay > 0.5) axis = 'y'
+    else axis = 'z'
+    const worldSign = (dir[axis] > 0 ? 1 : -1) as 1 | -1
+    return { axis, worldSign }
+  }
+  const sliceOf = (axis: Axis): number => (centroid[axis] > 0 ? 1 : 0)
+
+  switch (key) {
+    case 'q':
+    case 'e': {
+      const { axis, worldSign } = resolve(face.normal)
+      // Q = CCW from viewer → dir = -worldSign; E = CW → dir = +worldSign.
+      const base = key === 'q' ? -1 : 1
+      return { axis, slice: sliceOf(axis), dir: (base * worldSign) as Direction }
+    }
+    case 'w':
+    case 's': {
+      const { axis, worldSign } = resolve(face.right)
+      // W tilts the face's top away from viewer; equivalent to rotating the
+      // slice +90° around face.right (right-hand rule: up → normal).
+      const base = key === 'w' ? 1 : -1
+      return { axis, slice: sliceOf(axis), dir: (base * worldSign) as Direction }
+    }
+    case 'a':
+    case 'd': {
+      const { axis, worldSign } = resolve(face.up)
+      // D rotates the face's right edge "down" (right-hand rule: normal → right).
+      const base = key === 'd' ? 1 : -1
+      return { axis, slice: sliceOf(axis), dir: (base * worldSign) as Direction }
+    }
+  }
+  return null
+}
+
 export function Interaction() {
   const { camera, gl, size } = useThree()
   const setOnPlanet = usePlanet(s => s.setOnPlanet)
+  const setHoveredTile = usePlanet(s => s.setHoveredTile)
   const beginDragAt = usePlanet(s => s.beginDragAt)
   const updateDrag = usePlanet(s => s.updateDrag)
   const endDrag = usePlanet(s => s.endDrag)
@@ -171,6 +232,7 @@ export function Interaction() {
       if (cx < 0 || cy < 0 || cx > width() || cy > height()) {
         setOnPlanet(false)
         onPlanetRef.current = false
+        setHoveredTile(null)
         return
       }
 
@@ -178,6 +240,10 @@ export function Interaction() {
       const near = hit || rayMissesPlanetButNearRing()
       setOnPlanet(near)
       onPlanetRef.current = near
+      // Publish hovered tile for the keyboard-rotation hybrid. Only set when
+      // the ray actually hits the planet surface; the padded-ring region isn't
+      // a tile, so pressing a key there would be ambiguous.
+      setHoveredTile(hit ? sphereHitToTile(_hit) : null)
     }
 
     const onDown = (e: PointerEvent) => {
@@ -208,17 +274,40 @@ export function Interaction() {
       if (wasCommitted) void endDrag()
     }
 
+    const onKey = (e: KeyboardEvent) => {
+      // Ignore modifiers (let browser shortcuts pass) and typing contexts.
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const tgt = e.target as HTMLElement | null
+      if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return
+
+      const key = e.key.toLowerCase()
+      if (!['q', 'w', 'e', 'a', 's', 'd'].includes(key)) return
+
+      const s = usePlanet.getState()
+      if (s.anim || s.drag) return // rotation already in flight
+      const ht = s.hoveredTile
+      if (!ht) return // nothing hovered
+
+      const move = moveFromKey(key, FACES[ht.face], { u: ht.u, v: ht.v })
+      if (!move) return
+
+      e.preventDefault()
+      void s.rotateAnimated(move)
+    }
+
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerdown', onDown, { capture: true })
     window.addEventListener('pointerup', onUp)
     window.addEventListener('pointercancel', onUp)
+    window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerdown', onDown, { capture: true })
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
+      window.removeEventListener('keydown', onKey)
     }
-  }, [camera, gl, size.width, size.height, setOnPlanet, beginDragAt, updateDrag, endDrag])
+  }, [camera, gl, size.width, size.height, setOnPlanet, setHoveredTile, beginDragAt, updateDrag, endDrag])
 
   return null
 }
