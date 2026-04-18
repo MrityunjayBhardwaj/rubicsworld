@@ -49,29 +49,108 @@ function onNet(x: number, z: number): boolean {
 
 // ── terrain ──────────────────────────────────────────────────────────
 
+/**
+ * Procedurally builds a tileable grass-like texture. Uses only periodic
+ * (sin/cos) functions of the normalized pixel coordinates so the pattern
+ * wraps perfectly at u=0↔1 and v=0↔1 — no visible seam when UVs cross a
+ * texture-unit boundary.
+ */
+function createGrassTexture(size = 256): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('2d context unavailable')
+
+  const img = ctx.createImageData(size, size)
+  const TAU = Math.PI * 2
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = x / size
+      const v = y / size
+      // Periodic multi-octave variation (all frequencies integer → tileable).
+      const a = Math.sin(u * TAU * 7) * Math.cos(v * TAU * 9)
+      const b = Math.sin(u * TAU * 17 + v * TAU * 11)
+      const c = Math.sin(u * TAU * 3 + v * TAU * 5) * 0.6
+      const d = Math.sin((u + v) * TAU * 23) * 0.35
+      const n = a * 0.5 + b * 0.25 + c * 0.25 + d * 0.2
+
+      // Green base with gold/olive highlights and darker valley patches.
+      const bright = 0.55 + n * 0.2
+      const r = 0.28 + 0.18 * Math.max(0, n) + 0.05 * Math.sin(u * TAU * 13)
+      const g = 0.48 + 0.28 * bright
+      const bch = 0.18 + 0.08 * bright
+
+      const idx = (y * size + x) * 4
+      img.data[idx]     = Math.min(255, Math.max(0, r * 255))
+      img.data[idx + 1] = Math.min(255, Math.max(0, g * 255))
+      img.data[idx + 2] = Math.min(255, Math.max(0, bch * 255))
+      img.data[idx + 3] = 255
+    }
+  }
+  ctx.putImageData(img, 0, 0)
+
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.wrapS = THREE.RepeatWrapping
+  tex.wrapT = THREE.RepeatWrapping
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.anisotropy = 4
+  return tex
+}
+
+// Module-scoped cache — one texture instance shared across every buildDiorama
+// call (24 per frame in sphere render) avoids re-generating 64KB of pixel data
+// each time.
+let _grassTex: THREE.CanvasTexture | null = null
+function grassTexture(): THREE.CanvasTexture {
+  if (!_grassTex) _grassTex = createGrassTexture(256)
+  return _grassTex
+}
+
 function buildTerrain(): THREE.Mesh {
   const segX = 64
   const segZ = 48
   const g = new THREE.PlaneGeometry(BASE_W, BASE_H, segX, segZ)
   g.rotateX(-Math.PI / 2)
+
   const pos = g.attributes.position
+  const uv = g.attributes.uv
   const colors = new Float32Array(pos.count * 3)
+
+  // UV tile density: one texture repeat per face-block (2 world units).
+  // Because the cross-net layout guarantees flat-adjacent cells map to
+  // cube-adjacent cells, and the texture wraps at integer UV boundaries,
+  // the grass flows continuously across every cube face seam.
+  const UV_DENSITY = 0.5  // 0.5 repeats per world unit → 1 repeat per face-block
+
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i)
     const z = pos.getZ(i)
-    const rawH = pseudoNoise(x, z)
     pos.setY(i, 0)
-    // Dim padding cells slightly so the cross shape reads more clearly
-    // in the grid view; clipping hides them in sphere/cube/split anyway.
+
+    // World-space UVs. Adjacent face-blocks share texel-accurate edges.
+    uv.setXY(i, x * UV_DENSITY, z * UV_DENSITY)
+
+    // Vertex colour still provides per-cell variation and dims the padding
+    // so the cross shape reads in grid view. Combined with the map it gives
+    // subtle hue variation on top of the grass.
+    const rawH = pseudoNoise(x, z)
     const dim = onNet(x, z) ? 1 : 0.35
-    const g1 = (0.38 + rawH * 2.5 + Math.sin(x * 11 + z * 7) * 0.06) * dim
-    colors[i * 3] = (0.28 + Math.sin(x * 5) * 0.04) * dim
-    colors[i * 3 + 1] = g1
-    colors[i * 3 + 2] = 0.12 * dim
+    const tint = 0.9 + rawH * 0.8 + Math.sin(x * 11 + z * 7) * 0.05
+    colors[i * 3]     = (0.95 + Math.sin(x * 5) * 0.05) * dim
+    colors[i * 3 + 1] = tint * dim
+    colors[i * 3 + 2] = 0.85 * dim
   }
+
+  uv.needsUpdate = true
   g.setAttribute('color', new THREE.BufferAttribute(colors, 3))
   g.computeVertexNormals()
-  const m = new THREE.Mesh(g, mat({ vertexColors: true, roughness: 0.85 }))
+
+  const m = new THREE.Mesh(g, mat({
+    vertexColors: true,
+    map: grassTexture(),
+    roughness: 0.9,
+  }))
   m.receiveShadow = true
   m.name = 'terrain'
   return m
