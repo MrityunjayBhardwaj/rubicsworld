@@ -1,4 +1,4 @@
-# New-session handoff prompt — Rubic's World (Day 6 continued)
+# New-session handoff prompt — Rubic's World (end of Day 6–7 HDRI/cube-net branch)
 
 Copy the block below into the next session verbatim.
 
@@ -6,84 +6,97 @@ Copy the block below into the next session verbatim.
 
 We're continuing **Rubic's World** — my solo entry for levelsio's **Vibe Jam 2026**.
 
-**Deadline:** 1 May 2026, 13:37 UTC.
+**Deadline:** 1 May 2026, 13:37 UTC (≈13 days out)
 **Live URL:** https://rubicsworld.vercel.app (auto-deploys on `git push origin main`)
 **Repo:** https://github.com/MrityunjayBhardwaj/rubicsworld
-**Local dev:** `npm run dev` → localhost (port varies, check output)
+**Local dev:** `npm run dev` → localhost (usually 5175)
 **Working dir:** `/Users/mrityunjaybhardwaj/Documents/projects/RubicsWorld`
 
 ## Canonical docs (read in this order)
 
 1. `PHASE_1.md` — the authoritative 15-day plan, scope, stack, cut order, gates.
 2. `THESIS.md` — full game design.
+3. Memory files in `~/.claude/projects/-Users-mrityunjaybhardwaj-Documents-projects-RubicsWorld/memory/` — auto-loaded, but the current architecture is `project_architecture_day6_7.md` (not the Day 5-6 one).
 
 ## Where we are
 
-Days 1–5 shipped. Day 5 added scramble-on-load, warming light, bloom/vignette, AI seed.
+Days 1–5 shipped. A huge Day 6–7 feature/polish branch has landed **locally** but is **not yet merged**.
 
-Day 6 is IN PROGRESS — we built the diorama-to-sphere pipeline. The pipeline works end-to-end but has known issues to fix.
+Branch: `fix/day6-sphere-polish` — 20 commits ahead of `main`. Should PR before starting anything substantial.
 
-### The diorama pipeline (read these files)
+### What the branch did (high level)
+
+- **Sphere render pipeline:** drag + anim wired in (live slice preview + settle); PostFx via offscreen `useFBO` + fullscreen quad; commit-pop fixed via `tile.orientation` in the root quaternion; shader `height` → `normalizedH` bug fix.
+- **Puzzle semantics:** `Solve` and `Solve (animated)` buttons; `solveAnimated` replays inverse moves from a tracked `history` in reverse; `isSolved` is now **Visually-Solved** (shared-orientation + centroid match) so global cube rotations count as solved.
+- **Layout:** replaced the 4×6 rectangular flat diorama with a **cross cube-net** (8×6 bounding box, 24 filled cells). Every flat-adjacent cell maps to a cube-adjacent cell and the seam cells line up — seam-crossing objects and continuous textures work cleanly now.
+- **Labels:** `TileLabels` component in all 4 views (grid/split/cube/sphere) with per-face letter+index scheme (`A1..F4`), per-face outline colours, and an HTML legend panel. Labels 3/4 on the top row of each face, 1/2 on the bottom (user-approved convention).
+- **V-axis convention:** flipped at the source (`tileCentroid` / `centroidToFaceUV`) so `v=0 = physical top`. Cascaded through all vOff consumers + `tileToHome`.
+- **Cube view row swap** (inside `cubeCellRender`, `buildOverlayLines`, `CubeLabels`) is balanced with sphere's `tileToHome` so sphere matches cube on which content sits at each physical position. Don't "simplify" one without the other.
+- **Menu:** Leva entries renamed to `View: Cube net / Split / Cube / Sphere (planet)`.
+- **Terrain:** black base plane removed. Seamless grass texture (procedurally tileable, periodic sin/cos) with world-space UVs at 0.5 rep/unit (1 texture repeat per 2-unit face-block).
+- **Lighting:** HDRI IBL via drei's `<Environment>` + floating HTML `HDRIPanel` (upload `.hdr`/`.exr`, preview thumbnail via RGBELoader+Reinhard, preset dropdown, exposure/blur/rotation/BG-opacity sliders, collapse). `physicalLights` toggle mutes all direct lights → IBL only. `TileGrid` mirrors `scene.environment` onto its offscreen `dScene` each frame so the diorama gets IBL too.
+- **Camera:** `TrackballControls` for sphere mode (quaternion-based, seamless 360° — no Y-pole lock). `OrbitControls` retained for preview modes (pan-by-right-click).
+
+### Files currently live
 
 ```
 src/diorama/
-  buildDiorama.ts    — imperative Three.js scene builder (terrain, water, hut, windmill, trees, etc.)
-                       BASE_W=4, BASE_H=6, each cell 1×1. Returns { root, update(elapsed) }
-  DioramaGrid.tsx    — flat grid overlay view. Exports COLS=4, ROWS=6, CELL=1, cellFace()
-  TileGrid.tsx       — THE RENDERER. Modes: split | cube | sphere.
-                       Takes over render loop (useFrame priority=1).
-                       Renders ONE diorama 24 times with different clip planes.
-                       Sphere mode: cube clip planes + vertex shader sphere projection.
-  BezierCurveEditor.tsx — draggable bezier curve for height mapping (bottom-left UI)
-  Diorama.tsx        — JSX version (Triplex compatibility only, not used at runtime)
+  buildDiorama.ts         — cross-net, grass, 13 object builders, BASE_W=8
+  DioramaGrid.tsx         — COLS=8 ROWS=6, cellFace returns -1 for padding,
+                            FACE_TO_BLOCK_TL exported
+  TileGrid.tsx            — split/cube/sphere modes, takes over render loop,
+                            sphere → offscreen FBO + fullscreen quad,
+                            drag/anim/slice-rotation, env sync for dScene
+
+src/world/
+  rotation.ts             — AXIS_VEC, tileCentroid (v-flipped), centroidToFaceUV, rotateSlice
+  tile.ts                 — buildSolvedTiles, VS-style isSolved
+  store.ts                — zustand: tiles, history, drag/anim, solve/solveAnimated,
+                            scrambleInstant/Animated, reset, VS event dispatch
+  TileLabels.tsx          — all 4 modes + legend HTML overlay
+  hdriStore.ts            — HDRI state
+  HDRIEnvironment.tsx     — drei Environment wrapper, live param sync
+  HDRIPanel.tsx           — floating HTML: upload, preview, sliders
+  Ring.tsx, Interaction.tsx, AiSeed.tsx, PostFx.tsx
+
+src/
+  App.tsx                 — Canvas + mode routing, TrackballControls in sphere,
+                            OrbitControls in preview, HDRIEnvironment + HDRIPanel mounted
+  Controls.tsx            — Leva menu
 ```
 
-### How the pipeline works
+## Hard invariants (things NOT to change without asking)
 
-1. **Grid**: 4×6 flat diorama, 24 cells of 1×1. Each cell maps to a cube face tile.
-2. **Split**: same 24 cells, separated with gaps, rendered through 3D clip planes (like Blender Alt+B).
-3. **Cube**: cells folded onto cube faces. 8 clip planes per tile (4 within-face + 4 face-boundary).
-4. **Sphere**: cube clip planes + `onBeforeCompile` vertex shader that additively curves geometry to sphere surface. Height decomposed via `dot(worldPos, faceNormal) - 1.0`, then passed through a bezier curve.
+- **Cross cube-net layout** — reverting to 4×6 rectangle breaks every seam invariant.
+- **V-flip + tileToHome as a pair** — balanced. If you change one, change the other and every vOff consumer.
+- **Cube-view row swap** — balanced with sphere's tileToHome so they match.
+- **Label formula `(1-v)*2+u+1`** — user-approved; 3,4 top, 1,2 bottom.
+- **TrackballControls for sphere** — OrbitControls causes Y-pole stall by design.
+- **`dScene.environment` mirror each frame** — without it, the diorama goes dark when HDRI is the only light.
+- Earlier Day 4 calls remain: drag-direction picks axis (not hover); ring visible only on drag/anim; 6.5° commit threshold; standard 2×2 topology.
 
-Face mapping: 4×6 grid → 6 faces as 2×2 blocks. `cellFace()` and `FACE_TO_BLOCK` handle bidirectional mapping. Store tiles map via `storeTileCubeRender()`.
+## Known open items
 
-### What's working
+1. **Branch is unmerged.** 20 commits on `fix/day6-sphere-polish`. Should PR → self-review → merge to main before adding more.
+2. **Cap/fill at clip boundaries** — hollow interiors visible when objects clip. All three approaches (geometry, shader, stencil) were discussed and rejected earlier. Revisit or accept.
+3. **Day 7 walk mode** per PHASE_1.md — not started. This is the clip-worthy moment ("oh, I can just walk around now"). Biggest remaining gate.
+4. **Audio pass** — Howler in deps, no sounds wired yet.
+5. **Intro/first-60s framing** — no HUD, no tutorial, but the game needs to communicate what to do in its first 60s.
 
-- Grid / Split / Cube views (Leva buttons)
-- Sphere view (default planet) with additive curvature vertex shader
-- Store integration: Scramble/Reset buttons reposition tiles correctly
-- Animations: windmill spins, trees sway, water ripples — all through the same diorama scene
-- Bezier curve editor for height mapping tuning
-
-### Known issues to fix NEXT
-
-1. **Black base plane not visible on sphere** — the base PlaneGeometry (32×48 segments) at Y=-0.001 might need the sphere shader applied. Investigate if `patchSceneForSphere` actually patches it.
-
-2. **Drag interaction not wired** — the Interaction.tsx component is in the scene but can't interact with the diorama sphere (no raycasting targets). Need invisible proxy geometry or raycasting against the unit sphere.
-
-3. **PostFx disabled** — bloom + vignette (PostFx.tsx) fight with the custom render loop. Need to integrate or render post-fx after the portal passes.
-
-4. **Cap/fill at clip boundaries** — when objects are clipped, hollow interiors are visible. All three approaches (geometry, shader, stencil) were discussed and rejected during brainstorm. Revisit or accept.
-
-5. **Face seams** — content discontinuity at cube face boundaries is inherent to the 2×3→cube mapping. The 4×6 grid doesn't fold into a seamless cube net.
-
-### Things NOT to change without asking
-
-(Same as Day 4 — see NEXT_SESSION.md history in git. Plus:)
-- **Clip-plane approach for tile splitting** — user explicitly chose this over stencil portals and shader discard. Don't switch.
-- **Additive sphere projection (not normalize)** — height must be preserved, not squashed.
-- **4×6 grid with 1×1 cells** — scaled up from 0.5. Each cube face = 2×2 = 4 tiles.
-- **ONE diorama rendered 24 times** — no cloning, no splitting geometry. The scene is re-rendered with different clip planes and transforms per tile.
-
-### Working style expected
+## Working style expected
 
 - Concise. 1–2 sentences end-of-turn on what changed + what's next.
-- Brainstorm before implementing when user asks.
+- Brainstorm → option matrix → pick, before implementing anything non-trivial.
 - Test with Playwright when behaviour is non-trivial. Screenshots to `/tmp/rubics-test/`.
-- Commit messages follow gitmoji + `Problem:` / `Fix:` body. No `Co-Authored-By`.
-- Always-deployable state is a hard rule.
+- Commit messages: gitmoji + `Problem:` / `Fix:` (or feature intent) body. No `Co-Authored-By`.
+- Always-deployable main is a hard rule; the current branch should be shipped before bigger work starts.
+- Convention changes belong at the source (the type/math/store), not at the display layer.
 
-Start by reading `src/diorama/TileGrid.tsx` and `src/diorama/buildDiorama.ts` in full, then confirm what you see and ask what to work on.
+## Start by
+
+1. Read `src/diorama/TileGrid.tsx` and `src/world/rotation.ts` in full.
+2. Skim `src/world/store.ts` and `src/world/TileLabels.tsx`.
+3. Ask what I want: (a) ship the branch via PR, (b) start Day 7 walk mode, (c) chip at open items (cap/fill, audio, intro), or (d) something specific I'll describe.
 
 ---
 
