@@ -94,5 +94,8 @@ export function HDRIEnvironment() {
   if (url) {
     return <Environment key={`file:${url}`} files={url} background />
   }
-  return <Environment key={`preset:${preset}`} preset={preset} background />
+  // `useUniform` guard above narrows preset out of 'uniform', but TS can't
+  // infer through the Zustand selector — explicit cast.
+  const dreiPreset = preset as Exclude<typeof preset, 'uniform'>
+  return <Environment key={`preset:${dreiPreset}`} preset={dreiPreset} background />
 }
