@@ -188,9 +188,13 @@ function cubeCellRender(cell: CellDef, gap: number): CellRender {
   const face = FACES[cell.face]
   const halfCell = (CELL - gap) / 2
 
-  // Cell center on cube face
+  // Cell center on cube face.
+  // Cube view uses the raw row-parity for v (not the globally-flipped
+  // convention) so each folded face's rows read the same as in the net:
+  // lower flat row at physical top, upper flat row at bottom. This is the
+  // user-requested "swap rows in each face" for the cube view.
   const uOff = (cell.localU - 0.5) * CELL
-  const vOff = (0.5 - cell.localV) * CELL
+  const vOff = (cell.localV - 0.5) * CELL
   const cubePos = face.normal.clone()
     .addScaledVector(face.right, uOff)
     .addScaledVector(face.up, vOff)
@@ -240,7 +244,12 @@ function buildOverlayLines(cells: CellDef[], mode: TileMode): THREE.LineSegments
 
     if (mode === 'cube' || mode === 'sphere') {
       const uOff = (cell.localU - 0.5) * CELL
-      const vOff = (0.5 - cell.localV) * CELL
+      // Cube overlay uses row-swapped vOff so gridlines line up with the
+      // rotated cubeCellRender placement; sphere overlay (unused) would use
+      // the global convention.
+      const vOff = mode === 'cube'
+        ? (cell.localV - 0.5) * CELL
+        : (0.5 - cell.localV) * CELL
       const center = face.normal.clone()
         .addScaledVector(face.right, uOff)
         .addScaledVector(face.up, vOff)

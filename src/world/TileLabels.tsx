@@ -100,7 +100,9 @@ function CubeLabels() {
       if (faceIdx < 0) continue
       const face = FACES[faceIdx]
       const u = col % 2
-      const v = 1 - (row % 2)
+      // Cube view swaps rows per face: use raw row-parity for v and the
+      // matching vOff sign so content and labels stay aligned.
+      const v = row % 2
       const uOff = (u - 0.5) * CELL
       const vOff = (0.5 - v) * CELL
       const p = face.normal.clone()
