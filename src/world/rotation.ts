@@ -12,19 +12,19 @@ export const AXIS_VEC: Record<Axis, Vector3> = {
 }
 
 // Logical centroid of (face, u, v) in cube-local space.
+// Convention: v=0 is the +face.up end (top of the face), v=1 is -face.up
+// (bottom). Reading order along v matches face-image reading order.
 // Always has one component = ±1 (face normal direction) and two = ±0.5 for N=2.
 export function tileCentroid(face: FaceIndex, u: number, v: number): Vector3 {
   const f = FACES[face]
   const s = -1 + (2 * u + 1) / N
-  const t = -1 + (2 * v + 1) / N
+  const t = 1 - (2 * v + 1) / N   // v=0 → +0.5 (top), v=1 → -0.5 (bottom)
   return f.normal.clone()
     .addScaledVector(f.right, s)
     .addScaledVector(f.up, t)
 }
 
 // Inverse: which (face, u, v) corresponds to a given centroid.
-// For N=2, after a 90° rotation the centroid still has exactly one component
-// of magnitude 1; the largest |component| picks the face.
 export function centroidToFaceUV(c: Vector3): { face: FaceIndex; u: number; v: number } {
   const ax = Math.abs(c.x), ay = Math.abs(c.y), az = Math.abs(c.z)
   let face: FaceIndex
@@ -36,7 +36,7 @@ export function centroidToFaceUV(c: Vector3): { face: FaceIndex; u: number; v: n
   const s = c.dot(f.right)
   const t = c.dot(f.up)
   const u = Math.round((s + 1) * N / 2 - 0.5)
-  const v = Math.round((t + 1) * N / 2 - 0.5)
+  const v = Math.round((1 - t) * N / 2 - 0.5)   // flipped inverse
   return { face, u, v }
 }
 
