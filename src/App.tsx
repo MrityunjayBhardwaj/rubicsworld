@@ -7,7 +7,7 @@ import { Interaction } from './world/Interaction'
 import { Lights } from './world/Lights'
 import { AiSeed } from './world/AiSeed'
 import { PostFx } from './world/PostFx'
-import { TileLabels } from './world/TileLabels'
+import { TileLabels, TileLabelsLegend } from './world/TileLabels'
 import { TileGrid } from './diorama/TileGrid'
 import { DioramaGrid } from './diorama/DioramaGrid'
 import { BezierCurveEditor } from './diorama/BezierCurveEditor'
@@ -38,6 +38,7 @@ export default function App() {
     <>
       <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />
       <Cursor />
+      <TileLabelsLegend />
       {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <Canvas
         camera={{
