@@ -34,11 +34,12 @@ export const FACE_LABEL_COLORS = [
   '#7a8aa0', // F  -Z
 ] as const
 
-// Index within a face follows reading order (top-left = 1, top-right = 2,
-// bottom-left = 3, bottom-right = 4) when the face is viewed from outside
-// the cube with face.up pointing up on screen.
+// Index within a face: v*2 + u + 1. Convention: v=0 is the physical top
+// row of the face (+face.up direction) so the natural reading order
+// (1, 2 on top, 3, 4 on bottom) comes out without a rename — the v
+// direction itself is flipped in the tile position math.
 function labelFor(face: number, u: number, v: number): string {
-  const idx = (1 - v) * 2 + u + 1
+  const idx = v * 2 + u + 1
   return `${FACE_LETTERS[face]}${idx}`
 }
 
@@ -72,7 +73,8 @@ function FlatLabels({ split }: { split: boolean }) {
       const face = cellFace(col, row)
       if (face < 0) continue
       const u = col % 2
-      const v = row % 2
+      // Upper flat row of each face-block is v=0 (top) in the new convention.
+      const v = 1 - (row % 2)
       const homeX = -HALF_W + (col + 0.5) * CELL
       const homeZ = -HALF_H + (row + 0.5) * CELL
       const gapX = split ? (col - (COLS - 1) / 2) * gap : 0
@@ -99,9 +101,9 @@ function CubeLabels() {
       if (faceIdx < 0) continue
       const face = FACES[faceIdx]
       const u = col % 2
-      const v = row % 2
+      const v = 1 - (row % 2)
       const uOff = (u - 0.5) * CELL
-      const vOff = (v - 0.5) * CELL
+      const vOff = (0.5 - v) * CELL
       const p = face.normal.clone()
         .addScaledVector(face.right, uOff)
         .addScaledVector(face.up, vOff)
@@ -165,7 +167,7 @@ function SphereLabels() {
       const tile = tiles[i]
       const face = FACES[tile.face]
       const uOff = (tile.u - 0.5) * CELL
-      const vOff = (tile.v - 0.5) * CELL
+      const vOff = (0.5 - tile.v) * CELL
       _cube.copy(face.normal)
         .addScaledVector(face.right, uOff)
         .addScaledVector(face.up, vOff)

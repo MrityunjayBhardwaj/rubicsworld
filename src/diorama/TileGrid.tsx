@@ -46,11 +46,13 @@ interface CellDef {
 // Uses the mapping exported by DioramaGrid so the flat diorama content and
 // the sphere renderer agree on every home cell.
 
-/** Convert store tile home position to grid (col, row) → diorama homeX/homeZ */
+/** Convert store tile home position to grid (col, row) → diorama homeX/homeZ.
+ *  v convention (v=0 = top of face, v=1 = bottom) means the upper flat row
+ *  of a face-block in the cross net corresponds to homeV=0 after the fold. */
 function tileToHome(homeFace: FaceIndex, homeU: number, homeV: number) {
   const [blockCol, blockRow] = FACE_TO_BLOCK_TL[homeFace]
   const col = blockCol + homeU
-  const row = blockRow + homeV
+  const row = blockRow + (1 - homeV)
   return {
     col, row,
     homeX: -HALF_W + (col + 0.5) * CELL,
@@ -68,7 +70,7 @@ function storeTileCubeRender(tile: Tile, gap: number): CellRender {
   const localU = tile.u
   const localV = tile.v
   const uOff = (localU - 0.5) * CELL
-  const vOff = (localV - 0.5) * CELL
+  const vOff = (0.5 - localV) * CELL
   const cubePos = currentFace.normal.clone()
     .addScaledVector(currentFace.right, uOff)
     .addScaledVector(currentFace.up, vOff)
@@ -118,7 +120,9 @@ function buildCellDefs(): CellDef[] {
         col, row,
         face,
         localU: col % 2,
-        localV: row % 2,
+        // v=0 is physical top of face; in the cross net, upper flat rows
+        // map to cube top after the fold, so flip row%2.
+        localV: 1 - (row % 2),
         homeX: -HALF_W + (col + 0.5) * CELL,
         homeZ: -HALF_H + (row + 0.5) * CELL,
       })
@@ -186,7 +190,7 @@ function cubeCellRender(cell: CellDef, gap: number): CellRender {
 
   // Cell center on cube face
   const uOff = (cell.localU - 0.5) * CELL
-  const vOff = (cell.localV - 0.5) * CELL
+  const vOff = (0.5 - cell.localV) * CELL
   const cubePos = face.normal.clone()
     .addScaledVector(face.right, uOff)
     .addScaledVector(face.up, vOff)
@@ -236,7 +240,7 @@ function buildOverlayLines(cells: CellDef[], mode: TileMode): THREE.LineSegments
 
     if (mode === 'cube' || mode === 'sphere') {
       const uOff = (cell.localU - 0.5) * CELL
-      const vOff = (cell.localV - 0.5) * CELL
+      const vOff = (0.5 - cell.localV) * CELL
       const center = face.normal.clone()
         .addScaledVector(face.right, uOff)
         .addScaledVector(face.up, vOff)
