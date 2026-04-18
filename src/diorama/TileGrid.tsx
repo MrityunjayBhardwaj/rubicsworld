@@ -47,12 +47,15 @@ interface CellDef {
 // the sphere renderer agree on every home cell.
 
 /** Convert store tile home position to grid (col, row) → diorama homeX/homeZ.
- *  v convention (v=0 = top of face, v=1 = bottom) means the upper flat row
- *  of a face-block in the cross net corresponds to homeV=0 after the fold. */
+ *  Sphere/cube parity: cube view puts lower flat row content at the physical
+ *  top of each face (see cubeCellRender's row swap). Mirror that here so the
+ *  sphere renders the same content at each physical position as cube view —
+ *  tile with v=0 (physical top under the v-flip convention) now pulls content
+ *  from flat row = blockRow, matching the cube view's localV = 1 mapping. */
 function tileToHome(homeFace: FaceIndex, homeU: number, homeV: number) {
   const [blockCol, blockRow] = FACE_TO_BLOCK_TL[homeFace]
   const col = blockCol + homeU
-  const row = blockRow + (1 - homeV)
+  const row = blockRow + homeV
   return {
     col, row,
     homeX: -HALF_W + (col + 0.5) * CELL,
