@@ -1,16 +1,28 @@
 /**
- * Imperative diorama builder.
+ * Imperative diorama builder on the cross cube-net layout.
  *
- * Base: 2 wide (X: -1..+1) × 3 deep (Z: -1.5..+1.5)
- * Grid: 4 columns × 6 rows of 0.5×0.5 square cells = 24 tiles.
- * Each cube face = 2×2 cells = 1×1 unit (square).
+ * Bounding box: 8 × 6 cells (cross net). Only 24 cells are "filled" —
+ * the rest is empty padding in the flat view but unreachable during
+ * sphere/cube rendering (each face-block maps to one cube face).
+ *
+ * Face-block local extents in (x, z):
+ *   E (+Z center):      x ∈ [-2,  0], z ∈ [-1,  1]
+ *   A (+X right):       x ∈ [ 0,  2], z ∈ [-1,  1]
+ *   B (-X left):        x ∈ [-4, -2], z ∈ [-1,  1]
+ *   F (-Z far right):   x ∈ [ 2,  4], z ∈ [-1,  1]
+ *   C (+Y top):         x ∈ [-2,  0], z ∈ [ 1,  3]
+ *   D (-Y bottom):      x ∈ [-2,  0], z ∈ [-3, -1]
+ *
+ * Every object is placed strictly inside one face-block, so nothing
+ * gets cut across a flat-adjacent seam that would land on a mismatched
+ * cube edge.
  */
 
 import * as THREE from 'three'
 
-export const BASE_W = 4   // X extent (4 columns × 1 unit)
-export const BASE_H = 6   // Z extent (6 rows × 1 unit)
-export const HALF_W = BASE_W / 2  // 2
+export const BASE_W = 8
+export const BASE_H = 6
+export const HALF_W = BASE_W / 2  // 4
 export const HALF_H = BASE_H / 2  // 3
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -20,18 +32,26 @@ function mat(opts: THREE.MeshStandardMaterialParameters) {
 }
 
 function pseudoNoise(x: number, z: number) {
-  // Halve frequency so hills stay same visual scale at 2× base
   return (
     Math.sin(x * 1.85 + 0.3) * Math.cos(z * 1.45 + 1.1) * 0.12 +
     Math.sin(x * 3.55 + z * 2.65) * 0.05
   )
 }
 
+/** Cross-net membership test (keeps the terrain / fills in the net shape). */
+function onNet(x: number, z: number): boolean {
+  // Middle band: x ∈ [-4, 4], z ∈ [-1, 1]
+  if (z >= -1 && z <= 1) return x >= -4 && x <= 4
+  // C (top) or D (bottom) stems: x ∈ [-2, 0]
+  if (x >= -2 && x <= 0) return z >= -3 && z <= 3
+  return false
+}
+
 // ── terrain ──────────────────────────────────────────────────────────
 
 function buildTerrain(): THREE.Mesh {
-  const segX = 32
-  const segZ = 48 // more segments for the longer axis
+  const segX = 64
+  const segZ = 48
   const g = new THREE.PlaneGeometry(BASE_W, BASE_H, segX, segZ)
   g.rotateX(-Math.PI / 2)
   const pos = g.attributes.position
@@ -40,11 +60,14 @@ function buildTerrain(): THREE.Mesh {
     const x = pos.getX(i)
     const z = pos.getZ(i)
     const rawH = pseudoNoise(x, z)
-    pos.setY(i, 0) // flat terrain
-    const g1 = 0.38 + rawH * 2.5 + Math.sin(x * 11 + z * 7) * 0.06 // color still varies (dark in low areas)
-    colors[i * 3] = 0.28 + Math.sin(x * 5) * 0.04
+    pos.setY(i, 0)
+    // Dim padding cells slightly so the cross shape reads more clearly
+    // in the grid view; clipping hides them in sphere/cube/split anyway.
+    const dim = onNet(x, z) ? 1 : 0.35
+    const g1 = (0.38 + rawH * 2.5 + Math.sin(x * 11 + z * 7) * 0.06) * dim
+    colors[i * 3] = (0.28 + Math.sin(x * 5) * 0.04) * dim
     colors[i * 3 + 1] = g1
-    colors[i * 3 + 2] = 0.12
+    colors[i * 3 + 2] = 0.12 * dim
   }
   g.setAttribute('color', new THREE.BufferAttribute(colors, 3))
   g.computeVertexNormals()
@@ -57,12 +80,9 @@ function buildTerrain(): THREE.Mesh {
 // ── water (animated) ─────────────────────────────────────────────────
 
 function buildPond(cx: number, cz: number, radius: number, name: string) {
-  // Use a subdivided plane clipped to a circle for enough vertices
-  // to curve correctly under sphere projection
   const seg = 32
   const g = new THREE.PlaneGeometry(radius * 2, radius * 2, seg, seg)
   g.rotateX(-Math.PI / 2)
-  // Clip vertices to circle and store original Y
   const pos = g.attributes.position
   const origY = new Float32Array(pos.count)
   for (let i = 0; i < pos.count; i++) {
@@ -70,7 +90,6 @@ function buildPond(cx: number, cz: number, radius: number, name: string) {
     const z = pos.getZ(i)
     const dist = Math.sqrt(x * x + z * z)
     if (dist > radius) {
-      // Move vertex to circle edge to avoid rendering outside
       const scale = radius / dist
       pos.setX(i, x * scale)
       pos.setZ(i, z * scale)
@@ -79,7 +98,7 @@ function buildPond(cx: number, cz: number, radius: number, name: string) {
   pos.needsUpdate = true
   const m = new THREE.Mesh(
     g,
-    mat({ color: '#3a7db8', transparent: true, opacity: 0.75, roughness: 0.15, metalness: 0.3 }),
+    mat({ color: '#3a7db8', transparent: true, opacity: 0.8, roughness: 0.15, metalness: 0.3 }),
   )
   m.position.set(cx, 0.05, cz)
   m.receiveShadow = true
@@ -156,15 +175,37 @@ function buildWindmill(px: number, pz: number) {
 
 // ── trees (animated sway) ────────────────────────────────────────────
 
+// Trees inside face-blocks only. Each tree sits strictly within one block
+// so no tree mesh straddles a flat seam (which would fold poorly).
 const TREE_POSITIONS: [number, number, number][] = [
-  // Original region (Z: -2 to +2 area)
-  [-0.5, 0, 1.1], [0.3, 0, 1.2], [-1.3, 0, 0.9],
-  [-1.4, 0, -1.3], [0.6, 0, -1.2], [-0.3, 0, -1.4], [1.4, 0, 0.3],
-  // Extended region (Z: -2 to -3)
-  [-1.2, 0, -2.3], [0.2, 0, -2.6], [1.3, 0, -2.2],
-  [-0.6, 0, -2.8], [0.9, 0, -2.7],
+  // E block  (x ∈ [-2, 0], z ∈ [-1, 1])
+  [-1.7,  0, -0.7],
+  [-0.3,  0,  0.7],
+  // A block  (x ∈ [0, 2], z ∈ [-1, 1])
+  [ 0.3,  0, -0.7],
+  [ 1.8,  0,  0.6],
+  // B block  (x ∈ [-4, -2], z ∈ [-1, 1])
+  [-2.3,  0,  0.5],
+  [-3.5,  0, -0.5],
+  [-2.9,  0,  0.8],
+  // F block  (x ∈ [2, 4], z ∈ [-1, 1])
+  [ 2.3,  0, -0.6],
+  [ 3.6,  0,  0.4],
+  // C block  (x ∈ [-2, 0], z ∈ [1, 3])  — top face
+  [-1.6,  0,  1.4],
+  [-0.4,  0,  2.4],
+  // D block  (x ∈ [-2, 0], z ∈ [-3, -1])  — bottom face
+  [-0.6,  0, -1.5],
+  [-1.7,  0, -2.4],
 ]
-const TREE_SCALES = [1, 0.75, 0.9, 1.1, 0.65, 0.85, 0.7, 0.8, 0.95, 0.7, 1.05, 0.6]
+const TREE_SCALES = [
+  1.0, 0.85,   // E
+  0.9, 1.05,   // A
+  0.75, 0.65, 0.9, // B
+  0.8, 0.95,   // F
+  0.7, 0.8,    // C
+  1.0, 0.75,   // D
+]
 
 function buildTrees() {
   const root = new THREE.Group()
@@ -215,18 +256,19 @@ function buildTrees() {
 // ── fence ────────────────────────────────────────────────────────────
 
 function buildFence(): THREE.Group {
+  // Inside E block only. Cosmetic front-yard boundary.
   const g = new THREE.Group()
   g.name = 'fence'
-  for (let i = 0; i < 6; i++) {
-    const t = i / 5
+  for (let i = 0; i < 5; i++) {
+    const t = i / 4
     const post = new THREE.Mesh(
       new THREE.BoxGeometry(0.03, 0.12, 0.03),
       mat({ color: '#7a6040', roughness: 0.9 }),
     )
     post.position.set(
-      THREE.MathUtils.lerp(-0.7, 0.8, t),
+      THREE.MathUtils.lerp(-1.6, -0.4, t),
       0.06,
-      THREE.MathUtils.lerp(-0.6, -0.9, t),
+      THREE.MathUtils.lerp(0.7, 0.9, t),
     )
     post.castShadow = true
     g.add(post)
@@ -242,28 +284,22 @@ function buildFlowers(): THREE.Group {
   const colors = ['#e85a7a', '#e8c85a', '#fff', '#d07ae8', '#e8a05a']
   let ci = 0
 
-  // Original region (scaled 2×)
-  for (let i = 0; i < 18; i++) {
-    const a = i * 2.399
-    const r = 0.4 + (i / 18) * 1.2
-    const x = Math.cos(a) * r * 0.9
-    const z = Math.sin(a) * r * 0.85
-    if (Math.sqrt((x - 0.9) ** 2 + (z - 0.6) ** 2) < 0.76) continue
-    if (Math.sqrt((x + 1.0) ** 2 + (z + 0.7) ** 2) < 0.4) continue
-    const flower = new THREE.Mesh(
-      new THREE.SphereGeometry(0.024, 5, 4),
-      mat({ color: colors[ci++ % colors.length], roughness: 0.6 }),
-    )
-    flower.position.set(x, 0.04, z)
-    g.add(flower)
-  }
-
-  // Extended region flowers
-  for (let i = 0; i < 10; i++) {
-    const a = i * 2.399 + 1.0
-    const r = 0.3 + (i / 10) * 1.0
-    const x = Math.cos(a) * r * 0.85
-    const z = -2.0 + Math.sin(a) * r * 0.8 - 0.4
+  // Flowers within face blocks. Positions hand-picked so each block has a few.
+  const spots: [number, number][] = [
+    // E block
+    [-0.5, -0.2], [-1.3, -0.5], [-0.8, 0.4],
+    // A block
+    [ 0.6,  0.3], [ 1.4, -0.5], [ 0.8, -0.2],
+    // B block
+    [-2.4, -0.3], [-3.1,  0.2], [-3.6, -0.7],
+    // F block
+    [ 2.5,  0.2], [ 3.2, -0.4], [ 3.7,  0.6],
+    // C block (top)
+    [-1.4,  1.6], [-0.7,  2.7],
+    // D block (bottom)
+    [-1.4, -1.6], [-0.7, -2.7],
+  ]
+  for (const [x, z] of spots) {
     const flower = new THREE.Mesh(
       new THREE.SphereGeometry(0.024, 5, 4),
       mat({ color: colors[ci++ % colors.length], roughness: 0.6 }),
@@ -310,19 +346,20 @@ function buildSmoke(px: number, pz: number) {
 // ── stone path ───────────────────────────────────────────────────────
 
 function buildStonePath(): THREE.Group {
+  // Path inside E block leading to hut.
   const g = new THREE.Group()
   g.name = 'stonepath'
-  for (let i = 0; i < 8; i++) {
-    const t = i / 7
+  for (let i = 0; i < 6; i++) {
+    const t = i / 5
     const r = 0.04 + Math.sin(i * 4.1) * 0.016
     const stone = new THREE.Mesh(
       new THREE.CircleGeometry(r, 6),
       mat({ color: '#8a8070', roughness: 0.95 }),
     )
     stone.position.set(
-      THREE.MathUtils.lerp(-1.0, -0.2, t) + Math.sin(i * 2.3) * 0.06,
+      THREE.MathUtils.lerp(-0.1, -0.9, t) + Math.sin(i * 2.3) * 0.05,
       0.01,
-      THREE.MathUtils.lerp(-0.44, 0.3, t) + Math.cos(i * 1.7) * 0.06,
+      THREE.MathUtils.lerp(0.8, -0.3, t) + Math.cos(i * 1.7) * 0.05,
     )
     stone.rotation.x = -Math.PI / 2
     stone.rotation.z = i * 1.1
@@ -331,14 +368,13 @@ function buildStonePath(): THREE.Group {
   return g
 }
 
-// ── well (new structure for extended area) ───────────────────────────
+// ── well (F block) ───────────────────────────────────────────────────
 
 function buildWell(): THREE.Group {
   const g = new THREE.Group()
-  g.position.set(1.0, 0, -2.4)
+  g.position.set(3.0, 0, -0.1)
   g.name = 'well'
 
-  // Stone base (cylinder)
   const base = new THREE.Mesh(
     new THREE.CylinderGeometry(0.16, 0.2, 0.24, 8),
     mat({ color: '#8a8070', roughness: 0.95 }),
@@ -346,7 +382,6 @@ function buildWell(): THREE.Group {
   base.position.y = 0.12; base.castShadow = true
   g.add(base)
 
-  // Roof supports (two posts)
   for (const side of [-1, 1]) {
     const post = new THREE.Mesh(
       new THREE.CylinderGeometry(0.024, 0.024, 0.4, 4),
@@ -357,7 +392,6 @@ function buildWell(): THREE.Group {
     g.add(post)
   }
 
-  // Small roof
   const roof = new THREE.Mesh(
     new THREE.ConeGeometry(0.24, 0.12, 4),
     mat({ color: '#8b4a2a', roughness: 0.8 }),
@@ -369,16 +403,16 @@ function buildWell(): THREE.Group {
   return g
 }
 
-// ── rocks (extended area detail) ─────────────────────────────────────
+// ── rocks (B block detail) ───────────────────────────────────────────
 
 function buildRocks(): THREE.Group {
   const g = new THREE.Group()
   g.name = 'rocks'
   const rockPositions: [number, number, number, number][] = [
-    [-1.5, 0.06, -2.1, 0.12],
-    [-1.7, 0.04, -2.5, 0.08],
-    [1.6, 0.05, -2.7, 0.1],
-    [-0.4, 0.04, -2.9, 0.07],
+    [-2.5, 0.06,  0.3, 0.12],
+    [-3.3, 0.04, -0.2, 0.08],
+    [-3.8, 0.05,  0.5, 0.10],
+    [-2.7, 0.04, -0.7, 0.07],
   ]
   for (const [x, y, z, r] of rockPositions) {
     const rock = new THREE.Mesh(
@@ -396,11 +430,10 @@ function buildRocks(): THREE.Group {
 // ── base boundary ────────────────────────────────────────────────────
 
 function buildBase(): THREE.Mesh {
-  // Subdivided plane so it curves correctly under sphere projection
-  const g = new THREE.PlaneGeometry(BASE_W, BASE_H, 32, 48)
+  const g = new THREE.PlaneGeometry(BASE_W, BASE_H, 48, 32)
   g.rotateX(-Math.PI / 2)
   const m = new THREE.Mesh(g, mat({ color: '#3a2a1a', roughness: 1 }))
-  m.position.y = -0.001 // just below terrain to avoid z-fighting
+  m.position.y = -0.001
   m.name = 'base'
   return m
 }
@@ -416,12 +449,15 @@ export function buildDiorama(): DioramaScene {
   const root = new THREE.Group()
   root.name = 'diorama'
 
-  // Water: original pond + a stream in the extended area
-  const pond = buildPond(0.9, 0.6, 0.64, 'pond')
-  const stream = buildPond(-0.2, -2.4, 0.4, 'stream')
+  // Central pond on +Y (top face): the world has a lake on top when folded.
+  const pond = buildPond(-1.0, 2.0, 0.6, 'pond')
+  // Stream on -Y (bottom): smaller reflective patch.
+  const stream = buildPond(-1.2, -2.1, 0.45, 'stream')
 
-  const windmill = buildWindmill(1.1, -1.0)
+  // Windmill on +X face (A). Well inside the A block; no seam crossing.
+  const windmill = buildWindmill(1.0, 0.0)
   const trees = buildTrees()
+  // Chimney smoke from the hut on E.
   const smoke = buildSmoke(-1.0, -0.7)
 
   root.add(buildBase())

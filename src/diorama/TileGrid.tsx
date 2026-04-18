@@ -12,7 +12,7 @@ import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useFBO } from '@react-three/drei'
 import { buildDiorama, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
-import { COLS, ROWS, CELL, cellFace } from './DioramaGrid'
+import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
 import { usePlanet } from '../world/store'
 import { AXIS_VEC, tileInSlice, type Axis } from '../world/rotation'
@@ -42,18 +42,15 @@ interface CellDef {
   homeZ: number
 }
 
-// Reverse lookup: face index → (fbCol, fbRow) in the 2×3 face-block grid
-const FACE_TO_BLOCK: Record<number, [number, number]> = {
-  2: [0, 0], 1: [1, 0],  // fbRow=0
-  4: [0, 1], 3: [1, 1],  // fbRow=1
-  5: [0, 2], 0: [1, 2],  // fbRow=2
-}
+// Face index → (col, row) top-left of its 2×2 block on the cross cube-net.
+// Uses the mapping exported by DioramaGrid so the flat diorama content and
+// the sphere renderer agree on every home cell.
 
 /** Convert store tile home position to grid (col, row) → diorama homeX/homeZ */
 function tileToHome(homeFace: FaceIndex, homeU: number, homeV: number) {
-  const [fbCol, fbRow] = FACE_TO_BLOCK[homeFace]
-  const col = fbCol * 2 + homeU
-  const row = fbRow * 2 + homeV
+  const [blockCol, blockRow] = FACE_TO_BLOCK_TL[homeFace]
+  const col = blockCol + homeU
+  const row = blockRow + homeV
   return {
     col, row,
     homeX: -HALF_W + (col + 0.5) * CELL,
@@ -111,12 +108,15 @@ function storeTileCubeRender(tile: Tile, gap: number): CellRender {
 }
 
 function buildCellDefs(): CellDef[] {
+  // Only iterate filled cells on the cross cube-net (24 cells).
   const cells: CellDef[] = []
   for (let row = 0; row < ROWS; row++) {
     for (let col = 0; col < COLS; col++) {
+      const face = cellFace(col, row)
+      if (face < 0) continue
       cells.push({
         col, row,
-        face: cellFace(col, row),
+        face,
         localU: col % 2,
         localV: row % 2,
         homeX: -HALF_W + (col + 0.5) * CELL,

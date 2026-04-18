@@ -42,7 +42,7 @@ export default function App() {
       {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <Canvas
         camera={{
-          position: preview ? [0, 14, 0.1] : [2.4, 1.6, 2.8],
+          position: preview ? [0, 22, 0.1] : [2.4, 1.6, 2.8],
           fov: preview ? 50 : 45,
           near: 0.01,
         }}

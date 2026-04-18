@@ -67,6 +67,7 @@ function FlatLabels({ split }: { split: boolean }) {
   for (let row = 0; row < ROWS; row++) {
     for (let col = 0; col < COLS; col++) {
       const face = cellFace(col, row)
+      if (face < 0) continue
       const u = col % 2
       const v = row % 2
       const homeX = -HALF_W + (col + 0.5) * CELL
@@ -92,6 +93,7 @@ function CubeLabels() {
   for (let row = 0; row < ROWS; row++) {
     for (let col = 0; col < COLS; col++) {
       const faceIdx = cellFace(col, row)
+      if (faceIdx < 0) continue
       const face = FACES[faceIdx]
       const u = col % 2
       const v = row % 2
