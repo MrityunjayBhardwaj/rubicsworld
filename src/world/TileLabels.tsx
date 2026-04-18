@@ -34,12 +34,11 @@ export const FACE_LABEL_COLORS = [
   '#7a8aa0', // F  -Z
 ] as const
 
-// Index within a face: v*2 + u + 1. Convention: v=0 is the physical top
-// row of the face (+face.up direction) so the natural reading order
-// (1, 2 on top, 3, 4 on bottom) comes out without a rename — the v
-// direction itself is flipped in the tile position math.
+// Index within a face. User-requested convention: 3, 4 on top row of each
+// face, 1, 2 on bottom row. v=0 is physical top (+face.up), so 3, 4 are
+// assigned to v=0 and 1, 2 to v=1.
 function labelFor(face: number, u: number, v: number): string {
-  const idx = v * 2 + u + 1
+  const idx = (1 - v) * 2 + u + 1
   return `${FACE_LETTERS[face]}${idx}`
 }
 
