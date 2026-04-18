@@ -1,6 +1,17 @@
 import { create } from 'zustand'
 import { buildSolvedTiles, isSolved, type Tile } from './tile'
 import { rotateSlice, randomMove, inverseMove, type Axis, type Direction, type Move } from './rotation'
+import type { FaceIndex } from './faces'
+
+/** Which tile the cursor is over, in current cube coordinates. Drives the
+ *  hover-to-key rotation hybrid: hover a tile, press Q/W/E/A/S/D → rotate the
+ *  slice containing it around a face-local axis. Set by Interaction.tsx on
+ *  pointermove raycasts; null when the cursor is off the planet. */
+export interface HoveredTile {
+  face: FaceIndex
+  u: number
+  v: number
+}
 
 export interface AnimState {
   id: number
@@ -25,6 +36,7 @@ interface PlanetStore {
   showLabels: boolean
   showRing: boolean
   onPlanet: boolean
+  hoveredTile: HoveredTile | null
   commitThreshold: number // radians; drag past this and release → commit
   aiEnabled: boolean
   aiHasFired: boolean // per-playthrough latch; resets on scramble/reset
@@ -34,6 +46,7 @@ interface PlanetStore {
   setShowLabels: (v: boolean) => void
   setShowRing: (v: boolean) => void
   setOnPlanet: (v: boolean) => void
+  setHoveredTile: (t: HoveredTile | null) => void
   setCommitThreshold: (v: number) => void
   setAiEnabled: (v: boolean) => void
   markAiFired: () => void
@@ -98,6 +111,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   showLabels: false,
   showRing: false,
   onPlanet: false,
+  hoveredTile: null,
   commitThreshold: (6.5 * Math.PI) / 180, // 6.5° — tuned for a light digital feel
   aiEnabled: true,
   aiHasFired: false,
@@ -107,6 +121,14 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   setShowLabels: v => set({ showLabels: v }),
   setShowRing: v => set({ showRing: v }),
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
+  setHoveredTile: t => set(s => {
+    // Shallow-equal check to skip store churn on redundant writes (pointermove
+    // fires ~60Hz; most samples land on the same tile).
+    const a = s.hoveredTile
+    if (a === t) return {}
+    if (a && t && a.face === t.face && a.u === t.u && a.v === t.v) return {}
+    return { hoveredTile: t }
+  }),
   setCommitThreshold: v => set({ commitThreshold: v }),
   setAiEnabled: v => set({ aiEnabled: v }),
   markAiFired: () => set({ aiHasFired: true }),
