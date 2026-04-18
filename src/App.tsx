@@ -4,10 +4,11 @@ import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
-import { Lights } from './world/Lights'
 import { AiSeed } from './world/AiSeed'
 import { PostFx } from './world/PostFx'
 import { TileLabels, TileLabelsLegend } from './world/TileLabels'
+import { HDRIEnvironment } from './world/HDRIEnvironment'
+import { HDRIPanel } from './world/HDRIPanel'
 import { TileGrid } from './diorama/TileGrid'
 import { DioramaGrid } from './diorama/DioramaGrid'
 import { BezierCurveEditor } from './diorama/BezierCurveEditor'
@@ -39,6 +40,7 @@ export default function App() {
       <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />
       <Cursor />
       <TileLabelsLegend />
+      <HDRIPanel />
       {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <Canvas
         camera={{
@@ -65,7 +67,7 @@ export default function App() {
           </>
         ) : (
           <>
-            <Lights />
+            <HDRIEnvironment />
             <TileGrid mode="sphere" bezier={bezier} />
             <Ring />
             <Interaction />

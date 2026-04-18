@@ -475,8 +475,14 @@ export function TileGrid({ mode = 'split', bezier }: {
 
     const dScene = new THREE.Scene()
     dScene.add(diorama.root)
-    dScene.add(new THREE.AmbientLight(0xffffff, 0.5))
-    const dir = new THREE.DirectionalLight(0xffffff, 1.2)
+    // In sphere mode the diorama is lit by the HDRI environment only — we
+    // mirror scene.environment onto dScene each frame below. For preview
+    // modes (split/cube) we still want some direct light because those
+    // render via the same dScene but the main R3F scene has no Environment
+    // mounted. Use a soft ambient + a fill directional as a fallback; when
+    // dScene.environment is set (sphere mode), these are effectively dwarfed.
+    dScene.add(new THREE.AmbientLight(0xffffff, 0.35))
+    const dir = new THREE.DirectionalLight(0xffffff, 0.7)
     dir.position.set(3, 4, 2)
     dScene.add(dir)
     dioramaSceneRef.current = dScene
@@ -529,6 +535,19 @@ export function TileGrid({ mode = 'split', bezier }: {
     const renders = rendersRef.current
     const oScene = overlaySceneRef.current
     if (!diorama || !dScene || renders.length === 0) return
+
+    // Mirror the main scene's environment (set by HDRIEnvironment) onto the
+    // offscreen dScene so MeshStandardMaterial inside the diorama samples
+    // the same IBL as the outer world — avoids a dark, flatly-lit sphere.
+    if (dScene.environment !== scene.environment) {
+      dScene.environment = scene.environment
+      dScene.environmentIntensity = scene.environmentIntensity
+    }
+    // Keep live HDRI parameters in sync
+    dScene.environmentIntensity = scene.environmentIntensity
+    if (scene.environmentRotation && dScene.environmentRotation) {
+      dScene.environmentRotation.copy(scene.environmentRotation)
+    }
 
     diorama.update(clock.elapsedTime)
 

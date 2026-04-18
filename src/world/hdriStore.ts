@@ -1,0 +1,56 @@
+import { create } from 'zustand'
+import type * as THREE from 'three'
+
+// Drei built-in presets — same names that <Environment preset=...> accepts.
+export const HDRI_PRESETS = [
+  'apartment', 'city', 'dawn', 'forest', 'lobby',
+  'night', 'park', 'studio', 'sunset', 'warehouse',
+] as const
+export type HdriPreset = (typeof HDRI_PRESETS)[number]
+
+interface HdriStore {
+  /** Blob URL for an uploaded HDR/EXR. Null → use `preset`. */
+  url: string | null
+  filename: string | null
+  preset: HdriPreset
+
+  /** scene.backgroundBlurriness (0..1) */
+  blur: number
+  /** scene.environmentIntensity (0..N) */
+  intensity: number
+  /** Y-axis rotation, radians */
+  rotation: number
+  /** scene.backgroundIntensity — 0 hides the skybox, 1 fully visible */
+  backgroundOpacity: number
+
+  /** Latest loaded environment texture — populated by HDRIEnvironment so
+   *  TileGrid's offscreen dScene can mirror it for IBL on the diorama. */
+  envTexture: THREE.Texture | null
+
+  setUrl: (url: string | null, filename?: string | null) => void
+  setPreset: (p: HdriPreset) => void
+  setBlur: (v: number) => void
+  setIntensity: (v: number) => void
+  setRotation: (v: number) => void
+  setBackgroundOpacity: (v: number) => void
+  setEnvTexture: (t: THREE.Texture | null) => void
+}
+
+export const useHdri = create<HdriStore>(set => ({
+  url: null,
+  filename: null,
+  preset: 'sunset',
+  blur: 0.25,
+  intensity: 1.0,
+  rotation: 0,
+  backgroundOpacity: 0,
+  envTexture: null,
+
+  setUrl: (url, filename) => set({ url, filename: filename ?? null }),
+  setPreset: preset => set({ preset }),
+  setBlur: blur => set({ blur }),
+  setIntensity: intensity => set({ intensity }),
+  setRotation: rotation => set({ rotation }),
+  setBackgroundOpacity: backgroundOpacity => set({ backgroundOpacity }),
+  setEnvTexture: envTexture => set({ envTexture }),
+}))
