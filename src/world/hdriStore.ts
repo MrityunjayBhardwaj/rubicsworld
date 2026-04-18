@@ -22,6 +22,9 @@ interface HdriStore {
   rotation: number
   /** scene.backgroundIntensity — 0 hides the skybox, 1 fully visible */
   backgroundOpacity: number
+  /** When false, all direct lights (ambient / directional) are muted —
+   *  the scene is illuminated only by the HDRI environment. */
+  physicalLights: boolean
 
   /** Latest loaded environment texture — populated by HDRIEnvironment so
    *  TileGrid's offscreen dScene can mirror it for IBL on the diorama. */
@@ -33,6 +36,7 @@ interface HdriStore {
   setIntensity: (v: number) => void
   setRotation: (v: number) => void
   setBackgroundOpacity: (v: number) => void
+  setPhysicalLights: (v: boolean) => void
   setEnvTexture: (t: THREE.Texture | null) => void
 }
 
@@ -44,6 +48,7 @@ export const useHdri = create<HdriStore>(set => ({
   intensity: 1.0,
   rotation: 0,
   backgroundOpacity: 0,
+  physicalLights: true,
   envTexture: null,
 
   setUrl: (url, filename) => set({ url, filename: filename ?? null }),
@@ -52,5 +57,6 @@ export const useHdri = create<HdriStore>(set => ({
   setIntensity: intensity => set({ intensity }),
   setRotation: rotation => set({ rotation }),
   setBackgroundOpacity: backgroundOpacity => set({ backgroundOpacity }),
+  setPhysicalLights: physicalLights => set({ physicalLights }),
   setEnvTexture: envTexture => set({ envTexture }),
 }))

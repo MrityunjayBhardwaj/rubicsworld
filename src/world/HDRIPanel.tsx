@@ -73,8 +73,8 @@ async function buildHdriThumbnail(url: string, isExr: boolean): Promise<HTMLCanv
 export function HDRIPanel() {
   const {
     url, filename, preset,
-    blur, intensity, rotation, backgroundOpacity,
-    setUrl, setPreset, setBlur, setIntensity, setRotation, setBackgroundOpacity,
+    blur, intensity, rotation, backgroundOpacity, physicalLights,
+    setUrl, setPreset, setBlur, setIntensity, setRotation, setBackgroundOpacity, setPhysicalLights,
   } = useHdri()
 
   const fileRef = useRef<HTMLInputElement | null>(null)
@@ -190,6 +190,18 @@ export function HDRIPanel() {
               </select>
             </Row>
           )}
+          <Row label="Physical lights">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={physicalLights}
+                onChange={e => setPhysicalLights(e.target.checked)}
+              />
+              <span style={{ opacity: 0.75, fontSize: 10 }}>
+                {physicalLights ? 'on — directional + ambient' : 'off — IBL only'}
+              </span>
+            </label>
+          </Row>
           <SliderRow label="Exposure" value={intensity} min={0} max={3} step={0.05} onChange={setIntensity} />
           <SliderRow label="Blur" value={blur} min={0} max={1} step={0.01} onChange={setBlur} />
           <SliderRow

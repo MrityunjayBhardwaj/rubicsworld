@@ -17,6 +17,7 @@ import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { useFrame } from '@react-three/fiber'
 import { buildDiorama, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
+import { useHdri } from '../world/hdriStore'
 
 export const COLS = 8
 export const ROWS = 6
@@ -144,6 +145,8 @@ function buildFlatGridLines(): THREE.Group {
 export function DioramaGrid() {
   const groupRef = useRef<THREE.Group>(null)
   const dioramaRef = useRef<DioramaScene | null>(null)
+  const ambientRef = useRef<THREE.AmbientLight | null>(null)
+  const dirRef = useRef<THREE.DirectionalLight | null>(null)
 
   useEffect(() => {
     const parent = groupRef.current
@@ -154,11 +157,13 @@ export function DioramaGrid() {
     parent.add(diorama.root)
     parent.add(buildFlatGridLines())
 
-    // Lights
-    parent.add(new THREE.AmbientLight(0xffffff, 0.5))
+    const ambient = new THREE.AmbientLight(0xffffff, 0.5)
+    parent.add(ambient)
+    ambientRef.current = ambient
     const dir = new THREE.DirectionalLight(0xffffff, 1.2)
     dir.position.set(3, 4, 2)
     parent.add(dir)
+    dirRef.current = dir
 
     return () => {
       while (parent.children.length) parent.remove(parent.children[0])
@@ -167,6 +172,9 @@ export function DioramaGrid() {
 
   useFrame(({ clock }) => {
     dioramaRef.current?.update(clock.elapsedTime)
+    const physicalLights = useHdri.getState().physicalLights
+    if (ambientRef.current) ambientRef.current.intensity = physicalLights ? 0.5 : 0
+    if (dirRef.current) dirRef.current.intensity = physicalLights ? 1.2 : 0
   })
 
   return <group ref={groupRef} />

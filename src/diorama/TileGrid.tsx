@@ -16,6 +16,7 @@ import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
 import { usePlanet } from '../world/store'
 import { AXIS_VEC, tileInSlice, type Axis } from '../world/rotation'
+import { useHdri } from '../world/hdriStore'
 import type { Tile } from '../world/tile'
 
 const SLICE_ROT_MS = 380
@@ -435,6 +436,8 @@ export function TileGrid({ mode = 'split', bezier }: {
   const sphereUniformsRef = useRef<SphereUniforms | null>(null)
   const animStartRef = useRef<{ id: number; start: number } | null>(null)
   const quadRef = useRef<THREE.Mesh | null>(null)
+  const ambientLightRef = useRef<THREE.AmbientLight | null>(null)
+  const dirLightRef = useRef<THREE.DirectionalLight | null>(null)
 
   // Offscreen target for the 24-pass sphere output. Post-fx runs on a
   // fullscreen quad sampling this texture, so bloom/vignette can coexist
@@ -481,10 +484,13 @@ export function TileGrid({ mode = 'split', bezier }: {
     // render via the same dScene but the main R3F scene has no Environment
     // mounted. Use a soft ambient + a fill directional as a fallback; when
     // dScene.environment is set (sphere mode), these are effectively dwarfed.
-    dScene.add(new THREE.AmbientLight(0xffffff, 0.35))
+    const ambient = new THREE.AmbientLight(0xffffff, 0.35)
+    dScene.add(ambient)
+    ambientLightRef.current = ambient
     const dir = new THREE.DirectionalLight(0xffffff, 0.7)
     dir.position.set(3, 4, 2)
     dScene.add(dir)
+    dirLightRef.current = dir
     dioramaSceneRef.current = dScene
 
     const cells = buildCellDefs()
@@ -547,6 +553,15 @@ export function TileGrid({ mode = 'split', bezier }: {
     dScene.environmentIntensity = scene.environmentIntensity
     if (scene.environmentRotation && dScene.environmentRotation) {
       dScene.environmentRotation.copy(scene.environmentRotation)
+    }
+
+    // Toggle the fallback direct lights driven by the store flag.
+    const physicalLights = useHdri.getState().physicalLights
+    if (ambientLightRef.current) {
+      ambientLightRef.current.intensity = physicalLights ? 0.35 : 0
+    }
+    if (dirLightRef.current) {
+      dirLightRef.current.intensity = physicalLights ? 0.7 : 0
     }
 
     diorama.update(clock.elapsedTime)
