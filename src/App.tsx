@@ -1,9 +1,10 @@
-import { useState, useCallback } from 'react'
-import { Canvas } from '@react-three/fiber'
+import { useState, useCallback, useEffect } from 'react'
+import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
+import { WalkControls } from './world/WalkControls'
 import { AiSeed } from './world/AiSeed'
 import { PostFx } from './world/PostFx'
 import { TileLabels, TileLabelsLegend } from './world/TileLabels'
@@ -16,11 +17,13 @@ import { Controls } from './Controls'
 import { usePlanet } from './world/store'
 import { NEIGHBOR_IDX } from './world/rotation'
 import { hudUniforms } from './diorama/buildDiorama'
+import { useHdri } from './world/hdriStore'
 
 if (import.meta.env.DEV && typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__planet = usePlanet
   ;(window as unknown as Record<string, unknown>).__neighborIdx = NEIGHBOR_IDX
   ;(window as unknown as Record<string, unknown>).__hud = hudUniforms
+  ;(window as unknown as Record<string, unknown>).__hdri = useHdri
 }
 
 function Cursor() {
@@ -30,6 +33,36 @@ function Cursor() {
   return (
     <style>{`canvas { cursor: ${cursor}; }`}</style>
   )
+}
+
+function SphereCamera() {
+  // OrbitControls for third-person orbit around the planet. Unmounted when
+  // walk mode is active so it doesn't fight WalkControls for the camera.
+  const cameraMode = usePlanet(s => s.cameraMode)
+  if (cameraMode === 'walk') return null
+  return (
+    <OrbitControls
+      key="sphere"
+      makeDefault
+      enablePan={false}
+      minDistance={2.5}
+      maxDistance={8}
+      rotateSpeed={0.8}
+      enableDamping
+      dampingFactor={0.08}
+    />
+  )
+}
+
+function DevSceneExpose() {
+  // Dev helper: expose the R3F scene to window for debugging HDRI state.
+  const { scene } = useThree()
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      ;(window as unknown as Record<string, unknown>).__scene = scene
+    }
+  }, [scene])
+  return null
 }
 
 export default function App() {
@@ -57,6 +90,7 @@ export default function App() {
         dpr={[1, 2]}
       >
         <color attach="background" args={['#0a0d12']} />
+        <DevSceneExpose />
         {preview === 'grid' ? (
           <>
             <DioramaGrid />
@@ -78,6 +112,7 @@ export default function App() {
             <AiSeed />
             <TileLabels mode="sphere" />
             <PostFx />
+            <WalkControls />
           </>
         )}
         {preview ? (
@@ -94,19 +129,11 @@ export default function App() {
             maxDistance={60}
           />
         ) : (
-          // OrbitControls for sphere — feels more natural (polar locking is
-          // a feature, not a bug, for a grounded "planet" sim). Trackball's
-          // free-roll past the poles disoriented more than it helped.
-          <OrbitControls
-            key="sphere"
-            makeDefault
-            enablePan={false}
-            minDistance={2.5}
-            maxDistance={8}
-            rotateSpeed={0.8}
-            enableDamping
-            dampingFactor={0.08}
-          />
+          // Sphere-mode camera routing: OrbitControls for third-person orbit,
+          // auto-unmounted when WalkControls takes over. Polar-lock is a
+          // feature for a grounded planet sim (Trackball's free-roll past the
+          // poles disoriented more than it helped).
+          <SphereCamera />
         )}
       </Canvas>
     </>
