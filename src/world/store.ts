@@ -52,9 +52,16 @@ interface PlanetStore {
    *    'orbit-solved'    — solved planet slow-orbits (first 3 s)
    *    'scrambling'      — animated scramble playing
    *    'orbit-scrambled' — scramble done, still slow-orbiting, waiting for hover
+   *    'tutorial'        — first-visit only; overlay guides a 3-move solve
    *    'done'            — player engaged; camera + input yield to them
-   *  Auto-orbit is enabled while this is NOT 'done'. */
-  introPhase: 'orbit-solved' | 'scrambling' | 'orbit-scrambled' | 'done'
+   *  Auto-orbit is enabled in 'orbit-solved' / 'scrambling' / 'orbit-scrambled'
+   *  and disabled in 'tutorial' / 'done' so the user can target tiles. */
+  introPhase: 'orbit-solved' | 'scrambling' | 'orbit-scrambled' | 'tutorial' | 'done'
+  /** While in 'tutorial' phase, the ordered list of moves the user must commit
+   *  to reach solved. Rebuilt on mismatch via a shortest-path BFS. */
+  tutorialQueue: Move[]
+  /** Index into tutorialQueue — the next move the overlay is hinting. */
+  tutorialStep: number
   commitThreshold: number // radians; drag past this and release → commit
   aiEnabled: boolean
   aiHasFired: boolean // per-playthrough latch; resets on scramble/reset
@@ -68,6 +75,8 @@ interface PlanetStore {
   setEasyMode: (v: boolean) => void
   setCameraMode: (v: 'orbit' | 'walk') => void
   setIntroPhase: (v: PlanetStore['introPhase']) => void
+  setTutorialQueue: (q: Move[]) => void
+  setTutorialStep: (n: number) => void
   setCommitThreshold: (v: number) => void
   setAiEnabled: (v: boolean) => void
   markAiFired: () => void
@@ -142,6 +151,8 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   easyMode: false,
   cameraMode: 'orbit',
   introPhase: 'orbit-solved',
+  tutorialQueue: [],
+  tutorialStep: 0,
   commitThreshold: (6.5 * Math.PI) / 180, // 6.5° — tuned for a light digital feel
   aiEnabled: true,
   aiHasFired: false,
@@ -154,6 +165,8 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   setEasyMode: v => set({ easyMode: v }),
   setCameraMode: v => set(s => (s.cameraMode === v ? {} : { cameraMode: v })),
   setIntroPhase: v => set(s => (s.introPhase === v ? {} : { introPhase: v })),
+  setTutorialQueue: q => set({ tutorialQueue: q, tutorialStep: 0 }),
+  setTutorialStep: n => set({ tutorialStep: n }),
   setHoveredTile: t => set(s => {
     // Shallow-equal check to skip store churn on redundant writes (pointermove
     // fires ~60Hz; most samples land on the same tile).

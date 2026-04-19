@@ -63,6 +63,13 @@ export function Controls({
     Solve: button(() => solve()),
     'Solve (animated)': button(() => void solveAnimated()),
     Reset: button(() => reset()),
+    'Replay tutorial (reload)': button(() => {
+      // Dev aid: clear the tutorialSeen flag and reload so the onboarding
+      // tutorial plays again from the top. Used to test the flow without
+      // clearing localStorage manually.
+      try { localStorage.removeItem('rubicsworld:tutorialSeen') } catch { /* ignore */ }
+      window.location.reload()
+    }),
     'Self-test (rotation math)': button(() => {
       const r = runRotationSelfTest(200, 30)
       const verdict = r.fail === 0 ? 'PASS' : 'FAIL'
