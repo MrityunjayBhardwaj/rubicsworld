@@ -32,7 +32,7 @@ const MOUSE_PITCH = 0.0025
 const PITCH_MAX = Math.PI * 0.48  // ~86° — stop short of vertical either way
 
 export function WalkControls() {
-  const { camera, gl } = useThree()
+  const { camera } = useThree()
   const cameraMode = usePlanet(s => s.cameraMode)
   const setCameraMode = usePlanet(s => s.setCameraMode)
 
@@ -46,9 +46,6 @@ export function WalkControls() {
   // drift-correcting fwdRef would otherwise wipe any pitch the user applied.
   const pitchRef = useRef<number>(0)
   const keysRef = useRef<Set<string>>(new Set())
-  // Tracks whether pointer-lock was ever actually granted — so onLockChange
-  // can distinguish "user released lock" from "lock was never granted".
-  const hadLockRef = useRef(false)
 
   useEffect(() => {
     if (cameraMode !== 'walk') return
@@ -74,24 +71,19 @@ export function WalkControls() {
     pitchRef.current = 0  // reset look pitch on every entry
     keysRef.current.clear()  // drop any keys still held from orbit mode
 
-    // Request pointer lock — improves mouse-look by uncapping the cursor
-    // from screen bounds. Browsers only grant this from a user gesture, so
-    // this may silently fail in headless or if the entry trigger wasn't a
-    // click. Walk mode still works without lock; mouse-delta is smaller
-    // since the cursor hits screen edges. Don't bail on failure.
-    const canvas = gl.domElement
-    const requestLock = async () => {
-      try { await canvas.requestPointerLock() } catch { /* ignore */ }
-    }
-    void requestLock()
+    // No pointer-lock: keeps the cursor visible so HDRI / Leva / any other
+    // HUD panel remains interactive while walking. Trade-off is that mouse
+    // deltas cap out when the cursor hits the window edge — acceptable
+    // because you can re-sweep and keep turning. FPS-purity loses to
+    // letting the user tune HDRI live without exiting walk mode.
 
     const onMouseMove = (e: MouseEvent) => {
-      // Don't gate on pointer lock — mousemove.movementX/Y are populated for
-      // every mousemove event, not just locked ones. The lock just uncaps
-      // delta range. When Leva / a panel is under the cursor, skip so the
-      // user can interact with HUD without spinning the view.
+      // Only look when the cursor is over the 3D canvas. Any HUD panel
+      // (Leva, HDRIPanel, BezierCurveEditor, TileLabelsLegend, tooltips,
+      // etc.) sits above the canvas with position:fixed — those targets
+      // should remain interactive without spinning the view.
       const tgt = e.target as HTMLElement | null
-      if (tgt && typeof tgt.closest === 'function' && tgt.closest('[id^="leva"]')) return
+      if (!(tgt instanceof HTMLCanvasElement)) return
       const up = posRef.current.clone().normalize()
       // Yaw: rotate the tangent forward around the up axis and keep it
       // strictly in the tangent plane. Negative movementX feels natural.
@@ -120,28 +112,15 @@ export function WalkControls() {
       keysRef.current.delete(e.key.toLowerCase())
     }
 
-    const onLockChange = () => {
-      // If the user pressed Esc to exit pointer lock, also exit walk mode.
-      // Only fires when we HAD the lock and lost it — so this doesn't fire
-      // when lock was never granted in the first place (headless / non-gesture).
-      if (hadLockRef.current && document.pointerLockElement !== canvas && usePlanet.getState().cameraMode === 'walk') {
-        setCameraMode('orbit')
-      }
-      hadLockRef.current = document.pointerLockElement === canvas
-    }
-
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
-    document.addEventListener('pointerlockchange', onLockChange)
 
     return () => {
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
-      document.removeEventListener('pointerlockchange', onLockChange)
       keysRef.current.clear()
-      if (document.pointerLockElement === canvas) document.exitPointerLock()
       // Restore a comfortable third-person orbit distance. OrbitControls
       // remounts on next frame and takes over from here; we want the camera
       // to end up pulled back from the surface along the last-looked direction
@@ -151,7 +130,7 @@ export function WalkControls() {
       camera.up.set(0, 1, 0)
       camera.lookAt(0, 0, 0)
     }
-  }, [cameraMode, camera, gl, setCameraMode])
+  }, [cameraMode, camera, setCameraMode])
 
   useFrame((_, dt) => {
     if (cameraMode !== 'walk') return
