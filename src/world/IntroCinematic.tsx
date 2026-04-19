@@ -75,7 +75,6 @@ export function IntroCinematic() {
       for (const m of TUTORIAL_SCRAMBLE) {
         if (aborted) return
         if (usePlanet.getState().introPhase === 'done') return
-        // eslint-disable-next-line no-await-in-loop
         await rotateAnimated(m)
       }
       if (aborted) return

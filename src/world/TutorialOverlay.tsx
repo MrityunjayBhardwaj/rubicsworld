@@ -6,6 +6,7 @@ import * as THREE from 'three'
 import { usePlanet } from './store'
 import { tileCentroid, tileInSlice, AXIS_VEC, type Move } from './rotation'
 import type { Tile } from './tile'
+import { bfsSolve } from './tutorialSolver'
 import swipeAnim from './assets/swipe-hint.json'
 
 const PLANET_R = 1.0
@@ -153,6 +154,61 @@ export function TutorialChrome() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  }, [active])
+
+  // Progress tracker: watch history growth. Compare the latest committed
+  // move to tutorialQueue[tutorialStep]. On match, advance the step. On the
+  // final match the puzzle will have just landed at solved — write the flag
+  // and transition to 'done'. Mismatch handling (BFS re-solve) is Phase 5;
+  // for now a wrong move leaves the queue intact and the hint keeps pointing
+  // at the same next expected move.
+  useEffect(() => {
+    if (!active) return
+    const unsub = usePlanet.subscribe((s, prev) => {
+      if (s.introPhase !== 'tutorial') return
+      if (s.history.length <= prev.history.length) return
+
+      const latest = s.history[s.history.length - 1]
+      const expected = s.tutorialQueue[s.tutorialStep]
+      if (!expected) return
+
+      const matches =
+        latest.axis === expected.axis &&
+        latest.slice === expected.slice &&
+        latest.dir === expected.dir
+
+      if (matches) {
+        const nextStep = s.tutorialStep + 1
+        if (nextStep >= s.tutorialQueue.length) {
+          // Final expected move committed — puzzle should now be solved.
+          // applyRotation fires planet:settled inside the same reducer
+          // update, so the warmth/bloom ramp is already ticking.
+          try { localStorage.setItem('rubicsworld:tutorialSeen', '1') } catch { /* ignore */ }
+          s.setIntroPhase('done')
+        } else {
+          s.setTutorialStep(nextStep)
+        }
+        return
+      }
+
+      // Wrong move — re-solve from the current state with BFS so the hint
+      // re-points at the new shortest path. If the user has scrambled past
+      // our tutorial depth, gracefully skip.
+      const solution = bfsSolve(s.tiles, 5)
+      if (solution === null) {
+        try { localStorage.setItem('rubicsworld:tutorialSeen', '1') } catch { /* ignore */ }
+        s.setIntroPhase('done')
+        return
+      }
+      if (solution.length === 0) {
+        // Somehow already solved after the wrong move — finish.
+        try { localStorage.setItem('rubicsworld:tutorialSeen', '1') } catch { /* ignore */ }
+        s.setIntroPhase('done')
+        return
+      }
+      s.setTutorialQueue(solution) // resets step to 0
+    })
+    return unsub
   }, [active])
 
   if (!active) return null
