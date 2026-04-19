@@ -61,6 +61,18 @@ _(At every 10th entry: review, prune stale/non-generalizable entries.)_
 **The trap:** You blame z-fighting and bump Y (doesn't fix it because the chord still dips below), or blame clip planes / material flags / depthWrite (all fine). Root fix: add enough `widthSegments` (and `depthSegments` for long z-axis spans) that the shader has vertices to curve. Rule of thumb: ≥ ~8 segments per cube-face-block the mesh spans.
 **REF:** UNGROUNDED — sphere projection shader lives in-project at `src/diorama/TileGrid.tsx:370-413` (the `<project_vertex>` replacement in `patchMaterialForSphere`). Road fix at `src/diorama/buildDiorama.ts:687-697` (`BoxGeometry(BASE_W, 0.025, ROAD_WIDTH, 64, 1, 1)`).
 
+## P2: Sibling-mount race silently resets scene-level state
+**Root cause:** Drei / R3F siblings (`<Environment>` re-mount paths, `<OrbitControls makeDefault>` mount/unmount) write `scene.environmentIntensity`, `scene.backgroundIntensity`, `scene.backgroundBlurriness`, `scene.environmentRotation` etc. to three.js defaults during their own lifecycle. If your push-to-scene lives in a store-dep `useEffect`, it won't re-fire when the store is unchanged — so the scene stays stuck at the reset values until the next user tweak reaches it through the store.
+**Detection signal:** A slider works on first tweak, then silently "reverts" whenever an unrelated thing mounts/unmounts (walk-mode entry, bezier change, etc.). Store still shows the right value; scene shows the wrong one. No console errors. Can only catch it by reading `scene.*` live.
+**The trap:** Expand `useEffect` dependencies hoping to catch the transition (`[scene, cameraMode, ...]`) — but other resets you haven't identified still slip through. Root fix: push scene-level state in `useFrame` (every frame, idempotent) so you always win the race. Cost: a handful of scalar assignments per frame.
+**REF:** UNGROUNDED — canonical instance `src/world/HDRIEnvironment.tsx:48-62` (push moved from `useEffect` to `useFrame`). Diagnosis harness `tests/hdri-persist.mjs` snapshots store + scene across walk-mode entry.
+
+## P3: React Strict Mode + `startedRef` guard = effect silently no-ops
+**Root cause:** In dev, React Strict Mode invokes effects twice: mount → immediate cleanup → re-mount. A top-of-effect guard like `if (startedRef.current) return; startedRef.current = true;` sees `true` on the second mount and early-returns. The first mount's cleanup already aborted its `setTimeout` / subscription, so the intended behaviour never runs.
+**Detection signal:** One-shot timed sequences (intros, cinematics, delayed bootstraps) fail to fire in dev but work in production (where Strict Mode is off). Diagnosable by logging at the top of the effect — you'll see the early-return line fire on the second mount.
+**The trap:** Move the guard ref out of the component (module-level boolean) — but that breaks component remount (route change) and still races HMR. Root fix: don't guard. Let the effect re-run on each mount; rely on cleanup (`clearTimeout`, `unsubscribe`) to abort correctly, plus a store-state gate at the top of the effect (`if (store.introPhase === 'done') return`) for idempotent skip after completion.
+**REF:** UNGROUNDED — canonical instance `src/world/IntroCinematic.tsx:30-38` (Strict-Mode-compatible re-mount pattern).
+
 ### Entry Format (MANDATORY fields)
 
 ```
