@@ -42,7 +42,9 @@ function SphereCamera() {
   const cameraMode = usePlanet(s => s.cameraMode)
   const introPhase = usePlanet(s => s.introPhase)
   if (cameraMode === 'walk') return null
-  const autoRotate = introPhase !== 'done'
+  // Auto-orbit during attract phases only. In 'tutorial' the user is
+  // targeting specific tiles — a moving planet fights the overlay's hint.
+  const autoRotate = introPhase !== 'done' && introPhase !== 'tutorial'
   return (
     <OrbitControls
       key="sphere"
