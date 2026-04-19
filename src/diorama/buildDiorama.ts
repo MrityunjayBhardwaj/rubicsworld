@@ -273,78 +273,95 @@ function patchMaterialForTriplanar(material: THREE.Material, texture: THREE.Text
        vec4 triCol = triX * triW.x + triY * triW.y + triZ * triW.z;
        diffuseColor *= triCol;
 
-       // ── HUD overlay ────────────────────────────────────────────
-       // 6×6 dot grid per tile, size boosted at tile edges and by
-       // cursor proximity. Global uHudOpacity drives attract mode
-       // (whole planet covered at t=0, fades to 0 after first commit).
+       // ── HUD overlay: tile edge lines ───────────────────────────
+       // Two line thicknesses distinguish the two kinds of tile edge on a
+       // 2×2 puzzle:
+       //   • THIN — cube face-boundary edges between tiles on adjacent
+       //     faces. These tiles belong to the SAME corner cubie and always
+       //     rotate together; the edge is a within-piece seam, cosmetic.
+       //   • THICK — face-internal mid-face seams. These cut between two
+       //     different cubies on the same face; any axis rotation shears
+       //     across this seam. These are the slice boundaries — the
+       //     "rotatable tile group" edges the player cares about.
+       // Global uHudOpacity drives attract mode (whole planet lit at t=0);
+       // cursor proximity gives a localized reveal after attract fades.
        {
-         // Re-derive face basis for hudWorldP (tile's visible cube cell).
+         // Re-derive face basis for hudWorldP (the tile's visible cube cell).
          vec3 absP = abs(hudWorldP);
          vec3 fRight, fUp;
-         int hFace;
          if (absP.x >= absP.y && absP.x >= absP.z) {
-           if (hudWorldP.x > 0.0) { hFace = 0; fRight = vec3(0.0, 0.0,-1.0); fUp = vec3(0.0, 1.0, 0.0); }
-           else                    { hFace = 1; fRight = vec3(0.0, 0.0, 1.0); fUp = vec3(0.0, 1.0, 0.0); }
+           if (hudWorldP.x > 0.0) { fRight = vec3(0.0, 0.0,-1.0); fUp = vec3(0.0, 1.0, 0.0); }
+           else                    { fRight = vec3(0.0, 0.0, 1.0); fUp = vec3(0.0, 1.0, 0.0); }
          } else if (absP.y >= absP.z) {
-           if (hudWorldP.y > 0.0) { hFace = 2; fRight = vec3(1.0, 0.0, 0.0); fUp = vec3(0.0, 0.0,-1.0); }
-           else                    { hFace = 3; fRight = vec3(1.0, 0.0, 0.0); fUp = vec3(0.0, 0.0, 1.0); }
+           if (hudWorldP.y > 0.0) { fRight = vec3(1.0, 0.0, 0.0); fUp = vec3(0.0, 0.0,-1.0); }
+           else                    { fRight = vec3(1.0, 0.0, 0.0); fUp = vec3(0.0, 0.0, 1.0); }
          } else {
-           if (hudWorldP.z > 0.0) { hFace = 4; fRight = vec3(1.0, 0.0, 0.0); fUp = vec3(0.0, 1.0, 0.0); }
-           else                    { hFace = 5; fRight = vec3(-1.0,0.0, 0.0); fUp = vec3(0.0, 1.0, 0.0); }
+           if (hudWorldP.z > 0.0) { fRight = vec3(1.0, 0.0, 0.0); fUp = vec3(0.0, 1.0, 0.0); }
+           else                    { fRight = vec3(-1.0,0.0, 0.0); fUp = vec3(0.0, 1.0, 0.0); }
          }
          float dotR = dot(hudWorldP, fRight);
          float dotU = dot(hudWorldP, fUp);
          int tU = (dotR > 0.0) ? 1 : 0;
          int tV = (dotU > 0.0) ? 0 : 1;
-         // Tile-local UV, each ∈ [-0.5, 0.5]. Uses the CELL=1 convention.
+         // Tile-local UV ∈ [-0.5, 0.5] along face.right and face.up.
          float uL = dotR - (float(tU) - 0.5);
          float vL = dotU - (0.5 - float(tV));
 
-         // 6×6 dot grid per tile.
-         const float N_DOTS = 6.0;
-         float gU = floor(uL * N_DOTS + 0.5) / N_DOTS;
-         float gV = floor(vL * N_DOTS + 0.5) / N_DOTS;
-         float dotDist = length(vec2(uL - gU, vL - gV));
-
-         // Edge bias — dots near tile edges grow larger so boundaries emerge.
-         float edgeDist = min(0.5 - abs(uL), 0.5 - abs(vL));
-         float edgeBias = 1.0 - smoothstep(0.0, 0.15, edgeDist);
-
-         // Cursor proximity in world space (pre-slice-unwind cursor ↔
-         // pre-slice-unwind fragment position; use vTriWorldPos for the
-         // fragment so the cursor region doesn't shift mid-rotation).
-         float cd = distance(vTriWorldPos, uHudCursor);
-         float cursorW = uHudCursorActive * exp(-(cd*cd) / (uHudHoverRadius*uHudHoverRadius));
-
-         // Reveal = max(attract opacity, cursor proximity weight).
-         float reveal = max(uHudOpacity, cursorW);
-
-         // Dot radius scales with reveal and edge bias.
-         float baseR = 0.018;
-         float edgeR = 0.050;
-         float r = mix(baseR, edgeR, edgeBias) * reveal;
-         float dotMask = 1.0 - smoothstep(r * 0.55, r, dotDist);
-
-         // Easy-mode edge coloring (L3): sample the per-edge mask for this
-         // tile, pick whichever edge the fragment is nearest. Robust to
-         // float slop — compare edgeDistU vs edgeDistV explicitly.
-         vec4 mask = uHudTileEdgeMask[tileIdx];
          float edgeDistU = 0.5 - abs(uL);
          float edgeDistV = 0.5 - abs(vL);
+         float edgeDist;
+         bool internalEdge;
+         if (edgeDistU < edgeDistV) {
+           edgeDist = edgeDistU;
+           // +right edge (uL>0) is internal iff tU==0 (neighbor u=1 same face);
+           // -right edge (uL<0) is internal iff tU==1.
+           internalEdge = (uL > 0.0) ? (tU == 0) : (tU == 1);
+         } else {
+           edgeDist = edgeDistV;
+           // +up edge (vL>0) is internal iff tV==1 (neighbor v=0 same face);
+           // -up edge (vL<0) is internal iff tV==0.
+           internalEdge = (vL > 0.0) ? (tV == 1) : (tV == 0);
+         }
+
+         // Line half-widths in tile-local units. Face-boundary lines are
+         // rendered from BOTH adjacent tiles (each draws its half), so the
+         // per-side width is roughly half the visible stroke.
+         float thinHW  = 0.012;
+         float thickHW = 0.028;
+         float hw = internalEdge ? thickHW : thinHW;
+
+         // Suppress at 3-face cube corners: fragments near the corner of a
+         // face (both edgeDistU and edgeDistV small) classify ambiguously
+         // because the max-abs-component face picker flickers between three
+         // candidate faces → visible speckle. Fade the line out where the
+         // "non-nearest" edge distance is also small.
+         float otherEdgeDist = (edgeDistU < edgeDistV) ? edgeDistV : edgeDistU;
+         float cornerFade = smoothstep(0.015, 0.06, otherEdgeDist);
+
+         // Cursor proximity in world space — vTriWorldPos (pre-slice-unwind)
+         // so the revealed region doesn't shift as a slice animates.
+         float cd = distance(vTriWorldPos, uHudCursor);
+         float cursorW = uHudCursorActive * exp(-(cd*cd) / (uHudHoverRadius*uHudHoverRadius));
+         float reveal = max(uHudOpacity, cursorW);
+
+         // Line alpha — soft inner edge so the stroke reads as an aliased line.
+         float lineAlpha = (1.0 - smoothstep(hw * 0.55, hw, edgeDist)) * reveal * cornerFade;
+
+         // Easy-mode tint (L3): sample the per-edge mask to tint the line
+         // green where both tiles are at home across this edge, red where not.
+         // Off in L3-disabled mode (uHudEasyMode eases to 0) → pure yellow.
+         vec4 mask = uHudTileEdgeMask[tileIdx];
          float maskVal;
          if (edgeDistU < edgeDistV) {
            maskVal = (uL > 0.0) ? mask.x : mask.y;
          } else {
            maskVal = (vL > 0.0) ? mask.z : mask.w;
          }
-         vec3 hudColMono = vec3(0.92, 0.95, 1.0);
-         vec3 hudColGood = vec3(0.55, 0.95, 0.55);
-         vec3 hudColBad  = vec3(0.95, 0.55, 0.45);
-         vec3 hudColEasy = mix(hudColGood, hudColBad, maskVal);
-         vec3 hudCol = mix(hudColMono, hudColEasy, uHudEasyMode * edgeBias);
+         vec3 yellow = vec3(1.00, 0.88, 0.25);
+         vec3 easyCol = mix(vec3(0.50, 0.95, 0.45), vec3(0.98, 0.45, 0.35), maskVal);
+         vec3 lineColor = mix(yellow, easyCol, uHudEasyMode);
 
-         float alpha = dotMask * reveal * 0.6;
-         diffuseColor.rgb = mix(diffuseColor.rgb, hudCol, alpha);
+         diffuseColor.rgb = mix(diffuseColor.rgb, lineColor, lineAlpha);
        }`,
     )
   }
