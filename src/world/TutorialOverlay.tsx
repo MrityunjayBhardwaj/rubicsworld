@@ -7,6 +7,7 @@ import { usePlanet } from './store'
 import { tileCentroid, tileInSlice, AXIS_VEC, type Move } from './rotation'
 import type { Tile } from './tile'
 import { bfsSolve } from './tutorialSolver'
+import { hudUniforms } from '../diorama/buildDiorama'
 import swipeAnim from './assets/swipe-hint.json'
 
 const PLANET_R = 1.0
@@ -48,9 +49,13 @@ export function TutorialHint() {
   const camera = useThree(s => s.camera)
 
   const groupRef = useRef<THREE.Group>(null!)
+  const ringRef = useRef<THREE.Mesh>(null!)
+  const ringMatRef = useRef<THREE.MeshBasicMaterial>(null!)
   const rotatorRef = useRef<HTMLDivElement | null>(null)
   const demoTileRef = useRef<Tile | null>(null)
   const sphereAnchor = useMemo(() => new THREE.Vector3(), [])
+  const ringOrientQuat = useMemo(() => new THREE.Quaternion(), [])
+  const ringUp = useMemo(() => new THREE.Vector3(0, 0, 1), [])
 
   const active = introPhase === 'tutorial' && queue[step] !== undefined
 
@@ -65,27 +70,70 @@ export function TutorialHint() {
     demoTileRef.current = pickDemoTile(tiles, queue[step], camera.position)
   }, [active, tiles, queue, step, camera])
 
-  useFrame(() => {
+  // When the tutorial ends, release the HUD cursor glow. Otherwise the last
+  // pulse value persists on the demo tile until the user's next pointermove.
+  useEffect(() => {
+    if (!active) {
+      hudUniforms.uHudCursorActive.value = 0
+    }
+    return () => {
+      hudUniforms.uHudCursorActive.value = 0
+    }
+  }, [active])
+
+  useFrame(({ clock }) => {
     const g = groupRef.current
+    const ring = ringRef.current
     if (!g) return
     const tile = demoTileRef.current
     const move = queue[step]
     if (!active || !tile || !move) {
       g.visible = false
+      if (ring) ring.visible = false
       return
     }
     g.visible = true
+    if (ring) ring.visible = true
+
+    const centroid = tileCentroid(tile.face, tile.u, tile.v).normalize()
+    const surfaceP = centroid.clone().multiplyScalar(PLANET_R)
+
+    // Drive the existing HUD cursor-glow uniform onto the demo tile. This
+    // reuses Interaction.tsx's machinery (Gaussian falloff + yellow edges at
+    // cursor position) to make the tile visibly "glow" — matching the chrome
+    // copy "swipe the glowing tile". Real pointermove will fight for these
+    // uniforms; we re-assert every frame so the target stays lit when the
+    // user's cursor isn't on a tile, and yields transiently when it is.
+    hudUniforms.uHudCursor.value.copy(surfaceP)
+    // Pulse 0.55 → 1.0 → 0.55 at ~1.3 Hz for attention.
+    const pulse = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(clock.elapsedTime * 2.6))
+    hudUniforms.uHudCursorActive.value = pulse
 
     // Anchor floats slightly above the sphere surface so the Lottie doesn't
     // occlude the tile it's pointing at.
-    const centroid = tileCentroid(tile.face, tile.u, tile.v).normalize()
     sphereAnchor.copy(centroid).multiplyScalar(PLANET_R * 1.28)
     g.position.copy(sphereAnchor)
+
+    // Tile glow ring — sits flush on the sphere surface, tangent-oriented.
+    // Ring geometry's native plane is XY (normal = +Z); rotate so +Z aligns
+    // with the outward tile normal. Pulsing scale + opacity reads as "this
+    // tile is glowing". Additive-blend material means it reads over both
+    // dark biome and HDRI bright zones.
+    if (ring) {
+      ring.position.copy(centroid).multiplyScalar(PLANET_R * 1.005)
+      ringOrientQuat.setFromUnitVectors(ringUp, centroid)
+      ring.quaternion.copy(ringOrientQuat)
+      const scalePulse = 0.95 + 0.08 * Math.sin(clock.elapsedTime * 2.6)
+      ring.scale.setScalar(scalePulse)
+      if (ringMatRef.current) {
+        // Opacity pulse out-of-phase with scale so the halo breathes visibly.
+        ringMatRef.current.opacity = 0.55 + 0.35 * (0.5 + 0.5 * Math.sin(clock.elapsedTime * 2.6 + Math.PI * 0.25))
+      }
+    }
 
     // Tangent direction of rotation at this point: cross(axisVec, spherePos)
     // oriented by dir. Projected into screen space to rotate the Lottie so
     // its left→right motion reads as the required swipe direction.
-    const surfaceP = centroid.clone().multiplyScalar(PLANET_R)
     const tangent = new THREE.Vector3().crossVectors(AXIS_VEC[move.axis], surfaceP)
     if (tangent.lengthSq() < 1e-6) return
     tangent.normalize().multiplyScalar(move.dir)
@@ -114,7 +162,19 @@ export function TutorialHint() {
   if (!active) return null
 
   return (
-    <group ref={groupRef}>
+    <>
+      <mesh ref={ringRef} renderOrder={999}>
+        <ringGeometry args={[0.16, 0.24, 48]} />
+        <meshBasicMaterial
+          ref={ringMatRef}
+          color="#ffdc77"
+          transparent
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+      <group ref={groupRef}>
       <Html
         center
         zIndexRange={[100, 0]}
@@ -132,7 +192,8 @@ export function TutorialHint() {
           {LottieView}
         </div>
       </Html>
-    </group>
+      </group>
+    </>
   )
 }
 
