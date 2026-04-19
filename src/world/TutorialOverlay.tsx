@@ -49,13 +49,32 @@ export function TutorialHint() {
   const camera = useThree(s => s.camera)
 
   const groupRef = useRef<THREE.Group>(null!)
-  const ringRef = useRef<THREE.Mesh>(null!)
-  const ringMatRef = useRef<THREE.MeshBasicMaterial>(null!)
+  const arrowRef = useRef<THREE.Mesh>(null!)
+  const arrowMatRef = useRef<THREE.MeshBasicMaterial>(null!)
   const rotatorRef = useRef<HTMLDivElement | null>(null)
   const demoTileRef = useRef<Tile | null>(null)
   const sphereAnchor = useMemo(() => new THREE.Vector3(), [])
-  const ringOrientQuat = useMemo(() => new THREE.Quaternion(), [])
-  const ringUp = useMemo(() => new THREE.Vector3(0, 0, 1), [])
+  const basisMat = useMemo(() => new THREE.Matrix4(), [])
+  const basisX = useMemo(() => new THREE.Vector3(), [])
+  const basisY = useMemo(() => new THREE.Vector3(), [])
+  const basisZ = useMemo(() => new THREE.Vector3(), [])
+
+  // Arrow geometry: rectangle tail + triangle head, centered at origin,
+  // pointing along +X in its local XY plane. Scale sized for a 2×2 tile
+  // (~0.5 arc on a unit sphere) so the head + tail fit inside the tile.
+  const arrowGeom = useMemo(() => {
+    const s = new THREE.Shape()
+    s.moveTo(-0.11, -0.028)
+    s.lineTo(0.03, -0.028)
+    s.lineTo(0.03, -0.065)
+    s.lineTo(0.14, 0)
+    s.lineTo(0.03, 0.065)
+    s.lineTo(0.03, 0.028)
+    s.lineTo(-0.11, 0.028)
+    s.lineTo(-0.11, -0.028)
+    const geom = new THREE.ShapeGeometry(s)
+    return geom
+  }, [])
 
   const active = introPhase === 'tutorial' && queue[step] !== undefined
 
@@ -83,17 +102,17 @@ export function TutorialHint() {
 
   useFrame(({ clock }) => {
     const g = groupRef.current
-    const ring = ringRef.current
+    const arrow = arrowRef.current
     if (!g) return
     const tile = demoTileRef.current
     const move = queue[step]
     if (!active || !tile || !move) {
       g.visible = false
-      if (ring) ring.visible = false
+      if (arrow) arrow.visible = false
       return
     }
     g.visible = true
-    if (ring) ring.visible = true
+    if (arrow) arrow.visible = true
 
     const centroid = tileCentroid(tile.face, tile.u, tile.v).normalize()
     const surfaceP = centroid.clone().multiplyScalar(PLANET_R)
@@ -114,20 +133,27 @@ export function TutorialHint() {
     sphereAnchor.copy(centroid).multiplyScalar(PLANET_R * 1.28)
     g.position.copy(sphereAnchor)
 
-    // Tile glow ring — sits flush on the sphere surface, tangent-oriented.
-    // Ring geometry's native plane is XY (normal = +Z); rotate so +Z aligns
-    // with the outward tile normal. Pulsing scale + opacity reads as "this
-    // tile is glowing". Additive-blend material means it reads over both
-    // dark biome and HDRI bright zones.
-    if (ring) {
-      ring.position.copy(centroid).multiplyScalar(PLANET_R * 1.005)
-      ringOrientQuat.setFromUnitVectors(ringUp, centroid)
-      ring.quaternion.copy(ringOrientQuat)
-      const scalePulse = 0.95 + 0.08 * Math.sin(clock.elapsedTime * 2.6)
-      ring.scale.setScalar(scalePulse)
-      if (ringMatRef.current) {
-        // Opacity pulse out-of-phase with scale so the halo breathes visibly.
-        ringMatRef.current.opacity = 0.55 + 0.35 * (0.5 + 0.5 * Math.sin(clock.elapsedTime * 2.6 + Math.PI * 0.25))
+    // Directional arrow — sits flush on the sphere surface, pointing along
+    // the rotation tangent (the direction the user should swipe). Oriented
+    // via an explicit basis:
+    //   local +X → tangent-of-rotation at this surface point (swipe dir)
+    //   local +Y → bitangent on the sphere (perpendicular in-surface)
+    //   local +Z → outward sphere normal
+    // Additive blend so the glow reads over any biome.
+    if (arrow) {
+      const tangentVec = basisX.crossVectors(AXIS_VEC[move.axis], surfaceP)
+      if (tangentVec.lengthSq() > 1e-6) {
+        tangentVec.normalize().multiplyScalar(move.dir) // swipe direction
+        basisZ.copy(centroid) // outward normal
+        basisY.crossVectors(basisZ, basisX).normalize() // bitangent
+        basisMat.makeBasis(basisX, basisY, basisZ)
+        arrow.quaternion.setFromRotationMatrix(basisMat)
+      }
+      arrow.position.copy(centroid).multiplyScalar(PLANET_R * 1.008)
+      const scalePulse = 0.94 + 0.10 * (0.5 + 0.5 * Math.sin(clock.elapsedTime * 2.6))
+      arrow.scale.setScalar(scalePulse)
+      if (arrowMatRef.current) {
+        arrowMatRef.current.opacity = 0.70 + 0.25 * (0.5 + 0.5 * Math.sin(clock.elapsedTime * 2.6 + Math.PI * 0.25))
       }
     }
 
@@ -163,10 +189,9 @@ export function TutorialHint() {
 
   return (
     <>
-      <mesh ref={ringRef} renderOrder={999}>
-        <ringGeometry args={[0.16, 0.24, 48]} />
+      <mesh ref={arrowRef} geometry={arrowGeom} renderOrder={999}>
         <meshBasicMaterial
-          ref={ringMatRef}
+          ref={arrowMatRef}
           color="#ffdc77"
           transparent
           depthWrite={false}
