@@ -77,6 +77,43 @@ export function inverseMove(m: Move): Move {
   return { axis: m.axis, slice: m.slice, dir: -m.dir as Direction }
 }
 
+/** Static neighbor-across-edge table: for each of the 24 CURRENT cube
+ *  positions (face * 4 + v * 2 + u), the neighbor position across each of
+ *  the 4 face-local edges: [+right, -right, +up, -up]. Neighbors may live
+ *  on the same face (internal seam) or the adjacent cube face. Computed
+ *  geometrically once per module load via centroidToFaceUV on a small
+ *  outward nudge past the tile's edge centre. */
+export const NEIGHBOR_IDX: Int32Array = (() => {
+  const out = new Int32Array(24 * 4)
+  for (let idx = 0; idx < 24; idx++) {
+    const face = (idx >> 2) as FaceIndex
+    const v = (idx >> 1) & 1
+    const u = idx & 1
+    const f = FACES[face]
+    const center = tileCentroid(face, u, v)
+    const edgeDirs = [
+      f.right.clone(),
+      f.right.clone().negate(),
+      f.up.clone(),
+      f.up.clone().negate(),
+    ]
+    for (let e = 0; e < 4; e++) {
+      const dir = edgeDirs[e]
+      // Move a full CELL along the edge direction — lands either in the
+      // adjacent same-face tile center, or outside the cube in which case the
+      // max-abs component > 1. centroidToFaceUV expects max-abs = 1 (it maps
+      // s∈[-1,1] to u∈{0..N-1} and rounds; s=1 rounds to u=N which is OOB),
+      // so normalize the probe back to the cube surface before the lookup.
+      const probe = center.clone().addScaledVector(dir, 1.0)
+      const maxAbs = Math.max(Math.abs(probe.x), Math.abs(probe.y), Math.abs(probe.z))
+      probe.multiplyScalar(1 / maxAbs)
+      const n = centroidToFaceUV(probe)
+      out[idx * 4 + e] = n.face * 4 + n.v * 2 + n.u
+    }
+  }
+  return out
+})()
+
 export function randomMove(rng: () => number = Math.random, prev?: Move): Move {
   const axes: Axis[] = ['x', 'y', 'z']
   let m: Move

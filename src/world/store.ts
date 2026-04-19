@@ -1,6 +1,17 @@
 import { create } from 'zustand'
 import { buildSolvedTiles, isSolved, type Tile } from './tile'
 import { rotateSlice, randomMove, inverseMove, type Axis, type Direction, type Move } from './rotation'
+import type { FaceIndex } from './faces'
+
+/** Which tile the cursor is over, in current cube coordinates. Drives the
+ *  hover-to-key rotation hybrid: hover a tile, press Q/W/E/A/S/D → rotate the
+ *  slice containing it around a face-local axis. Set by Interaction.tsx on
+ *  pointermove raycasts; null when the cursor is off the planet. */
+export interface HoveredTile {
+  face: FaceIndex
+  u: number
+  v: number
+}
 
 export interface AnimState {
   id: number
@@ -25,6 +36,14 @@ interface PlanetStore {
   showLabels: boolean
   showRing: boolean
   onPlanet: boolean
+  hoveredTile: HoveredTile | null
+  /** True at t=0 (HUD covers entire planet as a tutorial attract). Flips
+   *  to false on the first successful player commit. TileGrid's useFrame
+   *  reads this and eases the shader's uHudOpacity uniform 1→0. */
+  hudAttractMode: boolean
+  /** Easy mode toggles per-edge correctness colors in the HUD overlay
+   *  (green = both tiles at home across this edge, red = misplaced). */
+  easyMode: boolean
   commitThreshold: number // radians; drag past this and release → commit
   aiEnabled: boolean
   aiHasFired: boolean // per-playthrough latch; resets on scramble/reset
@@ -34,6 +53,8 @@ interface PlanetStore {
   setShowLabels: (v: boolean) => void
   setShowRing: (v: boolean) => void
   setOnPlanet: (v: boolean) => void
+  setHoveredTile: (t: HoveredTile | null) => void
+  setEasyMode: (v: boolean) => void
   setCommitThreshold: (v: number) => void
   setAiEnabled: (v: boolean) => void
   markAiFired: () => void
@@ -73,7 +94,7 @@ let animCounter = 0
 let animResolver: (() => void) | null = null
 
 function applyRotation(
-  s: Pick<PlanetStore, 'tiles' | 'solved' | 'history'>,
+  s: Pick<PlanetStore, 'tiles' | 'solved' | 'history' | 'hudAttractMode'>,
   axis: Axis,
   slice: number,
   dir: Direction,
@@ -87,6 +108,9 @@ function applyRotation(
     tiles: newTiles,
     solved: nowSolved,
     history: [...s.history, { axis, slice, dir }],
+    // First player commit retires attract mode. TileGrid eases the shader
+    // uniform from 1 → 0 over ~1 s.
+    hudAttractMode: s.hudAttractMode ? false : s.hudAttractMode,
   }
 }
 
@@ -98,6 +122,9 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   showLabels: false,
   showRing: false,
   onPlanet: false,
+  hoveredTile: null,
+  hudAttractMode: true,
+  easyMode: false,
   commitThreshold: (6.5 * Math.PI) / 180, // 6.5° — tuned for a light digital feel
   aiEnabled: true,
   aiHasFired: false,
@@ -107,6 +134,15 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   setShowLabels: v => set({ showLabels: v }),
   setShowRing: v => set({ showRing: v }),
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
+  setEasyMode: v => set({ easyMode: v }),
+  setHoveredTile: t => set(s => {
+    // Shallow-equal check to skip store churn on redundant writes (pointermove
+    // fires ~60Hz; most samples land on the same tile).
+    const a = s.hoveredTile
+    if (a === t) return {}
+    if (a && t && a.face === t.face && a.u === t.u && a.v === t.v) return {}
+    return { hoveredTile: t }
+  }),
   setCommitThreshold: v => set({ commitThreshold: v }),
   setAiEnabled: v => set({ aiEnabled: v }),
   markAiFired: () => set({ aiHasFired: true }),
