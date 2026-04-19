@@ -5,6 +5,7 @@ import * as THREE from 'three'
 import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
 import { WalkControls } from './world/WalkControls'
+import { IntroCinematic } from './world/IntroCinematic'
 import { AiSeed } from './world/AiSeed'
 import { PostFx } from './world/PostFx'
 import { TileLabels, TileLabelsLegend } from './world/TileLabels'
@@ -39,7 +40,9 @@ function SphereCamera() {
   // OrbitControls for third-person orbit around the planet. Unmounted when
   // walk mode is active so it doesn't fight WalkControls for the camera.
   const cameraMode = usePlanet(s => s.cameraMode)
+  const introPhase = usePlanet(s => s.introPhase)
   if (cameraMode === 'walk') return null
+  const autoRotate = introPhase !== 'done'
   return (
     <OrbitControls
       key="sphere"
@@ -50,6 +53,8 @@ function SphereCamera() {
       rotateSpeed={0.8}
       enableDamping
       dampingFactor={0.08}
+      autoRotate={autoRotate}
+      autoRotateSpeed={0.9}
     />
   )
 }
@@ -113,6 +118,7 @@ export default function App() {
             <TileLabels mode="sphere" />
             <PostFx />
             <WalkControls />
+            <IntroCinematic />
           </>
         )}
         {preview ? (
