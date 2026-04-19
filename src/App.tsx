@@ -14,9 +14,13 @@ import { DioramaGrid } from './diorama/DioramaGrid'
 import { BezierCurveEditor } from './diorama/BezierCurveEditor'
 import { Controls } from './Controls'
 import { usePlanet } from './world/store'
+import { NEIGHBOR_IDX } from './world/rotation'
+import { hudUniforms } from './diorama/buildDiorama'
 
 if (import.meta.env.DEV && typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__planet = usePlanet
+  ;(window as unknown as Record<string, unknown>).__neighborIdx = NEIGHBOR_IDX
+  ;(window as unknown as Record<string, unknown>).__hud = hudUniforms
 }
 
 function Cursor() {
