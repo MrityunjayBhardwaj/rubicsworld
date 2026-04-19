@@ -15,11 +15,15 @@ import { buildDiorama, buildSphereTerrain, fresnelUniform, sliceRotUniforms, hud
 import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
 import { usePlanet } from '../world/store'
-import { AXIS_VEC, tileInSlice, type Axis } from '../world/rotation'
+import { AXIS_VEC, tileInSlice, NEIGHBOR_IDX, type Axis } from '../world/rotation'
 import { useHdri } from '../world/hdriStore'
 import type { Tile } from '../world/tile'
 
 const SLICE_ROT_MS = 380
+
+// Scratch buffer for the per-frame edge-mask recompute. Module-scoped so we
+// don't allocate 24 ints per frame. 24 slots, one per current tile position.
+const _atHomeScratch = new Uint8Array(24)
 
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
@@ -656,9 +660,38 @@ export function TileGrid({ mode = 'split', bezier }: {
     // Ease HUD attract opacity toward its target. 1.0 while in attract mode
     // (fresh session, no moves yet); 0.0 once the player commits their first
     // rotation. ~1 s ease over the transition feels "aha, they got it."
-    const hudTarget = usePlanet.getState().hudAttractMode ? 1 : 0
+    const pState = usePlanet.getState()
+    const hudTarget = pState.hudAttractMode ? 1 : 0
     const HUD_EASE = 0.04  // per-frame lerp factor ≈ 1s at 60fps
     hudUniforms.uHudOpacity.value += (hudTarget - hudUniforms.uHudOpacity.value) * HUD_EASE
+    // Ease easy-mode colour weight toward current store value. Same ease so
+    // toggling feels smooth rather than snappy.
+    const easyTarget = pState.easyMode ? 1 : 0
+    hudUniforms.uHudEasyMode.value += (easyTarget - hudUniforms.uHudEasyMode.value) * HUD_EASE
+
+    // Per-edge correctness mask for the HUD's easy-mode coloring. 0 = both
+    // self and neighbor are at their home positions (green); 1 = either is
+    // misplaced (red). Computed every frame — 24 tiles × 4 edges = 96 cheap
+    // comparisons, no allocation.
+    {
+      const tiles = pState.tiles
+      const mask = hudUniforms.uHudTileEdgeMask.value as Float32Array
+      const atHome = _atHomeScratch
+      for (let i = 0; i < 24; i++) atHome[i] = 0
+      for (const t of tiles) {
+        const idx = t.face * 4 + t.v * 2 + t.u
+        const home = t.homeFace === t.face && t.homeU === t.u && t.homeV === t.v
+        atHome[idx] = home ? 1 : 0
+      }
+      for (let idx = 0; idx < 24; idx++) {
+        const selfHome = atHome[idx]
+        const base = idx * 4
+        for (let e = 0; e < 4; e++) {
+          const neighIdx = NEIGHBOR_IDX[base + e]
+          mask[base + e] = selfHome && atHome[neighIdx] ? 0 : 1
+        }
+      }
+    }
 
     diorama.update(clock.elapsedTime)
 

@@ -41,6 +41,9 @@ interface PlanetStore {
    *  to false on the first successful player commit. TileGrid's useFrame
    *  reads this and eases the shader's uHudOpacity uniform 1→0. */
   hudAttractMode: boolean
+  /** Easy mode toggles per-edge correctness colors in the HUD overlay
+   *  (green = both tiles at home across this edge, red = misplaced). */
+  easyMode: boolean
   commitThreshold: number // radians; drag past this and release → commit
   aiEnabled: boolean
   aiHasFired: boolean // per-playthrough latch; resets on scramble/reset
@@ -51,6 +54,7 @@ interface PlanetStore {
   setShowRing: (v: boolean) => void
   setOnPlanet: (v: boolean) => void
   setHoveredTile: (t: HoveredTile | null) => void
+  setEasyMode: (v: boolean) => void
   setCommitThreshold: (v: number) => void
   setAiEnabled: (v: boolean) => void
   markAiFired: () => void
@@ -120,6 +124,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   onPlanet: false,
   hoveredTile: null,
   hudAttractMode: true,
+  easyMode: false,
   commitThreshold: (6.5 * Math.PI) / 180, // 6.5° — tuned for a light digital feel
   aiEnabled: true,
   aiHasFired: false,
@@ -129,6 +134,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   setShowLabels: v => set({ showLabels: v }),
   setShowRing: v => set({ showRing: v }),
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
+  setEasyMode: v => set({ easyMode: v }),
   setHoveredTile: t => set(s => {
     // Shallow-equal check to skip store churn on redundant writes (pointermove
     // fires ~60Hz; most samples land on the same tile).

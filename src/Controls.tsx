@@ -21,6 +21,7 @@ export function Controls({
   const setShowRing = usePlanet(s => s.setShowRing)
   const setCommitThreshold = usePlanet(s => s.setCommitThreshold)
   const setAiEnabled = usePlanet(s => s.setAiEnabled)
+  const setEasyMode = usePlanet(s => s.setEasyMode)
 
   useControls({
     'View: Cube net': button(() => setDioramaPreview(dioramaPreview === 'grid' ? false : 'grid')),
@@ -38,6 +39,10 @@ export function Controls({
     'AI seed': {
       value: true,
       onChange: (v: boolean) => setAiEnabled(v),
+    },
+    'Easy mode (HUD hints)': {
+      value: false,
+      onChange: (v: boolean) => setEasyMode(v),
     },
     'Commit threshold (°)': {
       value: 6.5,
