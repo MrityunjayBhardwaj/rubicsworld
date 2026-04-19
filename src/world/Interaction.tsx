@@ -90,7 +90,7 @@ function sphereHitToTile(hit: THREE.Vector3): { face: FaceIndex; u: number; v: n
 function moveFromKey(key: string, face: FaceDef, tileUV: { u: number; v: number }): Move | null {
   const centroid = tileCentroid(face.index, tileUV.u, tileUV.v)
   const resolve = (dir: THREE.Vector3): { axis: Axis; worldSign: 1 | -1 } => {
-    const ax = Math.abs(dir.x), ay = Math.abs(dir.y), az = Math.abs(dir.z)
+    const ax = Math.abs(dir.x), ay = Math.abs(dir.y)
     let axis: Axis
     if (ax > 0.5) axis = 'x'
     else if (ay > 0.5) axis = 'y'
