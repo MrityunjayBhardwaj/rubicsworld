@@ -6,6 +6,7 @@ import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
 import { WalkControls } from './world/WalkControls'
 import { IntroCinematic } from './world/IntroCinematic'
+import { TutorialHint, TutorialChrome } from './world/TutorialOverlay'
 import { AiSeed } from './world/AiSeed'
 import { PostFx } from './world/PostFx'
 import { TileLabels, TileLabelsLegend } from './world/TileLabels'
@@ -86,6 +87,7 @@ export default function App() {
       <TileLabelsLegend />
       <HDRIPanel />
       {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
+      <TutorialChrome />
       <Canvas
         camera={{
           position: preview ? [0, 22, 0.1] : [2.4, 1.6, 2.8],
@@ -121,6 +123,7 @@ export default function App() {
             <PostFx />
             <WalkControls />
             <IntroCinematic />
+            <TutorialHint />
           </>
         )}
         {preview ? (
