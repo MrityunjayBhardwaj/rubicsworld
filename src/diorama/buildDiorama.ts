@@ -326,16 +326,17 @@ function patchMaterialForTriplanar(material: THREE.Material, texture: THREE.Text
          float dotMask = 1.0 - smoothstep(r * 0.55, r, dotDist);
 
          // Easy-mode edge coloring (L3): sample the per-edge mask for this
-         // tile, pick whichever edge the fragment is nearest. In L2 the mask
-         // is all zeros → monochrome dots only.
+         // tile, pick whichever edge the fragment is nearest. Robust to
+         // float slop — compare edgeDistU vs edgeDistV explicitly.
          vec4 mask = uHudTileEdgeMask[tileIdx];
-         float maskVal = (uL > 0.0 && edgeDist == 0.5 - abs(uL))
-           ? mask.x
-           : (uL < 0.0 && edgeDist == 0.5 - abs(uL))
-             ? mask.y
-             : (vL > 0.0 && edgeDist == 0.5 - abs(vL))
-               ? mask.z
-               : mask.w;
+         float edgeDistU = 0.5 - abs(uL);
+         float edgeDistV = 0.5 - abs(vL);
+         float maskVal;
+         if (edgeDistU < edgeDistV) {
+           maskVal = (uL > 0.0) ? mask.x : mask.y;
+         } else {
+           maskVal = (vL > 0.0) ? mask.z : mask.w;
+         }
          vec3 hudColMono = vec3(0.92, 0.95, 1.0);
          vec3 hudColGood = vec3(0.55, 0.95, 0.55);
          vec3 hudColBad  = vec3(0.95, 0.55, 0.45);
