@@ -4,6 +4,7 @@ import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
+import { WalkControls } from './world/WalkControls'
 import { AiSeed } from './world/AiSeed'
 import { PostFx } from './world/PostFx'
 import { TileLabels, TileLabelsLegend } from './world/TileLabels'
@@ -29,6 +30,25 @@ function Cursor() {
   const cursor = drag ? 'grabbing' : onPlanet ? 'grab' : 'default'
   return (
     <style>{`canvas { cursor: ${cursor}; }`}</style>
+  )
+}
+
+function SphereCamera() {
+  // OrbitControls for third-person orbit around the planet. Unmounted when
+  // walk mode is active so it doesn't fight WalkControls for the camera.
+  const cameraMode = usePlanet(s => s.cameraMode)
+  if (cameraMode === 'walk') return null
+  return (
+    <OrbitControls
+      key="sphere"
+      makeDefault
+      enablePan={false}
+      minDistance={2.5}
+      maxDistance={8}
+      rotateSpeed={0.8}
+      enableDamping
+      dampingFactor={0.08}
+    />
   )
 }
 
@@ -78,6 +98,7 @@ export default function App() {
             <AiSeed />
             <TileLabels mode="sphere" />
             <PostFx />
+            <WalkControls />
           </>
         )}
         {preview ? (
@@ -94,19 +115,11 @@ export default function App() {
             maxDistance={60}
           />
         ) : (
-          // OrbitControls for sphere — feels more natural (polar locking is
-          // a feature, not a bug, for a grounded "planet" sim). Trackball's
-          // free-roll past the poles disoriented more than it helped.
-          <OrbitControls
-            key="sphere"
-            makeDefault
-            enablePan={false}
-            minDistance={2.5}
-            maxDistance={8}
-            rotateSpeed={0.8}
-            enableDamping
-            dampingFactor={0.08}
-          />
+          // Sphere-mode camera routing: OrbitControls for third-person orbit,
+          // auto-unmounted when WalkControls takes over. Polar-lock is a
+          // feature for a grounded planet sim (Trackball's free-roll past the
+          // poles disoriented more than it helped).
+          <SphereCamera />
         )}
       </Canvas>
     </>
