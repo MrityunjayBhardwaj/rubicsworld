@@ -29,7 +29,7 @@ const PLAYER_H = 0.08   // small-world scale — matches pocket-planet vibe
 const WALK_SPEED = 0.3  // world units per second (~20 s to walk the equator)
 const MOUSE_YAW   = 0.0025
 const MOUSE_PITCH = 0.0025
-const PITCH_LIMIT = 0.97 // clamp |dot(forward, up)| so pitch stops short of vertical
+const PITCH_MAX = Math.PI * 0.48  // ~86° — stop short of vertical either way
 
 export function WalkControls() {
   const { camera, gl } = useThree()
@@ -38,7 +38,13 @@ export function WalkControls() {
 
   // Persistent state across frames. Initialized on mount.
   const posRef = useRef<THREE.Vector3>(new THREE.Vector3(0, PLANET_R + PLAYER_H, 0))
+  // Tangent-plane forward — drives WASD walking. Always strictly perpendicular
+  // to the local surface normal; drift-corrected each frame.
   const fwdRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, -1))
+  // Look-direction pitch in radians (scalar, ±PITCH_MAX). Kept separate from
+  // fwdRef so mouse-look up/down doesn't interfere with tangent walking:
+  // drift-correcting fwdRef would otherwise wipe any pitch the user applied.
+  const pitchRef = useRef<number>(0)
   const keysRef = useRef<Set<string>>(new Set())
   // Tracks whether pointer-lock was ever actually granted — so onLockChange
   // can distinguish "user released lock" from "lock was never granted".
@@ -65,6 +71,8 @@ export function WalkControls() {
       camFwd.normalize()
     }
     fwdRef.current.copy(camFwd)
+    pitchRef.current = 0  // reset look pitch on every entry
+    keysRef.current.clear()  // drop any keys still held from orbit mode
 
     // Request pointer lock — improves mouse-look by uncapping the cursor
     // from screen bounds. Browsers only grant this from a user gesture, so
@@ -85,26 +93,17 @@ export function WalkControls() {
       const tgt = e.target as HTMLElement | null
       if (tgt && typeof tgt.closest === 'function' && tgt.closest('[id^="leva"]')) return
       const up = posRef.current.clone().normalize()
-      // Yaw: rotate forward around the up axis (negative movementX feels natural).
+      // Yaw: rotate the tangent forward around the up axis and keep it
+      // strictly in the tangent plane. Negative movementX feels natural.
       fwdRef.current.applyAxisAngle(up, -e.movementX * MOUSE_YAW)
-      // Pitch: rotate forward around local right axis.
-      const right = new THREE.Vector3().crossVectors(fwdRef.current, up)
-      if (right.lengthSq() > 1e-8) {
-        right.normalize()
-        fwdRef.current.applyAxisAngle(right, -e.movementY * MOUSE_PITCH)
-      }
-      // Clamp pitch so forward doesn't collide with up.
-      const dotUp = fwdRef.current.dot(up)
-      if (Math.abs(dotUp) > PITCH_LIMIT) {
-        // Remove the excess, re-normalize in the tangent plane, add back
-        // up-component at the limit.
-        const sign = dotUp > 0 ? 1 : -1
-        const tangent = fwdRef.current.clone().addScaledVector(up, -dotUp)
-        if (tangent.lengthSq() > 1e-8) tangent.normalize()
-        else tangent.copy(right) // safety fallback
-        fwdRef.current.copy(tangent.multiplyScalar(Math.sqrt(1 - PITCH_LIMIT * PITCH_LIMIT)))
-          .addScaledVector(up, sign * PITCH_LIMIT)
-      }
+      fwdRef.current.addScaledVector(up, -fwdRef.current.dot(up))
+      if (fwdRef.current.lengthSq() > 1e-8) fwdRef.current.normalize()
+      // Pitch: scalar accumulator, clamped. The pitched look-direction is
+      // derived in useFrame from (fwd, up, pitch) — keeping it separate from
+      // fwd means drift correction can flatten fwd without wiping pitch.
+      pitchRef.current -= e.movementY * MOUSE_PITCH
+      if (pitchRef.current >  PITCH_MAX) pitchRef.current =  PITCH_MAX
+      if (pitchRef.current < -PITCH_MAX) pitchRef.current = -PITCH_MAX
     }
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -157,8 +156,8 @@ export function WalkControls() {
   useFrame((_, dt) => {
     if (cameraMode !== 'walk') return
     const up = posRef.current.clone().normalize()
-    // Drift correction: project forward onto the tangent plane and
-    // renormalize so it doesn't accumulate a radial component.
+    // Drift correction on tangent forward. Only touches the tangent vector —
+    // pitch is in its own scalar so it's not disturbed.
     fwdRef.current.addScaledVector(up, -fwdRef.current.dot(up))
     if (fwdRef.current.lengthSq() < 1e-8) {
       fwdRef.current.set(1, 0, 0).addScaledVector(up, -up.x)
@@ -167,6 +166,9 @@ export function WalkControls() {
 
     const right = new THREE.Vector3().crossVectors(fwdRef.current, up).normalize()
 
+    // WASD walks along the TANGENT forward (unpitched), so looking up doesn't
+    // slow you down or push you off the surface. Look direction is pitched
+    // only for the camera, not for motion.
     const keys = keysRef.current
     const move = new THREE.Vector3()
     if (keys.has('w')) move.add(fwdRef.current)
@@ -180,9 +182,14 @@ export function WalkControls() {
       posRef.current.normalize().multiplyScalar(PLANET_R + PLAYER_H)
     }
 
+    // Pitched look-direction: rotate tangent forward toward up by pitchRef.
+    const cp = Math.cos(pitchRef.current)
+    const sp = Math.sin(pitchRef.current)
+    const lookDir = fwdRef.current.clone().multiplyScalar(cp).addScaledVector(up, sp)
+
     camera.position.copy(posRef.current)
-    camera.up.copy(posRef.current).normalize()
-    const target = posRef.current.clone().add(fwdRef.current)
+    camera.up.copy(up)
+    const target = posRef.current.clone().add(lookDir)
     camera.lookAt(target)
   })
 
