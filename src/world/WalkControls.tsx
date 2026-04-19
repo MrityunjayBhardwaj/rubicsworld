@@ -78,7 +78,12 @@ export function WalkControls() {
     void requestLock()
 
     const onMouseMove = (e: MouseEvent) => {
-      if (document.pointerLockElement !== canvas) return
+      // Don't gate on pointer lock — mousemove.movementX/Y are populated for
+      // every mousemove event, not just locked ones. The lock just uncaps
+      // delta range. When Leva / a panel is under the cursor, skip so the
+      // user can interact with HUD without spinning the view.
+      const tgt = e.target as HTMLElement | null
+      if (tgt && typeof tgt.closest === 'function' && tgt.closest('[id^="leva"]')) return
       const up = posRef.current.clone().normalize()
       // Yaw: rotate forward around the up axis (negative movementX feels natural).
       fwdRef.current.applyAxisAngle(up, -e.movementX * MOUSE_YAW)
