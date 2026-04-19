@@ -158,6 +158,9 @@ export function Interaction() {
     }
 
     const onMove = (e: PointerEvent) => {
+      // Walk mode owns the cursor (pointer-lock) and camera — don't run any
+      // orbit-mode pointer interaction while it's active.
+      if (usePlanet.getState().cameraMode === 'walk') return
       const rect = canvas.getBoundingClientRect()
       const cx = e.clientX - rect.left
       const cy = e.clientY - rect.top
@@ -261,8 +264,9 @@ export function Interaction() {
 
     const onDown = (e: PointerEvent) => {
       if (e.button !== 0) return
+      if (usePlanet.getState().cameraMode === 'walk') return
       const tgt = e.target as HTMLElement | null
-      if (tgt && tgt.closest('[id^="leva"]')) return
+      if (tgt && typeof tgt.closest === 'function' && tgt.closest('[id^="leva"]')) return
 
       const rect = canvas.getBoundingClientRect()
       const cx = e.clientX - rect.left
@@ -297,6 +301,8 @@ export function Interaction() {
       if (!['q', 'w', 'e', 'a', 's', 'd'].includes(key)) return
 
       const s = usePlanet.getState()
+      // WalkControls owns Q/W/E/A/S/D while walking — don't fire slice rotations.
+      if (s.cameraMode === 'walk') return
       if (s.anim || s.drag) return // rotation already in flight
       const ht = s.hoveredTile
       if (!ht) return // nothing hovered

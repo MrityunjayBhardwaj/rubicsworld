@@ -44,6 +44,10 @@ interface PlanetStore {
   /** Easy mode toggles per-edge correctness colors in the HUD overlay
    *  (green = both tiles at home across this edge, red = misplaced). */
   easyMode: boolean
+  /** 'orbit' = third-person outside the planet (default — OrbitControls).
+   *  'walk'  = first-person on the surface, mouse-look + WASD.
+   *  Input gates (slice-rotation keys, drag-to-rotate) check this. */
+  cameraMode: 'orbit' | 'walk'
   commitThreshold: number // radians; drag past this and release → commit
   aiEnabled: boolean
   aiHasFired: boolean // per-playthrough latch; resets on scramble/reset
@@ -55,6 +59,7 @@ interface PlanetStore {
   setOnPlanet: (v: boolean) => void
   setHoveredTile: (t: HoveredTile | null) => void
   setEasyMode: (v: boolean) => void
+  setCameraMode: (v: 'orbit' | 'walk') => void
   setCommitThreshold: (v: number) => void
   setAiEnabled: (v: boolean) => void
   markAiFired: () => void
@@ -125,6 +130,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   hoveredTile: null,
   hudAttractMode: true,
   easyMode: false,
+  cameraMode: 'orbit',
   commitThreshold: (6.5 * Math.PI) / 180, // 6.5° — tuned for a light digital feel
   aiEnabled: true,
   aiHasFired: false,
@@ -135,6 +141,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   setShowRing: v => set({ showRing: v }),
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
   setEasyMode: v => set({ easyMode: v }),
+  setCameraMode: v => set(s => (s.cameraMode === v ? {} : { cameraMode: v })),
   setHoveredTile: t => set(s => {
     // Shallow-equal check to skip store churn on redundant writes (pointermove
     // fires ~60Hz; most samples land on the same tile).

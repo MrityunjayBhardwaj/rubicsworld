@@ -22,12 +22,19 @@ export function Controls({
   const setCommitThreshold = usePlanet(s => s.setCommitThreshold)
   const setAiEnabled = usePlanet(s => s.setAiEnabled)
   const setEasyMode = usePlanet(s => s.setEasyMode)
+  const setCameraMode = usePlanet(s => s.setCameraMode)
 
   useControls({
     'View: Cube net': button(() => setDioramaPreview(dioramaPreview === 'grid' ? false : 'grid')),
     'View: Split': button(() => setDioramaPreview(dioramaPreview === 'split' ? false : 'split')),
     'View: Cube': button(() => setDioramaPreview(dioramaPreview === 'cube' ? false : 'cube')),
     'View: Sphere (planet)': button(() => setDioramaPreview(false)),
+    'Walk on planet': button(() => {
+      // Must stay in sphere mode — WalkControls only mounts under <Canvas>'s
+      // sphere branch.
+      setDioramaPreview(false)
+      setCameraMode('walk')
+    }),
     Ring: {
       value: false,
       onChange: (v: boolean) => setShowRing(v),
