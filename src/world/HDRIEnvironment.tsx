@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react'
-import { useThree } from '@react-three/fiber'
+import { useThree, useFrame } from '@react-three/fiber'
 import { Environment } from '@react-three/drei'
 import * as THREE from 'three'
 import { useHdri } from './hdriStore'
@@ -42,10 +42,13 @@ export function HDRIEnvironment() {
   const setEnvTexture = useHdri(s => s.setEnvTexture)
   const useUniform = !url && preset === 'uniform'
 
-  // Push live HDRI parameters onto the scene. three r155+ supports these
-  // scene-level properties directly; doing it imperatively sidesteps drei's
-  // Environment prop surface which varies by version.
-  useEffect(() => {
+  // Push live HDRI parameters onto the scene EVERY FRAME. Reacting to store
+  // changes alone isn't sufficient — sibling mounts (drei's <Environment>,
+  // OrbitControls with makeDefault, etc.) intermittently reset scene-level
+  // intensity/blur/rotation to three.js defaults without re-triggering our
+  // store selectors. A per-frame push keeps the scene in sync regardless of
+  // who else writes. Cost: 6 property assignments per frame, negligible.
+  useFrame(() => {
     scene.backgroundBlurriness = blur
     scene.environmentIntensity = intensity
     scene.backgroundIntensity = backgroundOpacity
@@ -53,7 +56,7 @@ export function HDRIEnvironment() {
     if (!scene.environmentRotation) scene.environmentRotation = new THREE.Euler()
     scene.backgroundRotation.set(0, rotation, 0)
     scene.environmentRotation.set(0, rotation, 0)
-  }, [scene, blur, intensity, rotation, backgroundOpacity])
+  })
 
   // Publish the currently-active environment texture to the store every
   // frame scene.environment might change. Using a short interval is cheap

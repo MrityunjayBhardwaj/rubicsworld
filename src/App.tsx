@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react'
-import { Canvas } from '@react-three/fiber'
+import { useState, useCallback, useEffect } from 'react'
+import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { Ring } from './world/Ring'
@@ -17,11 +17,13 @@ import { Controls } from './Controls'
 import { usePlanet } from './world/store'
 import { NEIGHBOR_IDX } from './world/rotation'
 import { hudUniforms } from './diorama/buildDiorama'
+import { useHdri } from './world/hdriStore'
 
 if (import.meta.env.DEV && typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__planet = usePlanet
   ;(window as unknown as Record<string, unknown>).__neighborIdx = NEIGHBOR_IDX
   ;(window as unknown as Record<string, unknown>).__hud = hudUniforms
+  ;(window as unknown as Record<string, unknown>).__hdri = useHdri
 }
 
 function Cursor() {
@@ -52,6 +54,17 @@ function SphereCamera() {
   )
 }
 
+function DevSceneExpose() {
+  // Dev helper: expose the R3F scene to window for debugging HDRI state.
+  const { scene } = useThree()
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      ;(window as unknown as Record<string, unknown>).__scene = scene
+    }
+  }, [scene])
+  return null
+}
+
 export default function App() {
   const [preview, setPreview] = useState<false | 'grid' | 'split' | 'cube'>(false)
   const [bezier, setBezier] = useState({ cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 })
@@ -77,6 +90,7 @@ export default function App() {
         dpr={[1, 2]}
       >
         <color attach="background" args={['#0a0d12']} />
+        <DevSceneExpose />
         {preview === 'grid' ? (
           <>
             <DioramaGrid />
