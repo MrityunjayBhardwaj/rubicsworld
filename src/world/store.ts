@@ -48,6 +48,13 @@ interface PlanetStore {
    *  'walk'  = first-person on the surface, mouse-look + WASD.
    *  Input gates (slice-rotation keys, drag-to-rotate) check this. */
   cameraMode: 'orbit' | 'walk'
+  /** Attract-mode cinematic on page load. Sequence:
+   *    'orbit-solved'    — solved planet slow-orbits (first 3 s)
+   *    'scrambling'      — animated scramble playing
+   *    'orbit-scrambled' — scramble done, still slow-orbiting, waiting for hover
+   *    'done'            — player engaged; camera + input yield to them
+   *  Auto-orbit is enabled while this is NOT 'done'. */
+  introPhase: 'orbit-solved' | 'scrambling' | 'orbit-scrambled' | 'done'
   commitThreshold: number // radians; drag past this and release → commit
   aiEnabled: boolean
   aiHasFired: boolean // per-playthrough latch; resets on scramble/reset
@@ -60,6 +67,7 @@ interface PlanetStore {
   setHoveredTile: (t: HoveredTile | null) => void
   setEasyMode: (v: boolean) => void
   setCameraMode: (v: 'orbit' | 'walk') => void
+  setIntroPhase: (v: PlanetStore['introPhase']) => void
   setCommitThreshold: (v: number) => void
   setAiEnabled: (v: boolean) => void
   markAiFired: () => void
@@ -92,8 +100,10 @@ function makeScrambledTiles(n: number): { tiles: Tile[]; moves: Move[] } {
   return { tiles, moves }
 }
 
-const INITIAL_SCRAMBLE_MOVES = 20
-const initialScramble = makeScrambledTiles(INITIAL_SCRAMBLE_MOVES)
+// Start in solved state so the intro cinematic can show the intact planet
+// slow-orbiting for ~3 s, then play an animated scramble. IntroCinematic
+// drives that sequence; end-user scramble/reset paths are unchanged.
+const initialTiles = buildSolvedTiles()
 
 let animCounter = 0
 let animResolver: (() => void) | null = null
@@ -120,8 +130,8 @@ function applyRotation(
 }
 
 export const usePlanet = create<PlanetStore>((set, get) => ({
-  tiles: initialScramble.tiles,
-  solved: isSolved(initialScramble.tiles),
+  tiles: initialTiles,
+  solved: true,
   anim: null,
   drag: null,
   showLabels: false,
@@ -131,17 +141,19 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   hudAttractMode: true,
   easyMode: false,
   cameraMode: 'orbit',
+  introPhase: 'orbit-solved',
   commitThreshold: (6.5 * Math.PI) / 180, // 6.5° — tuned for a light digital feel
   aiEnabled: true,
   aiHasFired: false,
   lastPlayerActionAt: typeof performance !== 'undefined' ? performance.now() : 0,
-  history: initialScramble.moves,
+  history: [],
 
   setShowLabels: v => set({ showLabels: v }),
   setShowRing: v => set({ showRing: v }),
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
   setEasyMode: v => set({ easyMode: v }),
   setCameraMode: v => set(s => (s.cameraMode === v ? {} : { cameraMode: v })),
+  setIntroPhase: v => set(s => (s.introPhase === v ? {} : { introPhase: v })),
   setHoveredTile: t => set(s => {
     // Shallow-equal check to skip store churn on redundant writes (pointermove
     // fires ~60Hz; most samples land on the same tile).

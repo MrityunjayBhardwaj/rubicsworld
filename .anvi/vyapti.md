@@ -97,6 +97,15 @@ _(Each entry must include a `**REF:**` field pointing to a Ground Truth doc.)_
 **Implication:** For any long/wide mesh added to the diorama: segment count along the spanning axis ≥ ~8 per cube-face-block. Applies to future rivers, rail tracks, cable spans, fence runs, etc.
 **REF:** UNGROUNDED — projection shader at `src/diorama/TileGrid.tsx:370-413`; canonical instance `src/diorama/buildDiorama.ts:687` (road strip).
 
+### PV2: Scene-Shared State Requires Per-Frame Push
+**Statement:** Wherever multiple libraries / components read-write the same `THREE.Scene` top-level properties (`scene.environment`, `scene.environmentIntensity`, `scene.backgroundIntensity`, `scene.backgroundRotation`, etc.), the authoritative push must run every frame, not inside a store-dep `useEffect`.
+**Causal status:** STRUCTURAL — React effects are invalidation-driven (re-run only when deps change). Scene-state resets from sibling mount paths are not expressible as dep changes in the consumer's deps array, so the effect never re-fires to reassert the correct value.
+**Scope:** Any scene-level uniform or scalar consumed across mount boundaries — drei `<Environment>`, `<OrbitControls makeDefault>`, React-three-fiber's own internals.
+**Breaks when:** The property is component-local (a ref on a specific mesh) rather than scene-wide; no other code writes it; or the store-dep effect covers all reset paths (rare — siblings mount non-deterministically with respect to your deps).
+**Confirmed by:** 2026-04-22 — HDRI intensity/blur/rotation reverted to three defaults on walk-mode entry despite the store holding the right values; `tests/hdri-persist.mjs` snapshots confirmed scene drift without store change. Fix: moved push to `useFrame` in `HDRIEnvironment`.
+**Implication:** For shared scene state, prefer `useFrame` over `useEffect`. Cost is trivial (scalar assignments); robustness gain is total. Add a diagnostic harness that snapshots store + scene to detect divergence when introducing a new shared property.
+**REF:** UNGROUNDED — canonical instance `src/world/HDRIEnvironment.tsx:48-62`.
+
 ### Entry Format (with mandatory REF)
 
 ```
