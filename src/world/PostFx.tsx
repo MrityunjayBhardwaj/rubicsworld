@@ -57,7 +57,9 @@ export function PostFx() {
   const {
     exposure,
     smaaEnabled,
-    n8aoEnabled, n8aoRadius, n8aoIntensity, n8aoFalloff, n8aoQuality,
+    n8aoEnabled, n8aoRadius, n8aoScreenSpaceRadius, n8aoIntensity, n8aoFalloff,
+    n8aoSamples, n8aoDenoiseSamples, n8aoDenoiseRadius, n8aoHalfRes,
+    n8aoColor, n8aoRenderMode, n8aoQuality,
     dofEnabled, dofFollowCursor, dofFocusRange, dofBokehScale, dofSmoothing, dofDebugTarget,
     bloomEnabled, bloomScrambled, bloomSolved, bloomThreshold, bloomSmoothing,
     noiseEnabled, noiseOpacity,
@@ -76,13 +78,27 @@ export function PostFx() {
     }, { collapsed: true }),
     N8AO: folder({
       n8aoEnabled: { value: true, label: 'on' },
-      n8aoRadius: { value: 0.15, min: 0.01, max: 2, step: 0.01, label: 'radius' },
-      n8aoIntensity: { value: 1.4, min: 0, max: 8, step: 0.1, label: 'intensity' },
-      n8aoFalloff: { value: 0.5, min: 0, max: 3, step: 0.05, label: 'falloff' },
+      // aoRadius is in WORLD units (unless screenSpaceRadius is on). Our
+      // planet is 2m diameter with props sticking out up to ~0.3m — a 0.5m
+      // occlusion kernel gives visible grounding around their bases.
+      n8aoRadius: { value: 0.5, min: 0.01, max: 5, step: 0.01, label: 'radius (world)' },
+      n8aoScreenSpaceRadius: { value: false, label: 'radius in screen px' },
+      n8aoIntensity: { value: 3, min: 0, max: 16, step: 0.1, label: 'intensity' },
+      n8aoFalloff: { value: 1, min: 0, max: 3, step: 0.05, label: 'distance falloff' },
+      n8aoSamples: { value: 16, min: 4, max: 64, step: 1, label: 'ao samples' },
+      n8aoDenoiseSamples: { value: 4, min: 1, max: 16, step: 1, label: 'denoise samples' },
+      n8aoDenoiseRadius: { value: 12, min: 1, max: 32, step: 1, label: 'denoise radius' },
+      n8aoHalfRes: { value: false, label: 'half-res (faster, softer)' },
+      n8aoColor: { value: '#000000', label: 'AO colour' },
+      n8aoRenderMode: {
+        value: 'Combined',
+        options: ['Combined', 'AO', 'No AO', 'Split', 'Split AO'],
+        label: 'render mode',
+      },
       n8aoQuality: {
         value: 'medium',
         options: ['performance', 'low', 'medium', 'high', 'ultra'],
-        label: 'quality',
+        label: 'quality preset',
       },
     }, { collapsed: true }),
     'Depth of Field': folder({
@@ -256,8 +272,21 @@ export function PostFx() {
       {n8aoEnabled ? (
         <N8AO
           aoRadius={n8aoRadius}
+          screenSpaceRadius={n8aoScreenSpaceRadius}
           intensity={n8aoIntensity}
           distanceFalloff={n8aoFalloff}
+          aoSamples={n8aoSamples}
+          denoiseSamples={n8aoDenoiseSamples}
+          denoiseRadius={n8aoDenoiseRadius}
+          halfRes={n8aoHalfRes}
+          color={n8aoColor}
+          renderMode={
+            n8aoRenderMode === 'AO' ? 1
+              : n8aoRenderMode === 'No AO' ? 2
+              : n8aoRenderMode === 'Split' ? 3
+              : n8aoRenderMode === 'Split AO' ? 4
+              : 0 /* Combined */
+          }
           quality={n8aoQuality as 'performance' | 'low' | 'medium' | 'high' | 'ultra'}
         />
       ) : <></>}
