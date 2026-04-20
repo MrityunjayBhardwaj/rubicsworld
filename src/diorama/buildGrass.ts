@@ -76,12 +76,16 @@ export interface GrassUniforms {
   uTime:          { value: number }
   uWindDir:       { value: THREE.Vector2 }
   uWindStrength:  { value: number }
+  /** Wind speed — how fast the wave propagates through time (rad/s). */
   uWindFreq:      { value: number }
   /** Spatial frequency of the wind wave: cycles per world unit. Higher =
    *  tighter ripples; 0 collapses the field to a single synchronised sway. */
   uWaveScale:     { value: number }
   /** Maximum bend angle in radians (scaled by wave amplitude × strength). */
   uBendAmount:    { value: number }
+  /** Multiplies blade height at runtime. Scaling is applied BEFORE the
+   *  rigid-rotation wind, so length preservation under wind still holds. */
+  uLengthScale:   { value: number }
   uBaseColor:     { value: THREE.Color }
   uTipColor:      { value: THREE.Color }
   uHueJitter:     { value: number }
@@ -95,6 +99,7 @@ export const grassUniforms: GrassUniforms = {
   uWindFreq:     { value: 1.5 },
   uWaveScale:    { value: 3.5 },
   uBendAmount:   { value: 0.35 },
+  uLengthScale:  { value: 1.0 },
   uBaseColor:    { value: new THREE.Color('#3c6a2a') },
   uTipColor:     { value: new THREE.Color('#cfe489') },
   uHueJitter:    { value: 0.18 },
@@ -255,6 +260,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       shader.uniforms.uWindFreq     = grassUniforms.uWindFreq
       shader.uniforms.uWaveScale    = grassUniforms.uWaveScale
       shader.uniforms.uBendAmount   = grassUniforms.uBendAmount
+      shader.uniforms.uLengthScale  = grassUniforms.uLengthScale
       shader.uniforms.uBaseColor    = grassUniforms.uBaseColor
       shader.uniforms.uTipColor     = grassUniforms.uTipColor
       shader.uniforms.uHueJitter    = grassUniforms.uHueJitter
@@ -273,6 +279,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
           uniform float uWindFreq;
           uniform float uWaveScale;
           uniform float uBendAmount;
+          uniform float uLengthScale;
           `,
         )
         .replace(
@@ -319,8 +326,13 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
           float oc = 1.0 - c;
           vec3 k = vec3(bendDir2.y, 0.0, -bendDir2.x);
 
+          // Scale height by uLengthScale BEFORE the rigid rotation — this
+          // grows/shrinks the blade uniformly from root. Rotation is still
+          // an isometry on the scaled vector, so length preservation under
+          // wind holds for whatever the user dialled in.
+          vec3 p = vec3(position.x, position.y * uLengthScale, position.z);
+
           // Rodrigues: p' = p·cos + (k×p)·sin + k·(k·p)·(1−cos)
-          vec3 p = position;
           vec3 kxp = cross(k, p);
           float kdotp = dot(k, p);
           transformed = p * c + kxp * s + k * kdotp * oc;
