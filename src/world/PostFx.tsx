@@ -9,6 +9,7 @@ import {
   N8AO,
   Noise,
   SMAA,
+  SSAO,
   Vignette,
 } from '@react-three/postprocessing'
 import { BlendFunction } from 'postprocessing'
@@ -92,7 +93,7 @@ export function PostFx() {
       n8aoColor: { value: '#000000', label: 'AO colour' },
       n8aoRenderMode: {
         value: 'Combined',
-        options: ['Combined', 'AO', 'No AO', 'Split', 'Split AO'],
+        options: ['Combined', 'AO', 'No AO', 'Split', 'Split AO', 'SSAO fallback'],
         label: 'render mode',
       },
       n8aoQuality: {
@@ -210,6 +211,13 @@ export function PostFx() {
 
   // Debug sphere position ref — drives a <mesh> whose position tracks dofTarget.
   const debugMeshRef = useRef<THREE.Mesh | null>(null)
+  // Dev hook for N8AO pass introspection.
+  const n8aoRef = useRef<unknown>(null)
+  useLayoutEffect(() => {
+    if (import.meta.env.DEV) {
+      ;(window as unknown as Record<string, unknown>).__n8ao = n8aoRef.current
+    }
+  })
 
   useFrame(() => {
     if (!dofEnabled || !dofRef.current) return
@@ -254,10 +262,11 @@ export function PostFx() {
   const bloomIntensity = lerp(bloomScrambled, bloomSolved, warmth)
   const vignetteDarkness = lerp(vignetteScrambled, vignetteSolved, warmth)
 
-  // enableNormalPass is needed by SSGI's G-buffer reads. Turning it on when
-  // SSGI is off is a minor waste (~one extra render pass) — leave it gated
-  // so the common Path-1 case stays cheap.
-  const needNormalPass = ssgiEnabled || ssrEnabled
+  // enableNormalPass is needed by SSGI's G-buffer reads and by SSAO for
+  // proper hemispherical sampling. Turning it on when none of those are
+  // active is a minor waste (~one extra render pass).
+  const needNormalPass = ssgiEnabled || ssrEnabled ||
+    (n8aoEnabled && n8aoRenderMode === 'SSAO fallback')
 
   return (
     <>
@@ -267,10 +276,11 @@ export function PostFx() {
           <meshBasicMaterial color="#ff00ff" depthTest={false} depthWrite={false} />
         </mesh>
       ) : null}
-    <EffectComposer multisampling={0} enableNormalPass={needNormalPass}>
+    <EffectComposer multisampling={0} enableNormalPass={needNormalPass} stencilBuffer depthBuffer>
       {smaaEnabled ? <SMAA /> : <></>}
-      {n8aoEnabled ? (
+      {n8aoEnabled && n8aoRenderMode !== 'SSAO fallback' ? (
         <N8AO
+          ref={n8aoRef}
           aoRadius={n8aoRadius}
           screenSpaceRadius={n8aoScreenSpaceRadius}
           intensity={n8aoIntensity}
@@ -288,6 +298,19 @@ export function PostFx() {
               : 0 /* Combined */
           }
           quality={n8aoQuality as 'performance' | 'low' | 'medium' | 'high' | 'ultra'}
+        />
+      ) : <></>}
+      {n8aoEnabled && n8aoRenderMode === 'SSAO fallback' ? (
+        <SSAO
+          samples={31}
+          radius={n8aoRadius}
+          intensity={n8aoIntensity * 5}
+          luminanceInfluence={0.7}
+          color={n8aoColor}
+          worldDistanceThreshold={1}
+          worldDistanceFalloff={0.1}
+          worldProximityThreshold={0.4}
+          worldProximityFalloff={0.1}
         />
       ) : <></>}
       {dofEnabled ? (
