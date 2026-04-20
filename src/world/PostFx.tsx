@@ -17,6 +17,7 @@ import { folder, useControls } from 'leva'
 import { usePlanet } from './store'
 import { RealismFX } from './RealismFX'
 import { hudUniforms } from '../diorama/buildDiorama'
+import { sphereUniforms } from '../diorama/TileGrid'
 
 function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t
@@ -72,8 +73,10 @@ export function PostFx() {
     ssgiDepthPhi, ssgiNormalPhi, ssgiRoughnessPhi,
     ssrEnabled,
     motionBlurEnabled, motionBlurIntensity, motionBlurJitter, motionBlurSamples,
+    sphereProjection,
   } = useControls('PostFx', {
     exposure: { value: 1.35, min: 0.3, max: 3, step: 0.05, label: 'Exposure (ACES)' },
+    sphereProjection: { value: true, label: 'Sphere projection (debug off = cube)' },
     SMAA: folder({
       smaaEnabled: { value: true, label: 'on' },
     }, { collapsed: true }),
@@ -185,6 +188,14 @@ export function PostFx() {
   useEffect(() => {
     gl.toneMappingExposure = exposure
   }, [gl, exposure])
+
+  // Debug toggle: disable sphere projection to render the diorama in cube
+  // space. Useful for isolating whether downstream effects (N8AO depth
+  // reconstruction, SSAO, etc.) are incompatible with the displacement
+  // vertex shader vs standard MVP geometry.
+  useEffect(() => {
+    sphereUniforms.uSphereProjectionEnabled.value = sphereProjection ? 1 : 0
+  }, [sphereProjection])
 
   // DoF target — world-space point the effect focuses on.
   //   • cursor off planet → ease toward planet origin (whole planet sharp)
