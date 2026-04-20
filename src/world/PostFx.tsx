@@ -105,15 +105,15 @@ export function PostFx() {
     // because the current stylized diorama has near-zero PBR surfaces; SSGI
     // on low-poly vertex-coloured meshes reads as noise. Flip to 'on' when
     // the photoreal Blender diorama is loaded.
-    'SSGI (experimental, broken on three 0.183)': folder({
-      ssgiEnabled: { value: false, label: 'on — GLSL shader incompat, see RealismFX.tsx' },
+    'SSGI (experimental)': folder({
+      ssgiEnabled: { value: false, label: 'on — works on three 0.183 ✓' },
       ssgiDistance: { value: 10, min: 0.1, max: 50, step: 0.5, label: 'ray distance' },
       ssgiThickness: { value: 10, min: 0.1, max: 50, step: 0.5, label: 'thickness' },
       ssgiBlend: { value: 0.9, min: 0, max: 1, step: 0.01, label: 'temporal blend' },
       ssgiDenoiseIterations: { value: 1, min: 0, max: 4, step: 1, label: 'denoise iter' },
     }, { collapsed: true }),
-    'SSR (experimental, broken on three 0.183)': folder({
-      ssrEnabled: { value: false, label: 'on — GLSL shader incompat, see RealismFX.tsx' },
+    'SSR (experimental)': folder({
+      ssrEnabled: { value: false, label: 'on — works on three 0.183 ✓ (shares SSGI opts)' },
     }, { collapsed: true }),
     'Motion Blur (experimental)': folder({
       motionBlurEnabled: { value: false, label: 'on — works on three 0.183 ✓' },
