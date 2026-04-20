@@ -1,23 +1,24 @@
 /**
  * Fluffy-grass builder. Samples flat-net candidates, rejects positions that
- * fall inside any diorama prop's flat-space AABB, projects surviving roots
- * onto the unit sphere, and emits an InstancedMesh of crossed-plane blades.
+ * fall inside any diorama prop's flat-space AABB, and emits an InstancedMesh
+ * of crossed-plane blades **authored in flat cube-net space** — so it rides
+ * the same cube-net → split → cube → sphere pipeline as every other diorama
+ * prop (trees, hut, pond, road, …). In sphere mode the existing
+ * `patchMaterialForSphere` onBeforeCompile patch spherifies grass alongside
+ * the rest of the scene; in flat/cube previews the blades render upright on
+ * their flat face-block.
  *
- * The density budget is stated in blades-per-flat-unit². The 6 face-blocks
- * are each 2×2 → 24 u² total domain. Allowed area (and therefore allocated
- * blade count) falls out naturally after exclusion.
+ * Wind is a **rigid rotation** of each blade around its root, Rodrigues
+ * formula in the vertex shader. Blade length is strictly preserved under
+ * bending (isometry). Phase is spatial — derived from the instance world
+ * origin projected onto the wind direction — so the whole field moves as
+ * one coherent wave rolling through the grass, not per-strand random sway.
  *
- * Wind is a vertex-shader bend applied in blade-local space with a
- * per-instance phase offset. Fragment shader generates a procedural blade
- * taper (no texture) + tip/base colour lerp. Alpha-test; no blend sort.
- *
- * Runs independently of the per-tile sphere-projection pipeline — grass is
- * authored directly on the sphere and added to the sphere-terrain scene,
- * so it does not ride tile rotations. Per-tile ownership is future work;
- * the density-map approach here partitions cleanly by flat block.
+ * Density budget: blades-per-flat-unit² sampled in each 2×2 face-block
+ * (24 u² total). Allowed area / blade count falls out of the exclusion
+ * pass naturally.
  */
 import * as THREE from 'three'
-import { FACES } from '../world/faces'
 
 // Face-block definitions mirroring `buildDiorama.ts` header geometry.
 // centreX/centreZ are the (x, z) midpoint of each 2×2 block in flat space.
@@ -53,11 +54,14 @@ export interface GrassOpts {
   densityPerUnit2?: number
   /** Outer margin added to each excluded prop's AABB (flat units). */
   exclusionMargin?: number
-  /** Blade height in flat/sphere units. Sphere radius is 1, so 0.08 ≈ 5° arc. */
+  /** Blade height in flat units (flat-net space). Small — e.g. 0.015. */
   bladeHeight?: number
   bladeWidth?: number
   /** Names of diorama children whose AABB kills grass inside. */
   excludeNames?: readonly string[]
+  /** Tiny lift off y=0 to avoid z-fight with the flat terrain plane in
+   *  non-sphere modes (the sphere terrain lives in a separate scene). */
+  groundOffset?: number
 }
 
 export interface GrassResult {
@@ -76,6 +80,7 @@ export interface GrassUniforms {
   /** Spatial frequency of the wind wave: cycles per world unit. Higher =
    *  tighter ripples; 0 collapses the field to a single synchronised sway. */
   uWaveScale:     { value: number }
+  /** Maximum bend angle in radians (scaled by wave amplitude × strength). */
   uBendAmount:    { value: number }
   uBaseColor:     { value: THREE.Color }
   uTipColor:      { value: THREE.Color }
@@ -107,39 +112,14 @@ export const grassRefs: {
  *  and consumed by GrassPanel to render a 2D preview of allowed / excluded
  *  regions on the 8×6 cross cube-net. */
 export interface GrassDebugData {
-  /** 8×6 flat-net bounds (hard-coded from HALF_W/HALF_H). */
   halfW: number
   halfH: number
-  /** Face-block rectangles in flat space (for drawing the allowed domain). */
   blocks: { face: number; cx: number; cz: number; halfSize: number }[]
-  /** Exclusion rectangles in flat XZ, labelled by prop owner. */
   exclusions: { xMin: number; xMax: number; zMin: number; zMax: number; owner: string }[]
-  /** Surviving blade root positions (flat XZ). */
   flatPositions: Float32Array  // interleaved x0, z0, x1, z1, …
   stats: { candidates: number; allowed: number; excluded: number }
 }
 export const grassDebug: { data: GrassDebugData | null } = { data: null }
-
-/** Flat (x, z) in block `block` → sphere world position. Formula matches the
- *  shader: cube-face-local (u, v) along face.right / face.up, plus the face
- *  normal, all normalized. */
-function flatToSphere(
-  flatX: number,
-  flatZ: number,
-  faceIdx: number,
-  cx: number,
-  cz: number,
-  out: THREE.Vector3,
-): void {
-  const face = FACES[faceIdx]
-  const u = flatX - cx
-  const v = flatZ - cz
-  out.set(0, 0, 0)
-    .addScaledVector(face.right, u)
-    .addScaledVector(face.up, v)
-    .add(face.normal)
-    .normalize()
-}
 
 /** Crossed-plane blade: two quads on perpendicular axes, shared indexed mesh.
  *  Local frame: root at y=0, tip at y=height, blade width spans local ±w/2. */
@@ -150,7 +130,6 @@ function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry
   const uvs: number[] = []
   const normals: number[] = []
   const indices: number[] = []
-  // Two quads rotated 90° around local Y — xAxis plane then zAxis plane.
   const quads = [
     { ax: 1, az: 0, nx: 0, nz: 1 }, // spans along X, facing ±Z
     { ax: 0, az: 1, nx: 1, nz: 0 }, // spans along Z, facing ±X
@@ -158,7 +137,6 @@ function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry
   for (let q = 0; q < 2; q++) {
     const base = q * 4
     const { ax, az, nx, nz } = quads[q]
-    // Four corners; UV y = 0 at root, 1 at tip; UV x = 0 left, 1 right
     positions.push(
       -w * ax, 0,       -w * az,
       +w * ax, 0,       +w * az,
@@ -183,6 +161,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     bladeHeight     = 0.015,
     bladeWidth      = 0.003,
     excludeNames    = DEFAULT_EXCLUDE,
+    groundOffset    = 0.0005,
   } = opts
 
   // ── Step 1: collect exclusion rects in flat XZ space ───────────────────
@@ -194,10 +173,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   const _box = new THREE.Box3()
   // Per-mesh AABBs, not per-root-group: the `trees` group spans the whole
   // planting area, so its group-AABB would kill every candidate in the gaps
-  // between trunks. Walk each excluded root's descendants and record a rect
-  // per leaf mesh so grass fills the spaces between instances. Road gets a
-  // wider margin (PROP_MARGIN) because it's a thin strip where tiny spillover
-  // visually overlaps the asphalt.
+  // between trunks.
   for (const name of excludeNames) {
     const root = dioramaRoot.getObjectByName(name)
     if (!root) continue
@@ -221,18 +197,15 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   const candidatesPerBlock = Math.max(1, Math.floor(densityPerUnit2 * 4)) // 2×2 = 4 u²
   const totalCandidates = candidatesPerBlock * 6
 
-  const spherePositions: THREE.Vector3[] = []
-  const flatPositions: THREE.Vector2[] = []  // retained for the debug overlay
+  const flatPositions: THREE.Vector3[] = []
+  const flatPositions2D: THREE.Vector2[] = []  // for the debug overlay
   const hues:   number[] = []
   const yaws:   number[] = []
   const scales: number[] = []
-  const _tmp = new THREE.Vector3()
   let excluded = 0
 
   for (const block of FACE_BLOCKS) {
     for (let i = 0; i < candidatesPerBlock; i++) {
-      // Uniform in each 2×2 block. Stratified would give more even coverage
-      // but uniform + enough samples reads as natural; cheaper at build time.
       const flatX = block.cx + (Math.random() * 2 - 1)
       const flatZ = block.cz + (Math.random() * 2 - 1)
       let inside = false
@@ -243,23 +216,27 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
         }
       }
       if (inside) { excluded++; continue }
-      flatToSphere(flatX, flatZ, block.face, block.cx, block.cz, _tmp)
-      spherePositions.push(_tmp.clone())
-      flatPositions.push(new THREE.Vector2(flatX, flatZ))
+      // Flat-net authoring: root at (x, groundOffset, z). Sphere projection
+      // shader (applied in sphere mode) will warp y into the radial direction;
+      // in flat/cube-net/split previews the blade stays at this Y directly.
+      flatPositions.push(new THREE.Vector3(flatX, groundOffset, flatZ))
+      flatPositions2D.push(new THREE.Vector2(flatX, flatZ))
       hues.push(Math.random())
       yaws.push(Math.random() * Math.PI * 2)
       scales.push(0.75 + Math.random() * 0.5) // 0.75–1.25
     }
   }
 
-  const count = spherePositions.length
+  const count = flatPositions.length
 
   // ── Step 3: geometry + per-instance hue attribute ──────────────────────
   const geom = buildBladeGeometry(bladeWidth, bladeHeight)
   const hueAttr = new THREE.InstancedBufferAttribute(new Float32Array(hues), 1)
   geom.setAttribute('iHue', hueAttr)
 
-  // ── Step 4: material — MSM + onBeforeCompile for wind + procedural alpha ─
+  // ── Step 4: material — MSM + onBeforeCompile for rigid-rotation wind +
+  //            procedural blade alpha. Sphere projection patch in TileGrid
+  //            chains onto this patch via prevOBC; both stack cleanly. ────
   const material = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.88,
@@ -268,9 +245,6 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     alphaTest: 0.5,
     transparent: false,
   })
-  // Idempotent guard — InstancedMesh clones don't happen here but keep the
-  // pattern consistent with other patched materials in the project (P-class
-  // hetvabhasa: stacked onBeforeCompile → duplicate declarations).
   const ud = material.userData as { __grassPatched?: boolean }
   if (!ud.__grassPatched) {
     ud.__grassPatched = true
@@ -307,27 +281,49 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
           vec3 transformed = vec3(position);
           vGrassUv = uv;
           vHue = iHue;
-          float bendT = uv.y;
-          // Instance world origin (before this vertex's local offset) — this
-          // is the blade's root on the sphere. Used to compute a SPATIAL wave
-          // phase so the whole field moves as one coherent wave travelling
-          // in the wind direction, instead of per-blade random sway.
-          vec3 instOrigin = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
-          // Lift windDir to a 3D tangent direction by dropping its x,y as the
-          // world xz plane — good enough for a roughly spherical field. The
-          // wave propagates along (uWindDir.x, 0, uWindDir.y).
+
+          // --- Instance world origin (translation column of instanceMatrix).
+          //     Used as the spatial reference for the wave phase so the whole
+          //     field rolls as one coherent sheet in the wind direction.
+          vec3 instOrigin = vec3(instanceMatrix[3].xyz);
+
+          // --- World-space wind direction, lifted to 3D by interpreting
+          //     uWindDir.x,y as (x, z) components on the world xz plane.
           vec3 worldWind3 = normalize(vec3(uWindDir.x, 0.0, uWindDir.y) + vec3(1e-4));
+
+          // --- Spatial + temporal phase → single coherent wave.
           float spatialPhase = dot(instOrigin, worldWind3) * uWaveScale;
-          float wave  = sin(uTime * uWindFreq - spatialPhase);
-          // Second harmonic, out of phase, for natural unevenness.
-          float gust  = sin(uTime * uWindFreq * 0.47 - spatialPhase * 0.63);
-          float amp   = wave * 0.75 + gust * 0.25;
-          // Bend tip in blade-local X; amplitude is spatially coherent, but
-          // bending axis inherits the blade's random yaw (varies directions
-          // per instance — reads as "hair of the grass" under a rolling wind).
-          float bend = bendT * bendT * uWindStrength * uBendAmount * amp;
-          transformed.x += bend;
-          transformed.z += bend * 0.25;
+          float wave = sin(uTime * uWindFreq - spatialPhase);
+          float gust = sin(uTime * uWindFreq * 0.47 - spatialPhase * 0.63);
+          float amp  = wave * 0.75 + gust * 0.25;
+
+          // --- Wind direction in the BLADE-LOCAL tangent plane. Extract the
+          //     instance rotation by normalising each column of instanceMatrix
+          //     (handles the per-instance uniform scale). Transpose = inverse
+          //     for the orthonormalised rotation.
+          mat3 iRot = mat3(
+            normalize(instanceMatrix[0].xyz),
+            normalize(instanceMatrix[1].xyz),
+            normalize(instanceMatrix[2].xyz)
+          );
+          vec3 localWind = transpose(iRot) * worldWind3;
+          vec2 bendDir2 = normalize(vec2(localWind.x, localWind.z) + vec2(1e-5));
+
+          // --- Length-preserving rigid rotation of the blade around its root.
+          //     Axis of rotation k = Y × bendDir (in the local XZ plane), so
+          //     tilting by angle θ sends local +Y toward (bendDir.x, *, bendDir.y).
+          //     Length is preserved by construction — rotations are isometries.
+          float theta = amp * uWindStrength * uBendAmount;
+          float c = cos(theta);
+          float s = sin(theta);
+          float oc = 1.0 - c;
+          vec3 k = vec3(bendDir2.y, 0.0, -bendDir2.x);
+
+          // Rodrigues: p' = p·cos + (k×p)·sin + k·(k·p)·(1−cos)
+          vec3 p = position;
+          vec3 kxp = cross(k, p);
+          float kdotp = dot(k, p);
+          transformed = p * c + kxp * s + k * kdotp * oc;
           `,
         )
 
@@ -348,11 +344,10 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
           /* glsl */`
           // Procedural blade shape — taper narrower toward tip, discard
           // fragments outside the taper envelope. alphaTest handles sorting.
-          float ux     = abs(vGrassUv.x - 0.5) * 2.0; // 0 centre → 1 edge
-          float taper  = mix(1.0, 0.18, vGrassUv.y);  // width at this height
+          float ux     = abs(vGrassUv.x - 0.5) * 2.0;
+          float taper  = mix(1.0, 0.18, vGrassUv.y);
           if (ux > taper) discard;
           vec3 gc = mix(uBaseColor, uTipColor, vGrassUv.y);
-          // Per-instance hue shove: darker/lighter tufts for variety.
           gc *= 1.0 + (vHue - 0.5) * 2.0 * uHueJitter;
           diffuseColor.rgb *= gc;
           `,
@@ -363,26 +358,30 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   // ── Step 5: InstancedMesh + per-instance matrices ─────────────────────
   const mesh = new THREE.InstancedMesh(geom, material, count)
   mesh.name = 'grass'
-  // Sphere-positioned, authored directly in terrainScene; bounding box as
-  // Three computes it from blade-local geometry would cull most of the ring.
+  // Authoring frame is flat cube-net space. Sphere projection moves vertices
+  // far from the geometry's bounding sphere, so rely on the surrounding cell
+  // clip-planes for culling instead of frustum culling (matches every other
+  // patched prop in the diorama).
   mesh.frustumCulled = false
   mesh.castShadow = false
   mesh.receiveShadow = false
+  // Don't let raycasts hit grass — the DoF cursor-follow and tile interaction
+  // raycast against the planet and must land on the tile-owning surface.
+  mesh.raycast = () => {}
 
   const _mat   = new THREE.Matrix4()
   const _q     = new THREE.Quaternion()
-  const _yawQ  = new THREE.Quaternion()
   const _scale = new THREE.Vector3()
-  const _up    = new THREE.Vector3(0, 1, 0)
+  const _axisY = new THREE.Vector3(0, 1, 0)
   for (let i = 0; i < count; i++) {
-    const sp = spherePositions[i]
-    // Blade local Y → sphere surface normal at root.
-    _q.setFromUnitVectors(_up, sp)
-    _yawQ.setFromAxisAngle(sp, yaws[i])
-    _q.premultiply(_yawQ)
+    // Yaw-only orientation: blade local +Y stays aligned with flat +Y.
+    // After the sphere-projection vertex shader runs in sphere mode, flat +Y
+    // maps to the sphere radial direction, so blades stand upright on any
+    // mode (flat net / split / cube / sphere).
+    _q.setFromAxisAngle(_axisY, yaws[i])
     const s = scales[i]
     _scale.set(s, s, s)
-    _mat.compose(sp, _q, _scale)
+    _mat.compose(flatPositions[i], _q, _scale)
     mesh.setMatrixAt(i, _mat)
   }
   mesh.instanceMatrix.needsUpdate = true
@@ -392,10 +391,10 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   grassRefs.maxCount = count
 
   // Publish density-map debug data for the overlay.
-  const flatArr = new Float32Array(flatPositions.length * 2)
-  for (let i = 0; i < flatPositions.length; i++) {
-    flatArr[i * 2] = flatPositions[i].x
-    flatArr[i * 2 + 1] = flatPositions[i].y
+  const flatArr = new Float32Array(flatPositions2D.length * 2)
+  for (let i = 0; i < flatPositions2D.length; i++) {
+    flatArr[i * 2] = flatPositions2D[i].x
+    flatArr[i * 2 + 1] = flatPositions2D[i].y
   }
   grassDebug.data = {
     halfW: 4,
