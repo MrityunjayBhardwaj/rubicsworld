@@ -57,6 +57,12 @@ interface PlanetStore {
    *  Auto-orbit is enabled in 'orbit-solved' / 'scrambling' / 'orbit-scrambled'
    *  and disabled in 'tutorial' / 'done' so the user can target tiles. */
   introPhase: 'orbit-solved' | 'scrambling' | 'orbit-scrambled' | 'tutorial' | 'done'
+  /** Visual grade for the scene. 'stylized' = the current low-poly test
+   *  diorama — uses the Path-1 pmndrs effect stack only. 'photoreal' = the
+   *  upcoming Blender PBR diorama — Path-2 will layer realism-effects
+   *  (SSGI / TRAA / motion blur) on top when the asset lands. Gate added
+   *  now so Path 2 is a drop-in switch, not a PostFx rewrite. */
+  sceneGrade: 'stylized' | 'photoreal'
   /** While in 'tutorial' phase, the ordered list of moves the user must commit
    *  to reach solved. Rebuilt on mismatch via a shortest-path BFS. */
   tutorialQueue: Move[]
@@ -75,6 +81,7 @@ interface PlanetStore {
   setEasyMode: (v: boolean) => void
   setCameraMode: (v: 'orbit' | 'walk') => void
   setIntroPhase: (v: PlanetStore['introPhase']) => void
+  setSceneGrade: (v: PlanetStore['sceneGrade']) => void
   setTutorialQueue: (q: Move[]) => void
   setTutorialStep: (n: number) => void
   setCommitThreshold: (v: number) => void
@@ -151,6 +158,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   easyMode: false,
   cameraMode: 'orbit',
   introPhase: 'orbit-solved',
+  sceneGrade: 'stylized',
   tutorialQueue: [],
   tutorialStep: 0,
   commitThreshold: (6.5 * Math.PI) / 180, // 6.5° — tuned for a light digital feel
@@ -165,6 +173,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   setEasyMode: v => set({ easyMode: v }),
   setCameraMode: v => set(s => (s.cameraMode === v ? {} : { cameraMode: v })),
   setIntroPhase: v => set(s => (s.introPhase === v ? {} : { introPhase: v })),
+  setSceneGrade: v => set(s => (s.sceneGrade === v ? {} : { sceneGrade: v })),
   setTutorialQueue: q => set({ tutorialQueue: q, tutorialStep: 0 }),
   setTutorialStep: n => set({ tutorialStep: n }),
   setHoveredTile: t => set(s => {
