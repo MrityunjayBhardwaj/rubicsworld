@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@react-spring/three": "^10.0.3",
@@ -19,6 +20,7 @@
     "lottie-react": "^2.4.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "realism-effects": "^1.1.2",
     "three": "^0.183.2",
     "zustand": "^5.0.12"
   },
@@ -34,6 +36,7 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.4.0",
+    "patch-package": "^8.0.1",
     "playwright": "^1.59.1",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.0",
