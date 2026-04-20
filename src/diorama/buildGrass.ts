@@ -62,6 +62,14 @@ export interface GrassOpts {
   /** Tiny lift off y=0 to avoid z-fight with the flat terrain plane in
    *  non-sphere modes (the sphere terrain lives in a separate scene). */
   groundOffset?: number
+  /** Optional painted mask. Pixel space is the same 8×6 flat-net frame as
+   *  the saved mask PNG (x ∈ [-halfW, halfW], z ∈ [-halfH, halfH], image y
+   *  maps 1:1 with z). Luminance > threshold → grass allowed at that flat
+   *  coord. When set, AABB prop-exclusion is SKIPPED — the painted mask is
+   *  authoritative. Out-of-face-block samples are still rejected. */
+  maskImage?: ImageData | null
+  /** 0..255 luminance threshold. Pixels brighter than this are allowed. */
+  maskThreshold?: number
 }
 
 export interface GrassResult {
@@ -114,7 +122,11 @@ export const grassRefs: {
   mesh: THREE.InstancedMesh | null
   maxCount: number
   captureTopView: (() => Promise<Blob | null>) | null
-} = { mesh: null, maxCount: 0, captureTopView: null }
+  /** Dispose the current grass and rebuild with a painted mask (or clear the
+   *  mask by passing null). Registered by TileGrid so GrassPanel can request
+   *  a rebuild without owning diorama.root. */
+  rebuildWithMask: ((mask: ImageData | null) => void) | null
+} = { mesh: null, maxCount: 0, captureTopView: null, rebuildWithMask: null }
 
 /** Flat-space debug data for the density map overlay. Populated at build time
  *  and consumed by GrassPanel to render a 2D preview of allowed / excluded
@@ -173,35 +185,63 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     bladeWidth      = 0.003,
     excludeNames    = DEFAULT_EXCLUDE,
     groundOffset    = 0.0005,
+    maskImage       = null,
+    maskThreshold   = 128,
   } = opts
 
+  // Flat-net bounds the mask encodes; matches HALF_W/HALF_H from buildDiorama
+  // and the mask PNG exporter in GrassPanel.
+  const MASK_HALF_W = 4
+  const MASK_HALF_H = 3
+
   // ── Step 1: collect exclusion rects in flat XZ space ───────────────────
-  // Matrices must be current — diorama was just built and may not have been
-  // rendered yet, so Object3D.matrixWorld is still identity in places.
+  // When a painted mask is supplied, the mask is authoritative — we skip the
+  // AABB pass entirely and sample the mask pixel at each candidate. The rects
+  // array is still populated (empty) for the debug overlay payload.
   dioramaRoot.updateMatrixWorld(true)
   type Rect = { xMin: number; xMax: number; zMin: number; zMax: number; owner: string }
   const exclusions: Rect[] = []
   const _box = new THREE.Box3()
-  // Per-mesh AABBs, not per-root-group: the `trees` group spans the whole
-  // planting area, so its group-AABB would kill every candidate in the gaps
-  // between trunks.
-  for (const name of excludeNames) {
-    const root = dioramaRoot.getObjectByName(name)
-    if (!root) continue
-    const margin = PROP_MARGIN[name] ?? exclusionMargin
-    root.traverse(leaf => {
-      const m = leaf as THREE.Mesh
-      if (!m.isMesh) return
-      _box.makeEmpty().setFromObject(m)
-      if (_box.isEmpty() || !isFinite(_box.min.x)) return
-      exclusions.push({
-        xMin: _box.min.x - margin,
-        xMax: _box.max.x + margin,
-        zMin: _box.min.z - margin,
-        zMax: _box.max.z + margin,
-        owner: name,
+  if (!maskImage) {
+    // Per-mesh AABBs, not per-root-group: the `trees` group spans the whole
+    // planting area, so its group-AABB would kill every candidate in the gaps
+    // between trunks.
+    for (const name of excludeNames) {
+      const root = dioramaRoot.getObjectByName(name)
+      if (!root) continue
+      const margin = PROP_MARGIN[name] ?? exclusionMargin
+      root.traverse(leaf => {
+        const m = leaf as THREE.Mesh
+        if (!m.isMesh) return
+        _box.makeEmpty().setFromObject(m)
+        if (_box.isEmpty() || !isFinite(_box.min.x)) return
+        exclusions.push({
+          xMin: _box.min.x - margin,
+          xMax: _box.max.x + margin,
+          zMin: _box.min.z - margin,
+          zMax: _box.max.z + margin,
+          owner: name,
+        })
       })
-    })
+    }
+  }
+
+  // Mask-sampling helper. Returns true if the flat point is ALLOWED per the
+  // painted mask (luminance > threshold). Called per candidate when a mask
+  // image is supplied.
+  const maskW = maskImage?.width ?? 0
+  const maskH = maskImage?.height ?? 0
+  const maskData = maskImage?.data
+  const allowedByMask = (flatX: number, flatZ: number): boolean => {
+    if (!maskData) return true
+    const u = (flatX + MASK_HALF_W) / (MASK_HALF_W * 2)
+    const v = (flatZ + MASK_HALF_H) / (MASK_HALF_H * 2)
+    if (u < 0 || u >= 1 || v < 0 || v >= 1) return false
+    const px = Math.min(maskW - 1, Math.floor(u * maskW))
+    const py = Math.min(maskH - 1, Math.floor(v * maskH))
+    const i = (py * maskW + px) * 4
+    const lum = (maskData[i] + maskData[i + 1] + maskData[i + 2]) / 3
+    return lum > maskThreshold
   }
 
   // ── Step 2: sample candidates per block, reject against exclusions ─────
@@ -219,14 +259,19 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     for (let i = 0; i < candidatesPerBlock; i++) {
       const flatX = block.cx + (Math.random() * 2 - 1)
       const flatZ = block.cz + (Math.random() * 2 - 1)
-      let inside = false
-      for (const r of exclusions) {
-        if (flatX >= r.xMin && flatX <= r.xMax && flatZ >= r.zMin && flatZ <= r.zMax) {
-          inside = true
-          break
+      if (maskImage) {
+        // Mask path: single texture lookup per candidate, skip AABB pass.
+        if (!allowedByMask(flatX, flatZ)) { excluded++; continue }
+      } else {
+        let inside = false
+        for (const r of exclusions) {
+          if (flatX >= r.xMin && flatX <= r.xMax && flatZ >= r.zMin && flatZ <= r.zMax) {
+            inside = true
+            break
+          }
         }
+        if (inside) { excluded++; continue }
       }
-      if (inside) { excluded++; continue }
       // Flat-net authoring: root at (x, groundOffset, z). Sphere projection
       // shader (applied in sphere mode) will warp y into the radial direction;
       // in flat/cube-net/split previews the blade stays at this Y directly.

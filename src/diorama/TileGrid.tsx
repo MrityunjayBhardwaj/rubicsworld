@@ -12,7 +12,7 @@ import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useFBO } from '@react-three/drei'
 import { buildDiorama, buildSphereTerrain, fresnelUniform, sliceRotUniforms, hudUniforms, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
-import { grassRefs } from './buildGrass'
+import { buildGrass, grassRefs } from './buildGrass'
 import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
 import { usePlanet } from '../world/store'
@@ -647,10 +647,36 @@ export function TileGrid({ mode = 'split', bezier }: {
       return new Promise<Blob | null>(res => canvas.toBlob(b => res(b), 'image/png'))
     }
 
+    // Swap-rebuild grass using a user-painted mask (or clear back to AABB
+    // exclusion). Disposes the previous grass InstancedMesh, asks buildGrass
+    // for a new one driven by pixel sampling, then re-applies the sphere
+    // projection patch (idempotent guard skips already-patched props and only
+    // touches the new grass material).
+    grassRefs.rebuildWithMask = (mask) => {
+      const diorama = dioramaRef.current
+      if (!diorama) return
+      const old = grassRefs.mesh
+      if (old) {
+        old.parent?.remove(old)
+        old.geometry.dispose()
+        const m = old.material
+        if (Array.isArray(m)) m.forEach(x => x.dispose())
+        else m.dispose()
+      }
+      const grass = buildGrass(diorama.root, { maskImage: mask ?? undefined })
+      grass.mesh.frustumCulled = false
+      diorama.root.add(grass.mesh)
+      if (mode === 'sphere' && sphereUniformsRef.current) {
+        patchSceneForSphere(diorama.root, sphereUniformsRef.current)
+      }
+      diorama.root.updateMatrixWorld(true)
+    }
+
     return () => {
       gl.localClippingEnabled = false
       gl.clippingPlanes = []
       grassRefs.captureTopView = null
+      grassRefs.rebuildWithMask = null
       diorama.root.traverse(child => {
         if ((child as THREE.Mesh).isMesh) {
           ;(child as THREE.Mesh).geometry?.dispose()
