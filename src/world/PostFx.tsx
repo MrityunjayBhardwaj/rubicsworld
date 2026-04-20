@@ -59,7 +59,11 @@ export function PostFx() {
     bloomEnabled, bloomScrambled, bloomSolved, bloomThreshold, bloomSmoothing,
     noiseEnabled, noiseOpacity,
     vignetteEnabled, vignetteScrambled, vignetteSolved, vignetteOffset,
-    ssgiEnabled, ssgiDistance, ssgiThickness, ssgiBlend, ssgiDenoiseIterations,
+    ssgiEnabled, ssgiDistance, ssgiThickness, ssgiAutoThickness, ssgiMaxRoughness,
+    ssgiBlend, ssgiImportanceSampling, ssgiDirectLightMultiplier, ssgiEnvBlur,
+    ssgiSteps, ssgiRefineSteps, ssgiSpp, ssgiResolutionScale, ssgiMissedRays,
+    ssgiDenoiseIterations, ssgiDenoiseKernel, ssgiDenoiseDiffuse, ssgiDenoiseSpecular,
+    ssgiDepthPhi, ssgiNormalPhi, ssgiRoughnessPhi,
     ssrEnabled,
     motionBlurEnabled, motionBlurIntensity, motionBlurJitter, motionBlurSamples,
   } = useControls('PostFx', {
@@ -105,18 +109,47 @@ export function PostFx() {
     // because the current stylized diorama has near-zero PBR surfaces; SSGI
     // on low-poly vertex-coloured meshes reads as noise. Flip to 'on' when
     // the photoreal Blender diorama is loaded.
-    'SSGI (experimental)': folder({
-      ssgiEnabled: { value: false, label: 'on — works on three 0.183 ✓' },
-      ssgiDistance: { value: 10, min: 0.1, max: 50, step: 0.5, label: 'ray distance' },
-      ssgiThickness: { value: 10, min: 0.1, max: 50, step: 0.5, label: 'thickness' },
-      ssgiBlend: { value: 0.9, min: 0, max: 1, step: 0.01, label: 'temporal blend' },
-      ssgiDenoiseIterations: { value: 1, min: 0, max: 4, step: 1, label: 'denoise iter' },
+    // Realism-effects (SSGI + SSR + motion blur). Defaults OFF — visual
+    // impact is subtle on the stylized test diorama; SSR needs reflective
+    // PBR materials to shine. Will earn its keep on the photoreal Blender
+    // diorama. Param groupings mirror realism-effects' SSGIEffect constructor.
+    SSGI: folder({
+      ssgiEnabled: { value: false, label: 'on' },
+      'SSGI — rays': folder({
+        ssgiDistance: { value: 10, min: 0.1, max: 100, step: 0.5, label: 'ray distance' },
+        ssgiThickness: { value: 10, min: 0.1, max: 100, step: 0.5, label: 'thickness' },
+        ssgiAutoThickness: { value: false, label: 'auto thickness' },
+        ssgiMaxRoughness: { value: 1, min: 0, max: 1, step: 0.01, label: 'max roughness' },
+        ssgiSteps: { value: 20, min: 1, max: 128, step: 1, label: 'march steps' },
+        ssgiRefineSteps: { value: 5, min: 0, max: 32, step: 1, label: 'refine steps' },
+        ssgiSpp: { value: 1, min: 1, max: 8, step: 1, label: 'samples/pixel' },
+        ssgiMissedRays: { value: false, label: 'sample missed (env)' },
+      }, { collapsed: true }),
+      'SSGI — temporal': folder({
+        ssgiBlend: { value: 0.9, min: 0, max: 1, step: 0.01, label: 'temporal blend' },
+        ssgiImportanceSampling: { value: true, label: 'importance sampling' },
+        ssgiDirectLightMultiplier: { value: 1, min: 0, max: 8, step: 0.05, label: 'direct light ×' },
+        ssgiEnvBlur: { value: 0.5, min: 0, max: 1, step: 0.01, label: 'env blur' },
+      }, { collapsed: true }),
+      'SSGI — denoise': folder({
+        ssgiDenoiseIterations: { value: 1, min: 0, max: 8, step: 1, label: 'iterations' },
+        ssgiDenoiseKernel: { value: 2, min: 1, max: 6, step: 1, label: 'kernel' },
+        ssgiDenoiseDiffuse: { value: 10, min: 0, max: 50, step: 0.5, label: 'diffuse weight' },
+        ssgiDenoiseSpecular: { value: 10, min: 0, max: 50, step: 0.5, label: 'specular weight' },
+        ssgiDepthPhi: { value: 2, min: 0, max: 50, step: 0.1, label: 'depth φ' },
+        ssgiNormalPhi: { value: 50, min: 0, max: 100, step: 1, label: 'normal φ' },
+        ssgiRoughnessPhi: { value: 1, min: 0, max: 10, step: 0.05, label: 'roughness φ' },
+      }, { collapsed: true }),
+      'SSGI — perf': folder({
+        ssgiResolutionScale: { value: 1, min: 0.25, max: 1, step: 0.05, label: 'res scale' },
+      }, { collapsed: true }),
     }, { collapsed: true }),
-    'SSR (experimental)': folder({
-      ssrEnabled: { value: false, label: 'on — works on three 0.183 ✓ (shares SSGI opts)' },
+    SSR: folder({
+      // SSREffect extends SSGIEffect — all SSGI options apply.
+      ssrEnabled: { value: false, label: 'on (inherits all SSGI params above)' },
     }, { collapsed: true }),
-    'Motion Blur (experimental)': folder({
-      motionBlurEnabled: { value: false, label: 'on — works on three 0.183 ✓' },
+    'Motion Blur': folder({
+      motionBlurEnabled: { value: false, label: 'on' },
       motionBlurIntensity: { value: 1, min: 0, max: 4, step: 0.05, label: 'intensity' },
       motionBlurJitter: { value: 1, min: 0, max: 4, step: 0.05, label: 'jitter' },
       motionBlurSamples: { value: 16, min: 4, max: 64, step: 1, label: 'samples' },
@@ -191,8 +224,24 @@ export function PostFx() {
         motionBlur={motionBlurEnabled}
         ssgiDistance={ssgiDistance}
         ssgiThickness={ssgiThickness}
+        ssgiAutoThickness={ssgiAutoThickness}
+        ssgiMaxRoughness={ssgiMaxRoughness}
         ssgiBlend={ssgiBlend}
         ssgiDenoiseIterations={ssgiDenoiseIterations}
+        ssgiDenoiseKernel={ssgiDenoiseKernel}
+        ssgiDenoiseDiffuse={ssgiDenoiseDiffuse}
+        ssgiDenoiseSpecular={ssgiDenoiseSpecular}
+        ssgiDepthPhi={ssgiDepthPhi}
+        ssgiNormalPhi={ssgiNormalPhi}
+        ssgiRoughnessPhi={ssgiRoughnessPhi}
+        ssgiEnvBlur={ssgiEnvBlur}
+        ssgiImportanceSampling={ssgiImportanceSampling}
+        ssgiDirectLightMultiplier={ssgiDirectLightMultiplier}
+        ssgiSteps={ssgiSteps}
+        ssgiRefineSteps={ssgiRefineSteps}
+        ssgiSpp={ssgiSpp}
+        ssgiResolutionScale={ssgiResolutionScale}
+        ssgiMissedRays={ssgiMissedRays}
         motionBlurIntensity={motionBlurIntensity}
         motionBlurJitter={motionBlurJitter}
         motionBlurSamples={motionBlurSamples}
