@@ -72,6 +72,11 @@ export function PostFx() {
     ssgiDepthPhi, ssgiNormalPhi, ssgiRoughnessPhi,
     ssrEnabled,
     motionBlurEnabled, motionBlurIntensity, motionBlurJitter, motionBlurSamples,
+    ssaoEnabled, ssaoSamples, ssaoRings, ssaoRadius, ssaoIntensity,
+    ssaoLuminanceInfluence, ssaoBias, ssaoFade, ssaoColor,
+    ssaoWorldDistanceThreshold, ssaoWorldDistanceFalloff,
+    ssaoWorldProximityThreshold, ssaoWorldProximityFalloff,
+    ssaoResolutionScale,
   } = useControls('PostFx', {
     exposure: { value: 1.35, min: 0.3, max: 3, step: 0.05, label: 'Exposure (ACES)' },
     SMAA: folder({
@@ -93,7 +98,7 @@ export function PostFx() {
       n8aoColor: { value: '#000000', label: 'AO colour' },
       n8aoRenderMode: {
         value: 'Combined',
-        options: ['Combined', 'AO', 'No AO', 'Split', 'Split AO', 'SSAO fallback'],
+        options: ['Combined', 'AO', 'No AO', 'Split', 'Split AO'],
         label: 'render mode',
       },
       n8aoQuality: {
@@ -101,6 +106,28 @@ export function PostFx() {
         options: ['performance', 'low', 'medium', 'high', 'ultra'],
         label: 'quality preset',
       },
+    }, { collapsed: true }),
+    // SSAO — pmndrs' classic hemispherical-sample SSAO. Works on our scene
+    // where N8AO's depth-derived normal reconstruction doesn't (sphere
+    // projection vertex shader defeats the neighbour-delta trick). Toggle
+    // on alongside or instead of N8AO.
+    SSAO: folder({
+      ssaoEnabled: { value: false, label: 'on' },
+      ssaoSamples: { value: 30, min: 1, max: 64, step: 1, label: 'samples' },
+      ssaoRings: { value: 4, min: 1, max: 16, step: 1, label: 'rings' },
+      ssaoRadius: { value: 0.1, min: 0.001, max: 2, step: 0.001, label: 'radius' },
+      ssaoIntensity: { value: 30, min: 0, max: 100, step: 0.5, label: 'intensity' },
+      ssaoLuminanceInfluence: { value: 0.6, min: 0, max: 1, step: 0.01, label: 'lum influence' },
+      ssaoBias: { value: 0.025, min: 0, max: 0.5, step: 0.001, label: 'bias' },
+      ssaoFade: { value: 0.01, min: 0, max: 0.5, step: 0.001, label: 'fade' },
+      ssaoColor: { value: '#000000', label: 'AO colour' },
+      ssaoResolutionScale: { value: 1, min: 0.25, max: 1, step: 0.05, label: 'res scale' },
+      'SSAO — world distance': folder({
+        ssaoWorldDistanceThreshold: { value: 1, min: 0, max: 10, step: 0.05, label: 'dist threshold' },
+        ssaoWorldDistanceFalloff: { value: 0.1, min: 0, max: 5, step: 0.05, label: 'dist falloff' },
+        ssaoWorldProximityThreshold: { value: 0.4, min: 0, max: 5, step: 0.01, label: 'prox threshold' },
+        ssaoWorldProximityFalloff: { value: 0.1, min: 0, max: 5, step: 0.01, label: 'prox falloff' },
+      }, { collapsed: true }),
     }, { collapsed: true }),
     'Depth of Field': folder({
       dofEnabled: { value: true, label: 'on' },
@@ -265,8 +292,7 @@ export function PostFx() {
   // enableNormalPass is needed by SSGI's G-buffer reads and by SSAO for
   // proper hemispherical sampling. Turning it on when none of those are
   // active is a minor waste (~one extra render pass).
-  const needNormalPass = ssgiEnabled || ssrEnabled ||
-    (n8aoEnabled && n8aoRenderMode === 'SSAO fallback')
+  const needNormalPass = ssgiEnabled || ssrEnabled || ssaoEnabled
 
   return (
     <>
@@ -278,7 +304,7 @@ export function PostFx() {
       ) : null}
     <EffectComposer multisampling={0} enableNormalPass={needNormalPass} stencilBuffer depthBuffer>
       {smaaEnabled ? <SMAA /> : <></>}
-      {n8aoEnabled && n8aoRenderMode !== 'SSAO fallback' ? (
+      {n8aoEnabled ? (
         <N8AO
           ref={n8aoRef}
           aoRadius={n8aoRadius}
@@ -300,17 +326,21 @@ export function PostFx() {
           quality={n8aoQuality as 'performance' | 'low' | 'medium' | 'high' | 'ultra'}
         />
       ) : <></>}
-      {n8aoEnabled && n8aoRenderMode === 'SSAO fallback' ? (
+      {ssaoEnabled ? (
         <SSAO
-          samples={31}
-          radius={n8aoRadius}
-          intensity={n8aoIntensity * 5}
-          luminanceInfluence={0.7}
-          color={n8aoColor}
-          worldDistanceThreshold={1}
-          worldDistanceFalloff={0.1}
-          worldProximityThreshold={0.4}
-          worldProximityFalloff={0.1}
+          samples={ssaoSamples}
+          rings={ssaoRings}
+          radius={ssaoRadius}
+          intensity={ssaoIntensity}
+          luminanceInfluence={ssaoLuminanceInfluence}
+          bias={ssaoBias}
+          fade={ssaoFade}
+          color={ssaoColor}
+          resolutionScale={ssaoResolutionScale}
+          worldDistanceThreshold={ssaoWorldDistanceThreshold}
+          worldDistanceFalloff={ssaoWorldDistanceFalloff}
+          worldProximityThreshold={ssaoWorldProximityThreshold}
+          worldProximityFalloff={ssaoWorldProximityFalloff}
         />
       ) : <></>}
       {dofEnabled ? (
