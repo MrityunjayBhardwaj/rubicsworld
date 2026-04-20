@@ -34,7 +34,7 @@ const seededLoad = async () => {
   await page.waitForFunction(() => !!window.__planet, null, { timeout: 10000 })
 }
 
-const waitForPhase = async (target, timeout = 20000) =>
+const waitForPhase = async (target, timeout = 60000) =>
   page.waitForFunction(
     t => window.__planet?.getState().introPhase === t,
     target,

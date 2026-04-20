@@ -1,0 +1,495 @@
+diff --git a/node_modules/realism-effects/dist/index.cjs b/node_modules/realism-effects/dist/index.cjs
+index 0b2b336..b73e420 100644
+--- a/node_modules/realism-effects/dist/index.cjs
++++ b/node_modules/realism-effects/dist/index.cjs
+@@ -190,9 +190,9 @@ class CopyPass extends postprocessing.Pass {
+   constructor(textureCount = 1) {
+     super("CopyPass");
+     this.needsSwap = false;
+-    this.renderTarget = new three.WebGLMultipleRenderTargets(1, 1, 1, {
++    this.renderTarget = new three.WebGLRenderTarget(1, 1, { count: 1, ...{
+       depthBuffer: false
+-    });
++    } });
+     this.setTextureCount(textureCount);
+   }
+ 
+@@ -238,10 +238,10 @@ class CopyPass extends postprocessing.Pass {
+     for (let i = 0; i < textureCount; i++) {
+       this.fullscreenMaterial.uniforms["inputTexture" + i] = new three.Uniform(null);
+ 
+-      if (i >= this.renderTarget.texture.length) {
+-        const texture = this.renderTarget.texture[0].clone();
++      if (i >= this.renderTarget.textures.length) {
++        const texture = this.renderTarget.textures[0].clone();
+         texture.isRenderTargetTexture = true;
+-        this.renderTarget.texture.push(texture);
++        this.renderTarget.textures.push(texture);
+       }
+     }
+   }
+@@ -399,13 +399,13 @@ class TemporalReprojectPass extends postprocessing.Pass {
+     options = { ...defaultTemporalReprojectPassOptions,
+       ...options
+     };
+-    this.renderTarget = new three.WebGLMultipleRenderTargets(1, 1, textureCount, {
++    this.renderTarget = new three.WebGLRenderTarget(1, 1, { count: textureCount, ...{
+       minFilter: three.LinearFilter,
+       magFilter: three.LinearFilter,
+       type: three.HalfFloatType,
+       depthBuffer: false
+-    });
+-    this.renderTarget.texture.map((texture, index) => texture.name = "TemporalReprojectPass.accumulatedTexture" + index);
++    } });
++    this.renderTarget.textures.map((texture, index) => texture.name = "TemporalReprojectPass.accumulatedTexture" + index);
+     this.fullscreenMaterial = new TemporalReprojectMaterial(textureCount, options.temporalReprojectCustomComposeShader);
+     this.fullscreenMaterial.defines.textureCount = textureCount;
+     if (options.dilation) this.fullscreenMaterial.defines.dilation = "";
+@@ -431,7 +431,7 @@ class TemporalReprojectPass extends postprocessing.Pass {
+     this.copyPass = new CopyPass(textureCount);
+ 
+     for (let i = 0; i < textureCount; i++) {
+-      const accumulatedTexture = this.copyPass.renderTarget.texture[i];
++      const accumulatedTexture = this.copyPass.renderTarget.textures[i];
+       accumulatedTexture.type = three.HalfFloatType;
+       accumulatedTexture.minFilter = three.LinearFilter;
+       accumulatedTexture.magFilter = three.LinearFilter;
+@@ -476,7 +476,7 @@ class TemporalReprojectPass extends postprocessing.Pass {
+   }
+ 
+   get texture() {
+-    return this.renderTarget.texture[0];
++    return this.renderTarget.textures[0];
+   }
+ 
+   reset() {
+@@ -506,8 +506,8 @@ class TemporalReprojectPass extends postprocessing.Pass {
+     this.fullscreenMaterial.uniforms.reset.value = false;
+ 
+     for (let i = 0; i < this.textureCount; i++) {
+-      this.copyPass.fullscreenMaterial.uniforms["inputTexture" + i].value = this.renderTarget.texture[i];
+-      this.fullscreenMaterial.uniforms["accumulatedTexture" + i].value = this.copyPass.renderTarget.texture[i];
++      this.copyPass.fullscreenMaterial.uniforms["inputTexture" + i].value = this.renderTarget.textures[i];
++      this.fullscreenMaterial.uniforms["accumulatedTexture" + i].value = this.copyPass.renderTarget.textures[i];
+     }
+ 
+     this.copyPass.render(renderer); // save last transformations
+@@ -681,8 +681,8 @@ class DenoisePass extends postprocessing.Pass {
+       type: three.HalfFloatType,
+       depthBuffer: false
+     };
+-    this.renderTargetA = new three.WebGLMultipleRenderTargets(1, 1, textures.length, renderTargetOptions);
+-    this.renderTargetB = new three.WebGLMultipleRenderTargets(1, 1, textures.length, renderTargetOptions);
++    this.renderTargetA = new three.WebGLRenderTarget(1, 1, { count: textures.length, ...renderTargetOptions });
++    this.renderTargetB = new three.WebGLRenderTarget(1, 1, { count: textures.length, ...renderTargetOptions });
+     if (typeof options.roughnessDependent === "boolean") options.roughnessDependent = Array(textures.length).fill(options.roughnessDependent);
+     this.fullscreenMaterial.defines.roughnessDependent =
+     /* glsl */
+@@ -808,7 +808,7 @@ class DenoisePass extends postprocessing.Pass {
+         const renderTarget = horizontal ? this.renderTargetA : this.renderTargetB;
+ 
+         for (let j = 0; j < this.textures.length; j++) {
+-          this.fullscreenMaterial.uniforms["inputTexture" + j].value = horizontal ? i === 0 ? this.textures[j] : this.renderTargetB.texture[j] : this.renderTargetA.texture[j];
++          this.fullscreenMaterial.uniforms["inputTexture" + j].value = horizontal ? i === 0 ? this.textures[j] : this.renderTargetB.textures[j] : this.renderTargetA.textures[j];
+         }
+ 
+         renderer.setRenderTarget(renderTarget);
+@@ -833,7 +833,7 @@ class DenoisePass extends postprocessing.Pass {
+ 
+ 
+   get texture() {
+-    return this.renderTargetB.texture[0];
++    return this.renderTargetB.textures[0];
+   }
+ 
+ }
+@@ -852,13 +852,13 @@ class SVGFTemporalReprojectPass extends TemporalReprojectPass {
+     };
+     super(scene, camera, velocityDepthNormalPass, textureCount, options); // moment
+ 
+-    this.momentTexture = this.renderTarget.texture[0].clone();
++    this.momentTexture = this.renderTarget.textures[0].clone();
+     this.momentTexture.isRenderTargetTexture = true;
+     this.momentTexture.type = three.FloatType;
+     this.momentTexture.minFilter = three.NearestFilter;
+     this.momentTexture.magFilter = three.NearestFilter;
+     this.momentTexture.needsUpdate = true;
+-    this.renderTarget.texture.push(this.momentTexture);
++    this.renderTarget.textures.push(this.momentTexture);
+     const momentBuffers =
+     /* glsl */
+     `
+@@ -875,7 +875,7 @@ class SVGFTemporalReprojectPass extends TemporalReprojectPass {
+     const copyPassTextureCount = textureCount + 1;
+     this.copyPass.setTextureCount(copyPassTextureCount);
+     this.copyPass.fullscreenMaterial.uniforms["inputTexture" + (copyPassTextureCount - 1)].value = this.momentTexture;
+-    const lastMomentTexture = this.copyPass.renderTarget.texture[copyPassTextureCount - 1];
++    const lastMomentTexture = this.copyPass.renderTarget.textures[copyPassTextureCount - 1];
+     lastMomentTexture.type = three.FloatType;
+     lastMomentTexture.minFilter = three.LinearFilter; // need to use linear filter over nearest filter
+ 
+@@ -890,7 +890,7 @@ class SVGFTemporalReprojectPass extends TemporalReprojectPass {
+ class SVGF {
+   constructor(scene, camera, velocityDepthNormalPass, textureCount = 1, options = {}) {
+     this.svgfTemporalReprojectPass = new SVGFTemporalReprojectPass(scene, camera, velocityDepthNormalPass, textureCount, options);
+-    const textures = this.svgfTemporalReprojectPass.renderTarget.texture.slice(0, textureCount);
++    const textures = this.svgfTemporalReprojectPass.renderTarget.textures.slice(0, textureCount);
+     this.denoisePass = new DenoisePass(camera, textures, options);
+     this.denoisePass.setMomentTexture(this.svgfTemporalReprojectPass.momentTexture);
+     this.setNonJitteredDepthTexture(velocityDepthNormalPass.depthTexture);
+@@ -1779,10 +1779,10 @@ class SSGIPass extends postprocessing.Pass {
+     this.fullscreenMaterial = new SSGIMaterial();
+     this.defaultFragmentShader = this.fullscreenMaterial.fragmentShader;
+     const bufferCount = !options.diffuseOnly && !options.specularOnly ? 2 : 1;
+-    this.renderTarget = new three.WebGLMultipleRenderTargets(1, 1, bufferCount, {
++    this.renderTarget = new three.WebGLRenderTarget(1, 1, { count: bufferCount, ...{
+       type: three.HalfFloatType,
+       depthBuffer: false
+-    }); // set up basic uniforms that we don't have to update
++    } }); // set up basic uniforms that we don't have to update
+ 
+     this.fullscreenMaterial.uniforms.cameraMatrixWorld.value = this._camera.matrixWorld;
+     this.fullscreenMaterial.uniforms.viewMatrix.value = this._camera.matrixWorldInverse;
+@@ -1807,26 +1807,26 @@ class SSGIPass extends postprocessing.Pass {
+   }
+ 
+   get texture() {
+-    return this.renderTarget.texture[0];
++    return this.renderTarget.textures[0];
+   }
+ 
+   get specularTexture() {
+     const index = "specularOnly" in this.fullscreenMaterial.defines ? 0 : 1;
+-    return this.renderTarget.texture[index];
++    return this.renderTarget.textures[index];
+   }
+ 
+   initMRTRenderTarget() {
+-    this.gBuffersRenderTarget = new three.WebGLMultipleRenderTargets(1, 1, 4, {
++    this.gBuffersRenderTarget = new three.WebGLRenderTarget(1, 1, { count: 4, ...{
+       minFilter: three.NearestFilter,
+       magFilter: three.NearestFilter
+-    });
++    } });
+     this.gBuffersRenderTarget.depthTexture = new three.DepthTexture(1, 1);
+     this.gBuffersRenderTarget.depthTexture.type = three.FloatType;
+     this.backSideDepthPass = new BackSideDepthPass(this._scene, this._camera);
+-    this.depthTexture = this.gBuffersRenderTarget.texture[0];
+-    this.normalTexture = this.gBuffersRenderTarget.texture[1];
+-    this.diffuseTexture = this.gBuffersRenderTarget.texture[2];
+-    this.emissiveTexture = this.gBuffersRenderTarget.texture[3];
++    this.depthTexture = this.gBuffersRenderTarget.textures[0];
++    this.normalTexture = this.gBuffersRenderTarget.textures[1];
++    this.diffuseTexture = this.gBuffersRenderTarget.textures[2];
++    this.emissiveTexture = this.gBuffersRenderTarget.textures[3];
+     this.diffuseTexture.minFilter = three.LinearFilter;
+     this.diffuseTexture.magFilter = three.LinearFilter;
+     this.diffuseTexture.colorSpace = three.SRGBColorSpace;
+@@ -1969,7 +1969,7 @@ class SSGIPass extends postprocessing.Pass {
+ 
+ }
+ 
+-var ssgi_compose = "#define GLSLIFY 1\nuniform sampler2D inputTexture;uniform sampler2D sceneTexture;uniform sampler2D depthTexture;uniform int toneMapping;\n#include <tonemapping_pars_fragment>\n#pragma tonemapping_pars_fragment\nvoid mainImage(const in vec4 inputColor,const in vec2 uv,out vec4 outputColor){vec4 depthTexel=textureLod(depthTexture,uv,0.);vec3 ssgiClr;if(dot(depthTexel.rgb,depthTexel.rgb)==0.){ssgiClr=textureLod(sceneTexture,uv,0.).rgb;}else{ssgiClr=textureLod(inputTexture,uv,0.).rgb;switch(toneMapping){case 1:ssgiClr=LinearToneMapping(ssgiClr);break;case 2:ssgiClr=ReinhardToneMapping(ssgiClr);break;case 3:ssgiClr=OptimizedCineonToneMapping(ssgiClr);break;case 4:ssgiClr=ACESFilmicToneMapping(ssgiClr);break;case 5:ssgiClr=CustomToneMapping(ssgiClr);break;}ssgiClr*=toneMappingExposure;}outputColor=vec4(ssgiClr,1.0);}"; // eslint-disable-line
++var ssgi_compose = "#define GLSLIFY 1\nuniform sampler2D inputTexture;uniform sampler2D sceneTexture;uniform sampler2D depthTexture;uniform int toneMapping;\n#include <tonemapping_pars_fragment>\n#pragma tonemapping_pars_fragment\nvoid mainImage(const in vec4 inputColor,const in vec2 uv,out vec4 outputColor){vec4 depthTexel=textureLod(depthTexture,uv,0.);vec3 ssgiClr;if(dot(depthTexel.rgb,depthTexel.rgb)==0.){ssgiClr=textureLod(sceneTexture,uv,0.).rgb;}else{ssgiClr=textureLod(inputTexture,uv,0.).rgb;switch(toneMapping){case 1:ssgiClr=LinearToneMapping(ssgiClr);break;case 2:ssgiClr=ReinhardToneMapping(ssgiClr);break;case 3:ssgiClr=CineonToneMapping(ssgiClr);break;case 4:ssgiClr=ACESFilmicToneMapping(ssgiClr);break;case 5:ssgiClr=CustomToneMapping(ssgiClr);break;}ssgiClr*=toneMappingExposure;}outputColor=vec4(ssgiClr,1.0);}"; // eslint-disable-line
+ 
+ var denoise_compose = "#define GLSLIFY 1\nvec3 viewNormal=(vec4(normal,0.)*cameraMatrixWorld).xyz;roughness*=roughness;vec3 viewPos=getViewPosition(depth);vec3 viewDir=normalize(viewPos);vec3 T,B;vec3 n=viewNormal;vec3 v=viewDir;vec3 V=(vec4(v,0.)*viewMatrix).xyz;vec3 N=normal;Onb(N,T,B);V=ToLocal(T,B,N,V);vec3 H=SampleGGXVNDF(V,roughness,roughness,0.25,0.25);if(H.z<0.0)H=-H;vec3 l=normalize(reflect(-V,H));l=ToWorld(T,B,N,l);l=(vec4(l,1.)*cameraMatrixWorld).xyz;l=normalize(l);if(dot(viewNormal,l)<0.)l=-l;vec3 h=normalize(v+l);float VoH=max(EPSILON,dot(v,h));VoH=pow(VoH,0.875);vec4 diffuseTexel=textureLod(diffuseTexture,vUv,0.);vec3 diffuse=diffuseTexel.rgb;float metalness=diffuseTexel.a;vec3 f0=mix(vec3(0.04),diffuse,metalness);vec3 F=F_Schlick(f0,VoH);vec3 directLight=textureLod(directLightTexture,vUv,0.).rgb;\n#ifdef ssgi\nvec3 diffuseLightingColor=denoisedColor[0];vec3 diffuseComponent=diffuse*(1.-metalness)*(1.-F)*diffuseLightingColor;vec3 specularLightingColor=denoisedColor[1];vec3 specularComponent=specularLightingColor*F;denoisedColor[0]=diffuseComponent+specularComponent;\n#endif\n#ifdef ssdgi\nvec3 diffuseLightingColor=denoisedColor[0];vec3 diffuseComponent=diffuse*(1.-metalness)*(1.-F)*diffuseLightingColor;denoisedColor[0]=diffuseComponent;\n#endif\n#ifdef ssr\nvec3 specularLightingColor=denoisedColor[0];vec3 specularComponent=specularLightingColor*F;denoisedColor[0]=specularComponent;\n#endif\n#ifdef useDirectLight\ndenoisedColor[0]+=directLight;\n#endif\n"; // eslint-disable-line
+ 
+@@ -2745,18 +2745,18 @@ class VelocityDepthNormalPass extends postprocessing.Pass {
+     this._scene = scene;
+     this._camera = camera;
+     const bufferCount = renderDepth ? 2 : 1;
+-    this.renderTarget = new three.WebGLMultipleRenderTargets(1, 1, bufferCount, {
++    this.renderTarget = new three.WebGLRenderTarget(1, 1, { count: bufferCount, ...{
+       minFilter: three.NearestFilter,
+       magFilter: three.NearestFilter
+-    });
++    } });
+     this.renderTarget.depthTexture = new three.DepthTexture(1, 1);
+     this.renderTarget.depthTexture.type = three.FloatType;
+ 
+     if (renderDepth) {
+-      this.renderTarget.texture[0].type = three.UnsignedByteType;
+-      this.renderTarget.texture[0].needsUpdate = true;
+-      this.renderTarget.texture[1].type = three.FloatType;
+-      this.renderTarget.texture[1].needsUpdate = true;
++      this.renderTarget.textures[0].type = three.UnsignedByteType;
++      this.renderTarget.textures[0].needsUpdate = true;
++      this.renderTarget.textures[1].type = three.FloatType;
++      this.renderTarget.textures[1].needsUpdate = true;
+     }
+ 
+     this.renderDepth = renderDepth;
+@@ -2812,11 +2812,11 @@ class VelocityDepthNormalPass extends postprocessing.Pass {
+   }
+ 
+   get texture() {
+-    return Array.isArray(this.renderTarget.texture) ? this.renderTarget.texture[1] : this.renderTarget.texture;
++    return (this.renderTarget.textures && this.renderTarget.textures.length > 1) ? this.renderTarget.textures[1] : this.renderTarget.texture;
+   }
+ 
+   get depthTexture() {
+-    return this.renderTarget.texture[0];
++    return this.renderTarget.textures[0];
+   }
+ 
+   render(renderer) {
+@@ -2835,7 +2835,7 @@ class VelocityDepthNormalPass extends postprocessing.Pass {
+     } = this._scene;
+     this._scene.background = backgroundColor;
+     renderer.setRenderTarget(this.renderTarget);
+-    renderer.copyFramebufferToTexture(zeroVec2, this.lastDepthTexture);
++    renderer.copyFramebufferToTexture(this.lastDepthTexture, zeroVec2);
+     renderer.render(this._scene, this._camera);
+     this._scene.background = background;
+     this.unsetVelocityDepthNormalMaterialInScene();
+diff --git a/node_modules/realism-effects/dist/index.js b/node_modules/realism-effects/dist/index.js
+index 72e1b70..8198591 100644
+--- a/node_modules/realism-effects/dist/index.js
++++ b/node_modules/realism-effects/dist/index.js
+@@ -1,5 +1,5 @@
+ import { Pass, Effect, RenderPass, Selection, NormalPass } from 'postprocessing';
+-import { DataTexture, RGBAFormat, FloatType, ShaderChunk, ShaderLib, UniformsUtils, WebGLMultipleRenderTargets, ShaderMaterial, GLSL3, NoBlending, Uniform, Vector2, Matrix4, Vector3, Clock, Quaternion, LinearFilter, HalfFloatType, UnsignedByteType, RGBADepthPacking, BasicDepthPacking, NearestFilter, WebGLRenderTarget, ClampToEdgeWrapping, LinearMipMapLinearFilter, EquirectangularReflectionMapping, Color, Matrix3, TangentSpaceNormalMap, RepeatWrapping, RedFormat, Source, MeshDepthMaterial, BackSide, TextureLoader, NoColorSpace, DepthTexture, SRGBColorSpace, Texture, NoToneMapping, PerspectiveCamera, FramebufferTexture } from 'three';
++import { DataTexture, RGBAFormat, FloatType, ShaderChunk, ShaderLib, UniformsUtils, ShaderMaterial, GLSL3, NoBlending, Uniform, Vector2, Matrix4, Vector3, Clock, Quaternion, LinearFilter, HalfFloatType, UnsignedByteType, RGBADepthPacking, BasicDepthPacking, NearestFilter, WebGLRenderTarget, ClampToEdgeWrapping, LinearMipMapLinearFilter, EquirectangularReflectionMapping, Color, Matrix3, TangentSpaceNormalMap, RepeatWrapping, RedFormat, Source, MeshDepthMaterial, BackSide, TextureLoader, NoColorSpace, DepthTexture, SRGBColorSpace, Texture, NoToneMapping, PerspectiveCamera, FramebufferTexture } from 'three';
+ 
+ const getVisibleChildren = object => {
+   const queue = [object];
+@@ -188,9 +188,9 @@ class CopyPass extends Pass {
+   constructor(textureCount = 1) {
+     super("CopyPass");
+     this.needsSwap = false;
+-    this.renderTarget = new WebGLMultipleRenderTargets(1, 1, 1, {
++    this.renderTarget = new WebGLRenderTarget(1, 1, { count: 1, ...{
+       depthBuffer: false
+-    });
++    } });
+     this.setTextureCount(textureCount);
+   }
+ 
+@@ -236,10 +236,10 @@ class CopyPass extends Pass {
+     for (let i = 0; i < textureCount; i++) {
+       this.fullscreenMaterial.uniforms["inputTexture" + i] = new Uniform(null);
+ 
+-      if (i >= this.renderTarget.texture.length) {
+-        const texture = this.renderTarget.texture[0].clone();
++      if (i >= this.renderTarget.textures.length) {
++        const texture = this.renderTarget.textures[0].clone();
+         texture.isRenderTargetTexture = true;
+-        this.renderTarget.texture.push(texture);
++        this.renderTarget.textures.push(texture);
+       }
+     }
+   }
+@@ -397,13 +397,13 @@ class TemporalReprojectPass extends Pass {
+     options = { ...defaultTemporalReprojectPassOptions,
+       ...options
+     };
+-    this.renderTarget = new WebGLMultipleRenderTargets(1, 1, textureCount, {
++    this.renderTarget = new WebGLRenderTarget(1, 1, { count: textureCount, ...{
+       minFilter: LinearFilter,
+       magFilter: LinearFilter,
+       type: HalfFloatType,
+       depthBuffer: false
+-    });
+-    this.renderTarget.texture.map((texture, index) => texture.name = "TemporalReprojectPass.accumulatedTexture" + index);
++    } });
++    this.renderTarget.textures.map((texture, index) => texture.name = "TemporalReprojectPass.accumulatedTexture" + index);
+     this.fullscreenMaterial = new TemporalReprojectMaterial(textureCount, options.temporalReprojectCustomComposeShader);
+     this.fullscreenMaterial.defines.textureCount = textureCount;
+     if (options.dilation) this.fullscreenMaterial.defines.dilation = "";
+@@ -429,7 +429,7 @@ class TemporalReprojectPass extends Pass {
+     this.copyPass = new CopyPass(textureCount);
+ 
+     for (let i = 0; i < textureCount; i++) {
+-      const accumulatedTexture = this.copyPass.renderTarget.texture[i];
++      const accumulatedTexture = this.copyPass.renderTarget.textures[i];
+       accumulatedTexture.type = HalfFloatType;
+       accumulatedTexture.minFilter = LinearFilter;
+       accumulatedTexture.magFilter = LinearFilter;
+@@ -474,7 +474,7 @@ class TemporalReprojectPass extends Pass {
+   }
+ 
+   get texture() {
+-    return this.renderTarget.texture[0];
++    return this.renderTarget.textures[0];
+   }
+ 
+   reset() {
+@@ -504,8 +504,8 @@ class TemporalReprojectPass extends Pass {
+     this.fullscreenMaterial.uniforms.reset.value = false;
+ 
+     for (let i = 0; i < this.textureCount; i++) {
+-      this.copyPass.fullscreenMaterial.uniforms["inputTexture" + i].value = this.renderTarget.texture[i];
+-      this.fullscreenMaterial.uniforms["accumulatedTexture" + i].value = this.copyPass.renderTarget.texture[i];
++      this.copyPass.fullscreenMaterial.uniforms["inputTexture" + i].value = this.renderTarget.textures[i];
++      this.fullscreenMaterial.uniforms["accumulatedTexture" + i].value = this.copyPass.renderTarget.textures[i];
+     }
+ 
+     this.copyPass.render(renderer); // save last transformations
+@@ -679,8 +679,8 @@ class DenoisePass extends Pass {
+       type: HalfFloatType,
+       depthBuffer: false
+     };
+-    this.renderTargetA = new WebGLMultipleRenderTargets(1, 1, textures.length, renderTargetOptions);
+-    this.renderTargetB = new WebGLMultipleRenderTargets(1, 1, textures.length, renderTargetOptions);
++    this.renderTargetA = new WebGLRenderTarget(1, 1, { count: textures.length, ...renderTargetOptions });
++    this.renderTargetB = new WebGLRenderTarget(1, 1, { count: textures.length, ...renderTargetOptions });
+     if (typeof options.roughnessDependent === "boolean") options.roughnessDependent = Array(textures.length).fill(options.roughnessDependent);
+     this.fullscreenMaterial.defines.roughnessDependent =
+     /* glsl */
+@@ -806,7 +806,7 @@ class DenoisePass extends Pass {
+         const renderTarget = horizontal ? this.renderTargetA : this.renderTargetB;
+ 
+         for (let j = 0; j < this.textures.length; j++) {
+-          this.fullscreenMaterial.uniforms["inputTexture" + j].value = horizontal ? i === 0 ? this.textures[j] : this.renderTargetB.texture[j] : this.renderTargetA.texture[j];
++          this.fullscreenMaterial.uniforms["inputTexture" + j].value = horizontal ? i === 0 ? this.textures[j] : this.renderTargetB.textures[j] : this.renderTargetA.textures[j];
+         }
+ 
+         renderer.setRenderTarget(renderTarget);
+@@ -831,7 +831,7 @@ class DenoisePass extends Pass {
+ 
+ 
+   get texture() {
+-    return this.renderTargetB.texture[0];
++    return this.renderTargetB.textures[0];
+   }
+ 
+ }
+@@ -850,13 +850,13 @@ class SVGFTemporalReprojectPass extends TemporalReprojectPass {
+     };
+     super(scene, camera, velocityDepthNormalPass, textureCount, options); // moment
+ 
+-    this.momentTexture = this.renderTarget.texture[0].clone();
++    this.momentTexture = this.renderTarget.textures[0].clone();
+     this.momentTexture.isRenderTargetTexture = true;
+     this.momentTexture.type = FloatType;
+     this.momentTexture.minFilter = NearestFilter;
+     this.momentTexture.magFilter = NearestFilter;
+     this.momentTexture.needsUpdate = true;
+-    this.renderTarget.texture.push(this.momentTexture);
++    this.renderTarget.textures.push(this.momentTexture);
+     const momentBuffers =
+     /* glsl */
+     `
+@@ -873,7 +873,7 @@ class SVGFTemporalReprojectPass extends TemporalReprojectPass {
+     const copyPassTextureCount = textureCount + 1;
+     this.copyPass.setTextureCount(copyPassTextureCount);
+     this.copyPass.fullscreenMaterial.uniforms["inputTexture" + (copyPassTextureCount - 1)].value = this.momentTexture;
+-    const lastMomentTexture = this.copyPass.renderTarget.texture[copyPassTextureCount - 1];
++    const lastMomentTexture = this.copyPass.renderTarget.textures[copyPassTextureCount - 1];
+     lastMomentTexture.type = FloatType;
+     lastMomentTexture.minFilter = LinearFilter; // need to use linear filter over nearest filter
+ 
+@@ -888,7 +888,7 @@ class SVGFTemporalReprojectPass extends TemporalReprojectPass {
+ class SVGF {
+   constructor(scene, camera, velocityDepthNormalPass, textureCount = 1, options = {}) {
+     this.svgfTemporalReprojectPass = new SVGFTemporalReprojectPass(scene, camera, velocityDepthNormalPass, textureCount, options);
+-    const textures = this.svgfTemporalReprojectPass.renderTarget.texture.slice(0, textureCount);
++    const textures = this.svgfTemporalReprojectPass.renderTarget.textures.slice(0, textureCount);
+     this.denoisePass = new DenoisePass(camera, textures, options);
+     this.denoisePass.setMomentTexture(this.svgfTemporalReprojectPass.momentTexture);
+     this.setNonJitteredDepthTexture(velocityDepthNormalPass.depthTexture);
+@@ -1777,10 +1777,10 @@ class SSGIPass extends Pass {
+     this.fullscreenMaterial = new SSGIMaterial();
+     this.defaultFragmentShader = this.fullscreenMaterial.fragmentShader;
+     const bufferCount = !options.diffuseOnly && !options.specularOnly ? 2 : 1;
+-    this.renderTarget = new WebGLMultipleRenderTargets(1, 1, bufferCount, {
++    this.renderTarget = new WebGLRenderTarget(1, 1, { count: bufferCount, ...{
+       type: HalfFloatType,
+       depthBuffer: false
+-    }); // set up basic uniforms that we don't have to update
++    } }); // set up basic uniforms that we don't have to update
+ 
+     this.fullscreenMaterial.uniforms.cameraMatrixWorld.value = this._camera.matrixWorld;
+     this.fullscreenMaterial.uniforms.viewMatrix.value = this._camera.matrixWorldInverse;
+@@ -1805,26 +1805,26 @@ class SSGIPass extends Pass {
+   }
+ 
+   get texture() {
+-    return this.renderTarget.texture[0];
++    return this.renderTarget.textures[0];
+   }
+ 
+   get specularTexture() {
+     const index = "specularOnly" in this.fullscreenMaterial.defines ? 0 : 1;
+-    return this.renderTarget.texture[index];
++    return this.renderTarget.textures[index];
+   }
+ 
+   initMRTRenderTarget() {
+-    this.gBuffersRenderTarget = new WebGLMultipleRenderTargets(1, 1, 4, {
++    this.gBuffersRenderTarget = new WebGLRenderTarget(1, 1, { count: 4, ...{
+       minFilter: NearestFilter,
+       magFilter: NearestFilter
+-    });
++    } });
+     this.gBuffersRenderTarget.depthTexture = new DepthTexture(1, 1);
+     this.gBuffersRenderTarget.depthTexture.type = FloatType;
+     this.backSideDepthPass = new BackSideDepthPass(this._scene, this._camera);
+-    this.depthTexture = this.gBuffersRenderTarget.texture[0];
+-    this.normalTexture = this.gBuffersRenderTarget.texture[1];
+-    this.diffuseTexture = this.gBuffersRenderTarget.texture[2];
+-    this.emissiveTexture = this.gBuffersRenderTarget.texture[3];
++    this.depthTexture = this.gBuffersRenderTarget.textures[0];
++    this.normalTexture = this.gBuffersRenderTarget.textures[1];
++    this.diffuseTexture = this.gBuffersRenderTarget.textures[2];
++    this.emissiveTexture = this.gBuffersRenderTarget.textures[3];
+     this.diffuseTexture.minFilter = LinearFilter;
+     this.diffuseTexture.magFilter = LinearFilter;
+     this.diffuseTexture.colorSpace = SRGBColorSpace;
+@@ -1967,7 +1967,7 @@ class SSGIPass extends Pass {
+ 
+ }
+ 
+-var ssgi_compose = "#define GLSLIFY 1\nuniform sampler2D inputTexture;uniform sampler2D sceneTexture;uniform sampler2D depthTexture;uniform int toneMapping;\n#include <tonemapping_pars_fragment>\n#pragma tonemapping_pars_fragment\nvoid mainImage(const in vec4 inputColor,const in vec2 uv,out vec4 outputColor){vec4 depthTexel=textureLod(depthTexture,uv,0.);vec3 ssgiClr;if(dot(depthTexel.rgb,depthTexel.rgb)==0.){ssgiClr=textureLod(sceneTexture,uv,0.).rgb;}else{ssgiClr=textureLod(inputTexture,uv,0.).rgb;switch(toneMapping){case 1:ssgiClr=LinearToneMapping(ssgiClr);break;case 2:ssgiClr=ReinhardToneMapping(ssgiClr);break;case 3:ssgiClr=OptimizedCineonToneMapping(ssgiClr);break;case 4:ssgiClr=ACESFilmicToneMapping(ssgiClr);break;case 5:ssgiClr=CustomToneMapping(ssgiClr);break;}ssgiClr*=toneMappingExposure;}outputColor=vec4(ssgiClr,1.0);}"; // eslint-disable-line
++var ssgi_compose = "#define GLSLIFY 1\nuniform sampler2D inputTexture;uniform sampler2D sceneTexture;uniform sampler2D depthTexture;uniform int toneMapping;\n#include <tonemapping_pars_fragment>\n#pragma tonemapping_pars_fragment\nvoid mainImage(const in vec4 inputColor,const in vec2 uv,out vec4 outputColor){vec4 depthTexel=textureLod(depthTexture,uv,0.);vec3 ssgiClr;if(dot(depthTexel.rgb,depthTexel.rgb)==0.){ssgiClr=textureLod(sceneTexture,uv,0.).rgb;}else{ssgiClr=textureLod(inputTexture,uv,0.).rgb;switch(toneMapping){case 1:ssgiClr=LinearToneMapping(ssgiClr);break;case 2:ssgiClr=ReinhardToneMapping(ssgiClr);break;case 3:ssgiClr=CineonToneMapping(ssgiClr);break;case 4:ssgiClr=ACESFilmicToneMapping(ssgiClr);break;case 5:ssgiClr=CustomToneMapping(ssgiClr);break;}ssgiClr*=toneMappingExposure;}outputColor=vec4(ssgiClr,1.0);}"; // eslint-disable-line
+ 
+ var denoise_compose = "#define GLSLIFY 1\nvec3 viewNormal=(vec4(normal,0.)*cameraMatrixWorld).xyz;roughness*=roughness;vec3 viewPos=getViewPosition(depth);vec3 viewDir=normalize(viewPos);vec3 T,B;vec3 n=viewNormal;vec3 v=viewDir;vec3 V=(vec4(v,0.)*viewMatrix).xyz;vec3 N=normal;Onb(N,T,B);V=ToLocal(T,B,N,V);vec3 H=SampleGGXVNDF(V,roughness,roughness,0.25,0.25);if(H.z<0.0)H=-H;vec3 l=normalize(reflect(-V,H));l=ToWorld(T,B,N,l);l=(vec4(l,1.)*cameraMatrixWorld).xyz;l=normalize(l);if(dot(viewNormal,l)<0.)l=-l;vec3 h=normalize(v+l);float VoH=max(EPSILON,dot(v,h));VoH=pow(VoH,0.875);vec4 diffuseTexel=textureLod(diffuseTexture,vUv,0.);vec3 diffuse=diffuseTexel.rgb;float metalness=diffuseTexel.a;vec3 f0=mix(vec3(0.04),diffuse,metalness);vec3 F=F_Schlick(f0,VoH);vec3 directLight=textureLod(directLightTexture,vUv,0.).rgb;\n#ifdef ssgi\nvec3 diffuseLightingColor=denoisedColor[0];vec3 diffuseComponent=diffuse*(1.-metalness)*(1.-F)*diffuseLightingColor;vec3 specularLightingColor=denoisedColor[1];vec3 specularComponent=specularLightingColor*F;denoisedColor[0]=diffuseComponent+specularComponent;\n#endif\n#ifdef ssdgi\nvec3 diffuseLightingColor=denoisedColor[0];vec3 diffuseComponent=diffuse*(1.-metalness)*(1.-F)*diffuseLightingColor;denoisedColor[0]=diffuseComponent;\n#endif\n#ifdef ssr\nvec3 specularLightingColor=denoisedColor[0];vec3 specularComponent=specularLightingColor*F;denoisedColor[0]=specularComponent;\n#endif\n#ifdef useDirectLight\ndenoisedColor[0]+=directLight;\n#endif\n"; // eslint-disable-line
+ 
+@@ -2743,18 +2743,18 @@ class VelocityDepthNormalPass extends Pass {
+     this._scene = scene;
+     this._camera = camera;
+     const bufferCount = renderDepth ? 2 : 1;
+-    this.renderTarget = new WebGLMultipleRenderTargets(1, 1, bufferCount, {
++    this.renderTarget = new WebGLRenderTarget(1, 1, { count: bufferCount, ...{
+       minFilter: NearestFilter,
+       magFilter: NearestFilter
+-    });
++    } });
+     this.renderTarget.depthTexture = new DepthTexture(1, 1);
+     this.renderTarget.depthTexture.type = FloatType;
+ 
+     if (renderDepth) {
+-      this.renderTarget.texture[0].type = UnsignedByteType;
+-      this.renderTarget.texture[0].needsUpdate = true;
+-      this.renderTarget.texture[1].type = FloatType;
+-      this.renderTarget.texture[1].needsUpdate = true;
++      this.renderTarget.textures[0].type = UnsignedByteType;
++      this.renderTarget.textures[0].needsUpdate = true;
++      this.renderTarget.textures[1].type = FloatType;
++      this.renderTarget.textures[1].needsUpdate = true;
+     }
+ 
+     this.renderDepth = renderDepth;
+@@ -2810,11 +2810,11 @@ class VelocityDepthNormalPass extends Pass {
+   }
+ 
+   get texture() {
+-    return Array.isArray(this.renderTarget.texture) ? this.renderTarget.texture[1] : this.renderTarget.texture;
++    return (this.renderTarget.textures && this.renderTarget.textures.length > 1) ? this.renderTarget.textures[1] : this.renderTarget.texture;
+   }
+ 
+   get depthTexture() {
+-    return this.renderTarget.texture[0];
++    return this.renderTarget.textures[0];
+   }
+ 
+   render(renderer) {
+@@ -2833,7 +2833,7 @@ class VelocityDepthNormalPass extends Pass {
+     } = this._scene;
+     this._scene.background = backgroundColor;
+     renderer.setRenderTarget(this.renderTarget);
+-    renderer.copyFramebufferToTexture(zeroVec2, this.lastDepthTexture);
++    renderer.copyFramebufferToTexture(this.lastDepthTexture, zeroVec2);
+     renderer.render(this._scene, this._camera);
+     this._scene.background = background;
+     this.unsetVelocityDepthNormalMaterialInScene();
