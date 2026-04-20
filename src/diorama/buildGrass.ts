@@ -286,9 +286,26 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
 
   const count = flatPositions.length
 
+  // Shuffle the candidate order so that reducing mesh.count (density < 100%)
+  // produces a UNIFORMLY RANDOM subset of blades across the whole net. Without
+  // this, candidates are grouped face-by-face (E, A, B, F, C, D in that
+  // order), and Three.js renders the first N instances — so the field would
+  // appear block-by-block instead of thinning out everywhere equally.
+  // Fisher-Yates on an index array keeps the four parallel arrays in sync.
+  const perm = new Array(count)
+  for (let i = 0; i < count; i++) perm[i] = i
+  for (let i = count - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const tmp = perm[i]
+    perm[i] = perm[j]
+    perm[j] = tmp
+  }
+  const shuffledHues = new Float32Array(count)
+  for (let i = 0; i < count; i++) shuffledHues[i] = hues[perm[i]]
+
   // ── Step 3: geometry + per-instance hue attribute ──────────────────────
   const geom = buildBladeGeometry(bladeWidth, bladeHeight)
-  const hueAttr = new THREE.InstancedBufferAttribute(new Float32Array(hues), 1)
+  const hueAttr = new THREE.InstancedBufferAttribute(shuffledHues, 1)
   geom.setAttribute('iHue', hueAttr)
 
   // ── Step 4: material — MSM + onBeforeCompile for rigid-rotation wind +
@@ -438,14 +455,13 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   const _scale = new THREE.Vector3()
   const _axisY = new THREE.Vector3(0, 1, 0)
   for (let i = 0; i < count; i++) {
-    // Yaw-only orientation: blade local +Y stays aligned with flat +Y.
-    // After the sphere-projection vertex shader runs in sphere mode, flat +Y
-    // maps to the sphere radial direction, so blades stand upright on any
-    // mode (flat net / split / cube / sphere).
-    _q.setFromAxisAngle(_axisY, yaws[i])
-    const s = scales[i]
+    // Walk instances in shuffled order so `mesh.count = N` selects a random
+    // subset across ALL face blocks, not just the first ones sampled.
+    const src = perm[i]
+    _q.setFromAxisAngle(_axisY, yaws[src])
+    const s = scales[src]
     _scale.set(s, s, s)
-    _mat.compose(flatPositions[i], _q, _scale)
+    _mat.compose(flatPositions[src], _q, _scale)
     mesh.setMatrixAt(i, _mat)
   }
   mesh.instanceMatrix.needsUpdate = true
