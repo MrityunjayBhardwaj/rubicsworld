@@ -68,6 +68,62 @@ HOW: [Specific observation targets and checks enabled by tracking this boundary]
 
 **Fatality status:** BELOW THRESHOLD
 
+### B2: R3F scene <-> @react-three/postprocessing EffectComposer
+FILES: src/world/PostFx.tsx, src/world/RealismFX.tsx, src/App.tsx, node_modules/@react-three/postprocessing/dist/index.js
+ORIGIN: DoF cursor-follow silently broke after every Leva slider drag (PR #15, 2026-04-21). Took 3 rounds of attempted fixes before landing on the root cause: the postprocessing wrapper re-instantiates its imperative effect on every prop change via useMemo, orphaning any prop-attached mutable ref.
+WHY: Without this boundary tracked, every new effect we want to drive from our own animation loop (DoF target, future SSAO focus, bloom mask reference, etc.) will be built with the same broken prop-based attachment pattern and silently break on the first slider drag.
+HOW: Treat any `@react-three/postprocessing` wrapper prop that accepts a mutable object reference as unreliable. Use `useRef` on the effect instance + per-frame identity check in `useFrame` to re-attach. Canonical pattern lives in `feedback_library_ref_attachment.md`.
+**REF:** UNGROUNDED — canonical instance `src/world/PostFx.tsx` DoF target re-attach
+
+**Silent-failure modes:**
+- Mutable-ref prop works at mount, silently breaks on first slider drag (P4)
+- Shader chunk collision when merging effects in one EffectPass (P7)
+- Deprecated prop alias silently changes units between library major versions (P6)
+
+**Observation targets (THEIR side):**
+- `effect.target === ourVec3` identity check each frame
+- Inspect `EffectPass.effects` array for chunk-collision risk (look for duplicate `#include` references)
+- CHANGELOG of the library when upgrading postprocessing versions
+
+**Fatality status:** APPROACHING (3 patterns already clustered — P4, P6, P7)
+
+### B3: Project three.js <-> stale library pinned to older three
+FILES: patches/realism-effects+1.1.2.patch, src/world/RealismFX.tsx, package.json, node_modules/realism-effects/dist/index.js
+ORIGIN: realism-effects 1.1.2 peer-pinned to three ^0.151; we're on three 0.183 (PR #15, 2026-04-20). Multiple API removals/renames between versions broke module import.
+WHY: Without this boundary tracked, we'd have downgraded three (breaking drei/R3F/HDRI) or forked the library (owning shader maintenance forever). The next stale-library-on-modern-three scenario would eat days.
+HOW: Use patch-package for targeted rewrites. Typical drift: `WebGLMultipleRenderTargets` removed, `copyFramebufferToTexture` arg swap, `.texture[]` → `.textures[]`, GLSL function renames. If patch exceeds ~500 lines or touches GLSL heavily, abandon; find alternative.
+**REF:** UNGROUNDED — canonical instance `patches/realism-effects+1.1.2.patch`
+
+**Silent-failure modes:**
+- Module import fails at load time (missing export from three)
+- Runtime `TypeError: X is not a function` (renamed method)
+- Shader compile errors (`unrecognized pragma`, `function already has a body`)
+
+**Observation targets (THEIR side):**
+- `npm view <lib> peerDependencies` vs our three version at install time
+- grep installed dist for removed three classes (`WebGLMultipleRenderTargets`, old method signatures)
+- GLSL chunks referenced via `#include` — check against current three ShaderChunk registry
+
+**Fatality status:** BELOW THRESHOLD (one pattern — P5 — but 5 distinct drift types in a single library)
+
+### B4: Depth buffer <-> depth-derived normal reconstruction (N8AO)
+FILES: src/world/PostFx.tsx, src/diorama/TileGrid.tsx, node_modules/n8ao/dist/N8AO.js
+ORIGIN: N8AO produced zero occlusion on our sphere-projected planet despite extreme params (PR #15, 2026-04-21). AO-only debug mode renders pure white → finalAo=1 everywhere → no occlusion detected. DoF reads same depth buffer correctly.
+WHY: Without tracking this boundary, the next AO-style effect we try on the planet (GTAO, HBAO, any neighbour-delta normal reconstruction) will fail the same way. Custom vertex displacement (sphere projection, bezier heights) breaks the smooth-depth assumption N8AO relies on.
+HOW: Prefer AO passes with EXPLICIT normal pass input (SSAO has one). Avoid depth-derived-normal techniques on displaced geometry. When photoreal Blender diorama (standard MVP geometry) lands, re-test N8AO — likely starts working.
+**REF:** UNGROUNDED — canonical diagnosis in `src/world/PostFx.tsx` (dual N8AO + SSAO exposure)
+
+**Silent-failure modes:**
+- AO-only debug renders pure white (finalAo=1 everywhere; P8)
+- DoF on same buffer works → proves depth IS populated → narrows root cause to normal reconstruction, not depth plumbing
+
+**Observation targets (THEIR side):**
+- N8AO compositor `renderMode=1` (AO-only) screenshot — should NOT be all white on a scene with geometry
+- DoF focusDistance computed from target → if nonzero, depth buffer is fine
+- Custom vertex shaders that call `transformed = ...` or replace `<project_vertex>` — suspect for AO incompat
+
+**Fatality status:** BELOW THRESHOLD
+
 ## 2. Active Invariant Spans
 
 > Which vyapti entries currently span multiple modules. When an invariant
