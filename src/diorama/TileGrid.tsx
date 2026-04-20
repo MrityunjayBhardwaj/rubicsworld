@@ -12,6 +12,7 @@ import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useFBO } from '@react-three/drei'
 import { buildDiorama, buildSphereTerrain, fresnelUniform, sliceRotUniforms, hudUniforms, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
+import { grassRefs } from './buildGrass'
 import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
 import { usePlanet } from '../world/store'
@@ -583,9 +584,73 @@ export function TileGrid({ mode = 'split', bezier }: {
     // Set matrixAutoUpdate false so we can set matrix directly
     diorama.root.matrixAutoUpdate = false
 
+    // Publish a top-down cube-net snapshot callback for GrassPanel's "save"
+    // button. Builds a THROWAWAY unpatched diorama so the shot is the flat
+    // cube-net layout regardless of the mode currently on screen (sphere-mode
+    // renders would show the spherified projection — not useful as a mask
+    // reference). Renders offscreen, readPixels, encodes PNG, disposes.
+    grassRefs.captureTopView = async () => {
+      const throwaway = buildDiorama({ includeTerrain: true })
+      const scene = new THREE.Scene()
+      scene.background = new THREE.Color('#1a2028')
+      scene.add(throwaway.root)
+      // No environment map on the throwaway scene, so PBR materials appear
+      // black without direct light. Crank ambient + directional to produce a
+      // legible top-down reference shot.
+      scene.add(new THREE.AmbientLight(0xffffff, 3.0))
+      const dir = new THREE.DirectionalLight(0xffffff, 2.0)
+      dir.position.set(0, 10, 0.5)
+      scene.add(dir)
+      const fill = new THREE.HemisphereLight(0xbcd4ff, 0x5b4a33, 1.2)
+      scene.add(fill)
+
+      const W = 1200, H = 900  // 4:3 matches 8×6 net aspect
+      const cam = new THREE.OrthographicCamera(-HALF_W - 0.2, HALF_W + 0.2, HALF_H + 0.2, -HALF_H - 0.2, 0.1, 100)
+      cam.position.set(0, 20, 0)
+      cam.lookAt(0, 0, 0)
+
+      const rt = new THREE.WebGLRenderTarget(W, H, { type: THREE.UnsignedByteType })
+      const prevTarget = gl.getRenderTarget()
+      const prevClip = gl.clippingPlanes
+      gl.clippingPlanes = []
+      gl.setRenderTarget(rt)
+      gl.clear(true, true, true)
+      gl.render(scene, cam)
+      const pixels = new Uint8Array(W * H * 4)
+      gl.readRenderTargetPixels(rt, 0, 0, W, H, pixels)
+      gl.setRenderTarget(prevTarget)
+      gl.clippingPlanes = prevClip
+      rt.dispose()
+
+      // Dispose the throwaway diorama (all meshes + materials).
+      throwaway.root.traverse(c => {
+        const m = c as THREE.Mesh
+        if (!m.isMesh) return
+        m.geometry?.dispose()
+        const mat = m.material
+        if (Array.isArray(mat)) mat.forEach(x => x.dispose())
+        else mat?.dispose()
+      })
+
+      // WebGL framebuffers are bottom-up; flip rows into a 2D canvas.
+      const canvas = document.createElement('canvas')
+      canvas.width = W
+      canvas.height = H
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return null
+      const img = ctx.createImageData(W, H)
+      for (let y = 0; y < H; y++) {
+        const src = (H - 1 - y) * W * 4
+        img.data.set(pixels.subarray(src, src + W * 4), y * W * 4)
+      }
+      ctx.putImageData(img, 0, 0)
+      return new Promise<Blob | null>(res => canvas.toBlob(b => res(b), 'image/png'))
+    }
+
     return () => {
       gl.localClippingEnabled = false
       gl.clippingPlanes = []
+      grassRefs.captureTopView = null
       diorama.root.traverse(child => {
         if ((child as THREE.Mesh).isMesh) {
           ;(child as THREE.Mesh).geometry?.dispose()

@@ -107,11 +107,14 @@ export const grassUniforms: GrassUniforms = {
 
 /** Shared handle so the Leva panel can scale visible instance count without
  *  rebuilding geometry. `maxCount` is the allocated instance budget; the
- *  visible count is `Math.floor(maxCount * density)`. */
+ *  visible count is `Math.floor(maxCount * density)`. `captureTopView` is
+ *  registered by TileGrid so the panel's "save" button can snapshot the
+ *  flat cube-net view without owning a renderer itself. */
 export const grassRefs: {
   mesh: THREE.InstancedMesh | null
   maxCount: number
-} = { mesh: null, maxCount: 0 }
+  captureTopView: (() => Promise<Blob | null>) | null
+} = { mesh: null, maxCount: 0, captureTopView: null }
 
 /** Flat-space debug data for the density map overlay. Populated at build time
  *  and consumed by GrassPanel to render a 2D preview of allowed / excluded
