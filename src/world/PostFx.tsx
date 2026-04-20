@@ -58,7 +58,7 @@ export function PostFx() {
     exposure,
     smaaEnabled,
     n8aoEnabled, n8aoRadius, n8aoIntensity, n8aoFalloff, n8aoQuality,
-    dofEnabled, dofFollowCursor, dofFocalLength, dofBokehScale, dofSmoothing,
+    dofEnabled, dofFollowCursor, dofFocusRange, dofBokehScale, dofSmoothing,
     bloomEnabled, bloomScrambled, bloomSolved, bloomThreshold, bloomSmoothing,
     noiseEnabled, noiseOpacity,
     vignetteEnabled, vignetteScrambled, vignetteSolved, vignetteOffset,
@@ -88,8 +88,14 @@ export function PostFx() {
     'Depth of Field': folder({
       dofEnabled: { value: true, label: 'on' },
       dofFollowCursor: { value: true, label: 'follow cursor (else planet)' },
-      dofFocalLength: { value: 0.12, min: 0.01, max: 0.5, step: 0.01, label: 'focal len' },
-      dofBokehScale: { value: 1.4, min: 0, max: 8, step: 0.1, label: 'bokeh' },
+      // In postprocessing 6.x, `focalLength` is deprecated and aliases
+      // `focusRange` — the WIDTH of the sharp slab in world units. Our
+      // planet has radius 1, so 2.5 comfortably covers it at any orbit
+      // distance. Small values (<0.5) produce a thin slice where only
+      // the target point is sharp — useful for tight focal effects, but
+      // makes the whole-planet-sharp case impossible.
+      dofFocusRange: { value: 2.5, min: 0.1, max: 10, step: 0.1, label: 'focus range (world)' },
+      dofBokehScale: { value: 1.0, min: 0, max: 8, step: 0.1, label: 'bokeh' },
       dofSmoothing: { value: 0.18, min: 0.01, max: 1, step: 0.01, label: 'follow speed' },
     }, { collapsed: true }),
     Bloom: folder({
@@ -242,7 +248,7 @@ export function PostFx() {
       {dofEnabled ? (
         <DepthOfField
           ref={dofRef}
-          focalLength={dofFocalLength}
+          worldFocusRange={dofFocusRange}
           bokehScale={dofBokehScale}
         />
       ) : <></>}
