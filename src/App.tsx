@@ -12,6 +12,7 @@ import { PostFx } from './world/PostFx'
 import { TileLabels, TileLabelsLegend } from './world/TileLabels'
 import { HDRIEnvironment } from './world/HDRIEnvironment'
 import { HDRIPanel } from './world/HDRIPanel'
+import { GrassPanel } from './world/GrassPanel'
 import { TileGrid } from './diorama/TileGrid'
 import { DioramaGrid } from './diorama/DioramaGrid'
 import { BezierCurveEditor } from './diorama/BezierCurveEditor'
@@ -86,6 +87,7 @@ export default function App() {
       <Cursor />
       <TileLabelsLegend />
       <HDRIPanel />
+      {!preview && <GrassPanel />}
       {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <TutorialChrome />
       <Canvas
