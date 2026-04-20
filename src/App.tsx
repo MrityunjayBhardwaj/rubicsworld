@@ -95,7 +95,11 @@ export default function App() {
           near: 0.01,
         }}
         shadows={!!preview}
-        gl={{ antialias: true, stencil: true }}
+        // antialias disabled: SMAA runs in the PostFx effect chain instead, so
+        // the effect composer sees crisp edges and so Path 2 (realism-effects
+        // SSGI/TRAA) can later take full control of MSAA. toneMapping moved
+        // to the renderer (ACES Filmic) so effect passes receive linear input.
+        gl={{ antialias: false, stencil: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.35 }}
         dpr={[1, 2]}
       >
         <color attach="background" args={['#0a0d12']} />
