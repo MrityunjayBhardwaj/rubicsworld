@@ -97,6 +97,8 @@ export function GrassPanel() {
         saveDensityMap: button(() => saveOverlayPng()),
         saveMask:       button(() => saveMaskPng()),
         saveCubenet:    button(() => { void saveCubenetPng() }),
+        loadMask:       button(() => { void loadMaskPng() }),
+        clearMask:      button(() => { grassRefs.rebuildWithMask?.(null) }),
       },
       { collapsed: true },
     ),
@@ -159,18 +161,48 @@ function saveMaskPng() {
 }
 
 async function saveCubenetPng() {
-  console.log('[grass] saveCubenetPng start, captureTopView:', !!grassRefs.captureTopView)
   if (!grassRefs.captureTopView) return
-  const blob = await grassRefs.captureTopView().catch(e => {
-    console.error('[grass] captureTopView threw', e); return null
-  })
-  console.log('[grass] saveCubenetPng blob:', blob?.size)
+  const blob = await grassRefs.captureTopView()
   if (!blob) return
   // Blob URLs handle the ~800 KB rendered PNG reliably; base64 data URLs at
   // that size occasionally fail to trigger the download in Chromium.
   const url = URL.createObjectURL(blob)
   triggerDownload(url, `grass-cubenet_${tstamp()}.png`)
   setTimeout(() => URL.revokeObjectURL(url), 10000)
+}
+
+/** Opens a file picker, reads the selected PNG/JPG into an ImageData, and
+ *  asks TileGrid to rebuild the grass with that mask as the authoritative
+ *  exclusion map. Any resolution / aspect is accepted — the sampler maps
+ *  the mask's full width/height onto the 8×6 flat-net frame. White pixels
+ *  (luminance > threshold) allow grass; black/grey pixels exclude. */
+async function loadMaskPng() {
+  if (!grassRefs.rebuildWithMask) return
+  const file = await new Promise<File | null>(resolve => {
+    const inp = document.createElement('input')
+    inp.type = 'file'
+    inp.accept = 'image/png, image/jpeg, image/webp'
+    inp.onchange = () => resolve(inp.files?.[0] ?? null)
+    inp.click()
+  })
+  if (!file) return
+  const url = URL.createObjectURL(file)
+  const img = await new Promise<HTMLImageElement | null>(resolve => {
+    const i = new Image()
+    i.onload = () => resolve(i)
+    i.onerror = () => resolve(null)
+    i.src = url
+  })
+  if (!img) { URL.revokeObjectURL(url); return }
+  const c = document.createElement('canvas')
+  c.width = img.width
+  c.height = img.height
+  const ctx = c.getContext('2d')
+  if (!ctx) { URL.revokeObjectURL(url); return }
+  ctx.drawImage(img, 0, 0)
+  const data = ctx.getImageData(0, 0, img.width, img.height)
+  URL.revokeObjectURL(url)
+  grassRefs.rebuildWithMask(data)
 }
 
 /** Same painter as DensityMapOverlay but writes to any given dimensions.
