@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import { useThree } from '@react-three/fiber'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useFrame, useThree } from '@react-three/fiber'
+import * as THREE from 'three'
 import {
   EffectComposer,
   Bloom,
@@ -13,6 +14,7 @@ import { BlendFunction } from 'postprocessing'
 import { folder, useControls } from 'leva'
 import { usePlanet } from './store'
 import { RealismFX } from './RealismFX'
+import { hudUniforms } from '../diorama/buildDiorama'
 
 function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t
@@ -55,7 +57,7 @@ export function PostFx() {
     exposure,
     smaaEnabled,
     n8aoEnabled, n8aoRadius, n8aoIntensity, n8aoFalloff, n8aoQuality,
-    dofEnabled, dofFocusDistance, dofFocalLength, dofBokehScale,
+    dofEnabled, dofFollowCursor, dofFocalLength, dofBokehScale, dofSmoothing,
     bloomEnabled, bloomScrambled, bloomSolved, bloomThreshold, bloomSmoothing,
     noiseEnabled, noiseOpacity,
     vignetteEnabled, vignetteScrambled, vignetteSolved, vignetteOffset,
@@ -84,9 +86,10 @@ export function PostFx() {
     }, { collapsed: true }),
     'Depth of Field': folder({
       dofEnabled: { value: true, label: 'on' },
-      dofFocusDistance: { value: 0.018, min: 0, max: 0.2, step: 0.001, label: 'focus dist' },
+      dofFollowCursor: { value: true, label: 'follow cursor (else planet)' },
       dofFocalLength: { value: 0.12, min: 0.01, max: 0.5, step: 0.01, label: 'focal len' },
       dofBokehScale: { value: 1.4, min: 0, max: 8, step: 0.1, label: 'bokeh' },
+      dofSmoothing: { value: 0.18, min: 0.01, max: 1, step: 0.01, label: 'follow speed' },
     }, { collapsed: true }),
     Bloom: folder({
       bloomEnabled: { value: true, label: 'on' },
@@ -162,6 +165,24 @@ export function PostFx() {
     gl.toneMappingExposure = exposure
   }, [gl, exposure])
 
+  // DoF target — world-space point the effect focuses on.
+  //   • cursor off planet → ease toward planet origin (whole planet sharp)
+  //   • cursor on planet  → ease toward the raycast hit (uHudCursor)
+  // Interaction.tsx publishes hudUniforms.uHudCursor + uHudCursorActive on
+  // every pointermove raycast; TutorialHint publishes them when the tutorial
+  // is up. Either signal drives the focus naturally.
+  const dofTarget = useMemo(() => new THREE.Vector3(), [])
+  const dofDesired = useMemo(() => new THREE.Vector3(), [])
+  useFrame(() => {
+    if (!dofEnabled) return
+    const active = hudUniforms.uHudCursorActive.value > 0 && dofFollowCursor
+    if (active) dofDesired.copy(hudUniforms.uHudCursor.value)
+    else dofDesired.set(0, 0, 0)
+    // Frame-rate-independent ease: the same `dofSmoothing` feels the same
+    // at 30 or 120 fps. Clamp to 1 so the max smoothing snaps instantly.
+    dofTarget.lerp(dofDesired, Math.min(1, dofSmoothing))
+  })
+
   useEffect(() => {
     const start = performance.now()
     fromRef.current = warmth
@@ -199,7 +220,7 @@ export function PostFx() {
       ) : <></>}
       {dofEnabled ? (
         <DepthOfField
-          focusDistance={dofFocusDistance}
+          target={dofTarget}
           focalLength={dofFocalLength}
           bokehScale={dofBokehScale}
         />
