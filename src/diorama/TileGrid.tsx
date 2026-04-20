@@ -305,27 +305,14 @@ interface SphereUniforms {
   uFaceNormal: { value: THREE.Vector3 }
   uBezier: { value: THREE.Vector4 }  // (cx1, cy1, cx2, cy2)
   uMaxHeight: { value: number }
-  /** 1.0 = apply sphere projection, 0.0 = render in cube space (debug). */
-  uSphereProjectionEnabled: { value: number }
-}
-
-/**
- * Module-level singleton — shared across every sphere-patched material.
- * Exported so external controls (PostFx Leva) can toggle the projection
- * at runtime for A/B debugging (e.g. to isolate N8AO's dependency on
- * smooth-depth geometry vs our custom vertex displacement).
- */
-export const sphereUniforms: SphereUniforms = {
-  uFaceNormal: { value: new THREE.Vector3(0, 1, 0) },
-  uBezier: { value: new THREE.Vector4(0.25, 0.1, 0.75, 0.9) },
-  uMaxHeight: { value: 1.0 },
-  uSphereProjectionEnabled: { value: 1.0 },
 }
 
 function createSphereUniforms(): SphereUniforms {
-  // Per-mount: reuse the module-level singleton so Leva writes are seen
-  // by every patched material immediately.
-  return sphereUniforms
+  return {
+    uFaceNormal: { value: new THREE.Vector3(0, 1, 0) },
+    uBezier: { value: new THREE.Vector4(0.25, 0.1, 0.75, 0.9) },
+    uMaxHeight: { value: 1.0 },
+  }
 }
 
 function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUniforms) {
@@ -348,15 +335,12 @@ function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUnifor
     shader.uniforms.uBezier = uniforms.uBezier
     shader.uniforms.uMaxHeight = uniforms.uMaxHeight
 
-    shader.uniforms.uSphereProjectionEnabled = uniforms.uSphereProjectionEnabled
-
     shader.vertexShader = shader.vertexShader.replace(
       '#include <common>',
       `#include <common>
       uniform vec3 uFaceNormal;
       uniform vec4 uBezier;    // (cx1, cy1, cx2, cy2)
       uniform float uMaxHeight;
-      uniform float uSphereProjectionEnabled;
 
       // Cubic bezier evaluation
       float cbez(float t, float p0, float p1, float p2, float p3) {
@@ -388,9 +372,7 @@ function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUnifor
       }`,
     )
 
-    // Replace project_vertex with additive sphere projection.
-    // uSphereProjectionEnabled gates the curvature: 1.0 → sphere-project,
-    // 0.0 → cube-space fallback (standard MVP). Debug toggle from PostFx.
+    // Replace project_vertex with additive sphere projection
     shader.vertexShader = shader.vertexShader.replace(
       '#include <project_vertex>',
       `
@@ -399,39 +381,33 @@ function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUnifor
         vClipPosition = -(modelViewMatrix * vec4(transformed, 1.0)).xyz;
       #endif
 
-      vec4 mvPosition;
-      if (uSphereProjectionEnabled > 0.5) {
-        // Sphere projection with bezier height curve
-        vec4 worldPos = modelMatrix * vec4(transformed, 1.0);
-        vec3 wp = worldPos.xyz;
-        float faceDistance = dot(wp, uFaceNormal);
-        float rawHeight = faceDistance - 1.0;
+      // Sphere projection with bezier height curve
+      vec4 worldPos = modelMatrix * vec4(transformed, 1.0);
+      vec3 wp = worldPos.xyz;
+      float faceDistance = dot(wp, uFaceNormal);
+      float rawHeight = faceDistance - 1.0;
 
-        // Apply bezier curve to normalized height
-        float normalizedH = clamp(rawHeight / uMaxHeight, 0.0, 1.0);
-        float curvedH = rawHeight <= 0.0 ? rawHeight : evalHeightCurve(normalizedH) * uMaxHeight;
+      // Apply bezier curve to normalized height
+      float normalizedH = clamp(rawHeight / uMaxHeight, 0.0, 1.0);
+      float curvedH = rawHeight <= 0.0 ? rawHeight : evalHeightCurve(normalizedH) * uMaxHeight;
 
-        vec3 basePoint = wp - rawHeight * uFaceNormal;
-        vec3 sphereBase = normalize(basePoint);
-        vec3 spherePos = sphereBase * (1.0 + curvedH);
+      vec3 basePoint = wp - rawHeight * uFaceNormal;
+      vec3 sphereBase = normalize(basePoint);
+      vec3 spherePos = sphereBase * (1.0 + curvedH);
 
-        // Correct normals for sphere curvature.
-        // sphereNormal is WORLD-space (radial from origin). To land in view
-        // space we apply mat3(viewMatrix), not normalMatrix — the latter
-        // expects object-space input and would yield a garbage direction,
-        // corrupting N·V and therefore Fresnel on ground geometry.
-        #ifdef USE_NORMAL
-          vec3 sphereNormal = normalize(sphereBase);
-          // Ground-level geometry follows the sphere, tall objects keep their own normals.
-          float normalBlend = clamp(1.0 - normalizedH * 2.0, 0.0, 1.0);
-          vNormal = normalize(mix(vNormal, mat3(viewMatrix) * sphereNormal, normalBlend));
-        #endif
+      // Correct normals for sphere curvature.
+      // sphereNormal is WORLD-space (radial from origin). To land in view
+      // space we apply mat3(viewMatrix), not normalMatrix — the latter
+      // expects object-space input and would yield a garbage direction,
+      // corrupting N·V and therefore Fresnel on ground geometry.
+      #ifdef USE_NORMAL
+        vec3 sphereNormal = normalize(sphereBase);
+        // Ground-level geometry follows the sphere, tall objects keep their own normals.
+        float normalBlend = clamp(1.0 - normalizedH * 2.0, 0.0, 1.0);
+        vNormal = normalize(mix(vNormal, mat3(viewMatrix) * sphereNormal, normalBlend));
+      #endif
 
-        mvPosition = viewMatrix * vec4(spherePos, 1.0);
-      } else {
-        // Cube-space fallback — plain model-view projection, no displacement.
-        mvPosition = modelViewMatrix * vec4(transformed, 1.0);
-      }
+      vec4 mvPosition = viewMatrix * vec4(spherePos, 1.0);
       gl_Position = projectionMatrix * mvPosition;
 
       #ifdef USE_FOG
