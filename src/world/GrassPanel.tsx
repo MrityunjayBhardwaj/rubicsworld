@@ -21,7 +21,7 @@ export function GrassPanel() {
     Grass: folder(
       {
         visible:       { value: true },
-        density:       { value: 1.0, min: 0, max: 1, step: 0.01, label: 'density' },
+        density:       { value: 5.0, min: 0, max: 10, step: 0.05, label: 'density' },
         length:        { value: grassUniforms.uLengthScale.value,  min: 0.1, max: 6, step: 0.01, label: 'length' },
         windSpeed:     { value: grassUniforms.uWindFreq.value,     min: 0, max: 6, step: 0.01, label: 'wind speed' },
         windStrength:  { value: grassUniforms.uWindStrength.value, min: 0, max: 4, step: 0.01, label: 'wind strength' },
@@ -59,8 +59,10 @@ export function GrassPanel() {
     const m = grassRefs.mesh
     if (!m) return
     m.visible = controls.visible
-    const visibleCount = Math.max(0, Math.floor(grassRefs.maxCount * controls.density))
-    m.count = visibleCount
+    // Slider 0..10 maps to 0..maxCount. density=10 shows the full allocated
+    // budget (lush field); density=1 ≈ the old default coverage.
+    const frac = Math.min(1, Math.max(0, controls.density / 10))
+    m.count = Math.floor(grassRefs.maxCount * frac)
   }, [controls.visible, controls.density])
 
   return controls.densityMap ? <DensityMapOverlay /> : null

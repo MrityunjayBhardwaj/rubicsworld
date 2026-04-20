@@ -161,7 +161,10 @@ function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry
 
 export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): GrassResult {
   const {
-    densityPerUnit2 = 400,
+    // Base budget sized so Leva density=10 saturates with a lush field;
+    // density=1 is ~old look. ~96K candidates → ~45K survivors post-exclusion
+    // (still cheap — modern GPUs eat millions of instances for breakfast).
+    densityPerUnit2 = 4000,
     exclusionMargin = 0.05,
     bladeHeight     = 0.015,
     bladeWidth      = 0.003,
@@ -397,6 +400,12 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     mesh.setMatrixAt(i, _mat)
   }
   mesh.instanceMatrix.needsUpdate = true
+
+  // Initial visible count matches Leva's default density slider value (5/10).
+  // GrassPanel's useEffect may fire BEFORE this mesh is published (the panel
+  // mounts outside Canvas), so set the default here to avoid a first-frame
+  // flash at full density.
+  mesh.count = Math.floor(count * 0.5)
 
   // Publish shared handle so Leva panel can scale mesh.count + toggle visible.
   grassRefs.mesh = mesh
