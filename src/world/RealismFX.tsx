@@ -14,27 +14,22 @@ import {
  * realism-effects' SSGI / SSR / motion-blur on top of the pmndrs chain.
  *
  * ────────────────────────────────────────────────────────────────────────
- * STATUS (2026-04-20): GLSL-level blocker. SSGI / SSR crash the renderer on
- * three 0.183 because realism-effects' hand-written fragment shader calls
- * tone-mapping functions (LinearToneMapping, ReinhardToneMapping, ACES...)
- * that three's shader chunks no longer expose by those names. Toggling
- * motion blur alone may work (no tone-mapping shader dep) — untested.
+ * STATUS (2026-04-20): Working on three 0.183 ✓
+ *   • Motion Blur — works
+ *   • SSGI — works
+ *   • SSR — works (inherits SSGIEffect's shader path)
  *
- * Resolution paths:
- *   1. Wait for realism-effects v2 to publish a version targeting three
- *      0.163+ (tracked — main branch peer still ^0.151.3 as of now).
- *   2. Wait for pmndrs/postprocessing#599 native SSGI to ship.
- *   3. Fork realism-effects and rewrite the GLSL tone-mapping block to
- *      use three's current shader chunks. ~1 day of work, ongoing
- *      maintenance burden.
+ * Patches applied (patches/realism-effects+1.1.2.patch):
+ *   • WebGLMultipleRenderTargets → WebGLRenderTarget({ count, ...opts })
+ *     (removed from three r163)
+ *   • .texture[i] / .map / .push / .length / Array.isArray(.texture) →
+ *     .textures.* (RT API change: .texture is now a scalar getter)
+ *   • renderer.copyFramebufferToTexture(pos, tex) → (tex, pos) (r163 swap)
+ *   • GLSL: OptimizedCineonToneMapping → CineonToneMapping (r163 rename)
  *
- * The 5-patch stack in patches/realism-effects+1.1.2.patch already covers:
- *   • WebGLMultipleRenderTargets → WebGLRenderTarget({count})  (removed r163)
- *   • .texture[i] / .texture.map / .push etc. → .textures
- *   • renderer.copyFramebufferToTexture arg order (swapped r163)
- *
- * That gets the module to LOAD and lets motion blur + infra sit ready.
- * SSGI/SSR render path crashes on first composer tick.
+ * Pass layout: one EffectPass PER realism effect, not merged. Merging
+ * SSGI + SSR into one EffectPass produces duplicate tonemapping_pars_fragment
+ * chunk inclusions → redefinition errors. Separate passes compile cleanly.
  * ────────────────────────────────────────────────────────────────────────
  *
  * Why a manual escape hatch: realism-effects ships no React wrappers and
@@ -117,15 +112,25 @@ export function RealismFX(props: RealismFXProps) {
     }
 
     composer.addPass(velPass, 1)
-    // @ts-expect-error postprocessing's EffectPass accepts variadic effects
-    const effectPass = new EffectPass(camera, ...effects)
-    composer.addPass(effectPass, 2)
+    // One EffectPass per realism effect — SSGI and SSR both include the
+    // tonemapping_pars_fragment chunk, so merging them into a single
+    // EffectPass produces duplicate function definitions at shader-compile
+    // time. Separate passes = slower but each compiles in its own scope.
+    const passes: { dispose?: () => void }[] = []
+    effects.forEach((e, i) => {
+      // @ts-expect-error postprocessing accepts a single effect
+      const p = new EffectPass(camera, e)
+      composer.addPass(p, 2 + i)
+      passes.push(p)
+    })
 
     return () => {
       composer.removePass(velPass)
-      composer.removePass(effectPass)
+      for (const p of passes) {
+        composer.removePass(p as never)
+        p.dispose?.()
+      }
       velPass.dispose?.()
-      effectPass.dispose?.()
       for (const e of effects) (e as { dispose?: () => void }).dispose?.()
     }
   }, [composer, scene, camera, props.ssgi, props.ssr, props.motionBlur, ssgiOpts, motionOpts])
