@@ -58,7 +58,7 @@ export function PostFx() {
     exposure,
     smaaEnabled,
     n8aoEnabled, n8aoRadius, n8aoIntensity, n8aoFalloff, n8aoQuality,
-    dofEnabled, dofFollowCursor, dofFocusRange, dofBokehScale, dofSmoothing,
+    dofEnabled, dofFollowCursor, dofFocusRange, dofBokehScale, dofSmoothing, dofDebugTarget,
     bloomEnabled, bloomScrambled, bloomSolved, bloomThreshold, bloomSmoothing,
     noiseEnabled, noiseOpacity,
     vignetteEnabled, vignetteScrambled, vignetteSolved, vignetteOffset,
@@ -89,14 +89,11 @@ export function PostFx() {
       dofEnabled: { value: true, label: 'on' },
       dofFollowCursor: { value: true, label: 'follow cursor (else planet)' },
       // In postprocessing 6.x, `focalLength` is deprecated and aliases
-      // `focusRange` — the WIDTH of the sharp slab in world units. Our
-      // planet has radius 1, so 2.5 comfortably covers it at any orbit
-      // distance. Small values (<0.5) produce a thin slice where only
-      // the target point is sharp — useful for tight focal effects, but
-      // makes the whole-planet-sharp case impossible.
-      dofFocusRange: { value: 2.5, min: 0.1, max: 10, step: 0.1, label: 'focus range (world)' },
+      // `focusRange` — the WIDTH of the sharp slab in world units.
+      dofFocusRange: { value: 2.5, min: 0.05, max: 10, step: 0.05, label: 'focus range (world)' },
       dofBokehScale: { value: 1.0, min: 0, max: 8, step: 0.1, label: 'bokeh' },
       dofSmoothing: { value: 0.18, min: 0.01, max: 1, step: 0.01, label: 'follow speed' },
+      dofDebugTarget: { value: false, label: 'debug: show target' },
     }, { collapsed: true }),
     Bloom: folder({
       bloomEnabled: { value: true, label: 'on' },
@@ -188,26 +185,38 @@ export function PostFx() {
   const dofTarget = useMemo(() => new THREE.Vector3(), [])
   const dofDesired = useMemo(() => new THREE.Vector3(), [])
 
+  // Dev hooks — attached once.
   useLayoutEffect(() => {
-    if (!dofEnabled || !dofRef.current) return
-    dofRef.current.target = dofTarget
     if (import.meta.env.DEV) {
-      ;(window as unknown as Record<string, unknown>).__dofEffect = dofRef.current
       ;(window as unknown as Record<string, unknown>).__dofTarget = dofTarget
     }
-    return () => {
-      if (dofRef.current) dofRef.current.target = null
-    }
-  }, [dofEnabled, dofTarget])
+  }, [dofTarget])
+
+  // Debug sphere position ref — drives a <mesh> whose position tracks dofTarget.
+  const debugMeshRef = useRef<THREE.Mesh | null>(null)
 
   useFrame(() => {
     if (!dofEnabled || !dofRef.current) return
+
+    // @react-three/postprocessing's DoF wrapper re-instantiates its internal
+    // effect whenever any config prop changes (worldFocusRange slider,
+    // bokehScale, ...). The new instance's .target is reset to a placeholder
+    // Vector3. Re-attach every frame if the ref has swapped out — cheap
+    // identity check, keeps our lerp target wired to the live effect.
+    if (dofRef.current.target !== dofTarget) {
+      dofRef.current.target = dofTarget
+      if (import.meta.env.DEV) {
+        ;(window as unknown as Record<string, unknown>).__dofEffect = dofRef.current
+      }
+    }
+
     const active = hudUniforms.uHudCursorActive.value > 0 && dofFollowCursor
     if (active) dofDesired.copy(hudUniforms.uHudCursor.value)
     else dofDesired.set(0, 0, 0)
     // Frame-rate-independent ease: the same `dofSmoothing` feels the same
     // at 30 or 120 fps. Clamp to 1 so the max smoothing snaps instantly.
     dofTarget.lerp(dofDesired, Math.min(1, dofSmoothing))
+    if (debugMeshRef.current) debugMeshRef.current.position.copy(dofTarget)
   })
 
   useEffect(() => {
@@ -235,6 +244,13 @@ export function PostFx() {
   const needNormalPass = ssgiEnabled || ssrEnabled
 
   return (
+    <>
+      {dofEnabled && dofDebugTarget ? (
+        <mesh ref={debugMeshRef} renderOrder={9999}>
+          <sphereGeometry args={[0.05, 16, 16]} />
+          <meshBasicMaterial color="#ff00ff" depthTest={false} depthWrite={false} />
+        </mesh>
+      ) : null}
     <EffectComposer multisampling={0} enableNormalPass={needNormalPass}>
       {smaaEnabled ? <SMAA /> : <></>}
       {n8aoEnabled ? (
@@ -295,5 +311,6 @@ export function PostFx() {
         motionBlurSamples={motionBlurSamples}
       />
     </EffectComposer>
+    </>
   )
 }
