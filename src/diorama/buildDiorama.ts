@@ -19,6 +19,7 @@
  */
 
 import * as THREE from 'three'
+import { buildGrass } from './buildGrass'
 
 export const BASE_W = 8
 export const BASE_H = 6
@@ -1325,6 +1326,22 @@ export function buildDiorama(opts: BuildDioramaOpts = {}): DioramaScene {
   root.add(car.group)
   root.add(birds.group)
 
+  // Fresnel toggle hook: every MSM in the diorama gets a uFresnelScale
+  // uniform bound to the shared `fresnelUniform`. Runtime code flips the
+  // uniform's value to turn the specular IBL rim on/off. Applied BEFORE the
+  // grass is attached so grass material (which has its own onBeforeCompile
+  // chain) is not touched by the Fresnel patch — grass is matte, doesn't
+  // read specular, and keeping its shader chain clean avoids chunk-merge
+  // collisions (hetvabhasa P7).
+  applyFresnelPatchToScene(root)
+
+  // Grass runs LAST: all other props must be in `root` so their flat-space
+  // AABBs are available for exclusion sampling. Authored in flat cube-net
+  // coordinates, grass then rides the same per-cell → sphere projection
+  // pipeline as every other prop.
+  const grass = buildGrass(root)
+  root.add(grass.mesh)
+
   const update = (t: number) => {
     pond.update(t)
     stream.update(t)
@@ -1333,12 +1350,8 @@ export function buildDiorama(opts: BuildDioramaOpts = {}): DioramaScene {
     smoke.update(t)
     car.update(t)
     birds.update(t)
+    grass.update(t)
   }
-
-  // Fresnel toggle hook: every MSM in the diorama gets a uFresnelScale
-  // uniform bound to the shared `fresnelUniform`. Runtime code flips the
-  // uniform's value to turn the specular IBL rim on/off.
-  applyFresnelPatchToScene(root)
 
   return { root, update }
 }

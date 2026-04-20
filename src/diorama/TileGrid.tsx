@@ -12,7 +12,6 @@ import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useFBO } from '@react-three/drei'
 import { buildDiorama, buildSphereTerrain, fresnelUniform, sliceRotUniforms, hudUniforms, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
-import { buildGrass, type GrassResult } from './buildGrass'
 import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
 import { usePlanet } from '../world/store'
@@ -463,7 +462,6 @@ export function TileGrid({ mode = 'split', bezier }: {
   const terrainMeshRef = useRef<THREE.Mesh | null>(null)
   const terrainAmbientRef = useRef<THREE.AmbientLight | null>(null)
   const terrainDirRef = useRef<THREE.DirectionalLight | null>(null)
-  const grassRef = useRef<GrassResult | null>(null)
 
   // Offscreen target for the 24-pass sphere output. Post-fx runs on a
   // fullscreen quad sampling this texture, so bloom/vignette can coexist
@@ -544,17 +542,6 @@ export function TileGrid({ mode = 'split', bezier }: {
       terrainMeshRef.current = terrainMesh
       terrainAmbientRef.current = tAmbient
       terrainDirRef.current = tDir
-
-      // Grass: sampled on the flat net with AABB-based prop exclusion, then
-      // projected onto the unit sphere and added to the terrain scene as a
-      // single InstancedMesh. Runs BEFORE patchSceneForSphere so the diorama
-      // root's flat-space AABBs are intact (sphere projection happens in a
-      // vertex shader; setFromObject reads the unprojected geometry regardless,
-      // but this ordering keeps the semantics unsurprising if that changes).
-      const grass = buildGrass(diorama.root)
-      grass.mesh.frustumCulled = false
-      terrainScene.add(grass.mesh)
-      grassRef.current = grass
     }
 
     const cells = buildCellDefs()
@@ -588,8 +575,6 @@ export function TileGrid({ mode = 'split', bezier }: {
     return () => {
       gl.localClippingEnabled = false
       gl.clippingPlanes = []
-      grassRef.current?.dispose()
-      grassRef.current = null
       diorama.root.traverse(child => {
         if ((child as THREE.Mesh).isMesh) {
           ;(child as THREE.Mesh).geometry?.dispose()
@@ -709,7 +694,6 @@ export function TileGrid({ mode = 'split', bezier }: {
     }
 
     diorama.update(clock.elapsedTime)
-    grassRef.current?.update(clock.elapsedTime)
 
     const prevAutoClear = gl.autoClear
     gl.autoClear = false
