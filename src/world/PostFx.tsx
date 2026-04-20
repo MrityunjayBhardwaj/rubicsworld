@@ -12,6 +12,7 @@ import {
 import { BlendFunction } from 'postprocessing'
 import { folder, useControls } from 'leva'
 import { usePlanet } from './store'
+import { RealismFX } from './RealismFX'
 
 function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t
@@ -58,6 +59,9 @@ export function PostFx() {
     bloomEnabled, bloomScrambled, bloomSolved, bloomThreshold, bloomSmoothing,
     noiseEnabled, noiseOpacity,
     vignetteEnabled, vignetteScrambled, vignetteSolved, vignetteOffset,
+    ssgiEnabled, ssgiDistance, ssgiThickness, ssgiBlend, ssgiDenoiseIterations,
+    ssrEnabled,
+    motionBlurEnabled, motionBlurIntensity, motionBlurJitter, motionBlurSamples,
   } = useControls('PostFx', {
     exposure: { value: 1.35, min: 0.3, max: 3, step: 0.05, label: 'Exposure (ACES)' },
     SMAA: folder({
@@ -97,6 +101,26 @@ export function PostFx() {
       vignetteSolved: { value: 0.62, min: 0, max: 1.5, step: 0.01, label: 'darkness (solved)' },
       vignetteOffset: { value: 0.3, min: 0, max: 1, step: 0.01, label: 'offset' },
     }, { collapsed: true }),
+    // Path 2 — realism-effects (SSGI / SSR / motion blur). Default OFF
+    // because the current stylized diorama has near-zero PBR surfaces; SSGI
+    // on low-poly vertex-coloured meshes reads as noise. Flip to 'on' when
+    // the photoreal Blender diorama is loaded.
+    'SSGI (experimental, broken on three 0.183)': folder({
+      ssgiEnabled: { value: false, label: 'on — GLSL shader incompat, see RealismFX.tsx' },
+      ssgiDistance: { value: 10, min: 0.1, max: 50, step: 0.5, label: 'ray distance' },
+      ssgiThickness: { value: 10, min: 0.1, max: 50, step: 0.5, label: 'thickness' },
+      ssgiBlend: { value: 0.9, min: 0, max: 1, step: 0.01, label: 'temporal blend' },
+      ssgiDenoiseIterations: { value: 1, min: 0, max: 4, step: 1, label: 'denoise iter' },
+    }, { collapsed: true }),
+    'SSR (experimental, broken on three 0.183)': folder({
+      ssrEnabled: { value: false, label: 'on — GLSL shader incompat, see RealismFX.tsx' },
+    }, { collapsed: true }),
+    'Motion Blur (experimental)': folder({
+      motionBlurEnabled: { value: false, label: 'on — works on three 0.183 ✓' },
+      motionBlurIntensity: { value: 1, min: 0, max: 4, step: 0.05, label: 'intensity' },
+      motionBlurJitter: { value: 1, min: 0, max: 4, step: 0.05, label: 'jitter' },
+      motionBlurSamples: { value: 16, min: 4, max: 64, step: 1, label: 'samples' },
+    }, { collapsed: true }),
   }, { collapsed: true })
 
   // Live-tune the renderer's tone-mapping exposure. ACES compresses highlights,
@@ -124,8 +148,13 @@ export function PostFx() {
   const bloomIntensity = lerp(bloomScrambled, bloomSolved, warmth)
   const vignetteDarkness = lerp(vignetteScrambled, vignetteSolved, warmth)
 
+  // enableNormalPass is needed by SSGI's G-buffer reads. Turning it on when
+  // SSGI is off is a minor waste (~one extra render pass) — leave it gated
+  // so the common Path-1 case stays cheap.
+  const needNormalPass = ssgiEnabled || ssrEnabled
+
   return (
-    <EffectComposer multisampling={0}>
+    <EffectComposer multisampling={0} enableNormalPass={needNormalPass}>
       {smaaEnabled ? <SMAA /> : <></>}
       {n8aoEnabled ? (
         <N8AO
@@ -156,6 +185,18 @@ export function PostFx() {
       {vignetteEnabled ? (
         <Vignette darkness={vignetteDarkness} offset={vignetteOffset} eskil={false} />
       ) : <></>}
+      <RealismFX
+        ssgi={ssgiEnabled}
+        ssr={ssrEnabled}
+        motionBlur={motionBlurEnabled}
+        ssgiDistance={ssgiDistance}
+        ssgiThickness={ssgiThickness}
+        ssgiBlend={ssgiBlend}
+        ssgiDenoiseIterations={ssgiDenoiseIterations}
+        motionBlurIntensity={motionBlurIntensity}
+        motionBlurJitter={motionBlurJitter}
+        motionBlurSamples={motionBlurSamples}
+      />
     </EffectComposer>
   )
 }
