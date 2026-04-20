@@ -376,13 +376,24 @@ function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUnifor
     shader.vertexShader = shader.vertexShader.replace(
       '#include <project_vertex>',
       `
+      // For InstancedMesh, fold the per-instance matrix into object-space
+      // position first — without this, every instance ends up at the first
+      // instance's sphere-projected position (silent failure: grass blades
+      // collapse onto one point, invisible). Three.js auto-declares
+      // \`instanceMatrix\` when USE_INSTANCING is defined.
+      #ifdef USE_INSTANCING
+        vec4 _osPos = instanceMatrix * vec4(transformed, 1.0);
+      #else
+        vec4 _osPos = vec4(transformed, 1.0);
+      #endif
+
       // Cube-space position for clipping (BEFORE sphere projection)
       #if NUM_CLIPPING_PLANES > 0
-        vClipPosition = -(modelViewMatrix * vec4(transformed, 1.0)).xyz;
+        vClipPosition = -(modelViewMatrix * _osPos).xyz;
       #endif
 
       // Sphere projection with bezier height curve
-      vec4 worldPos = modelMatrix * vec4(transformed, 1.0);
+      vec4 worldPos = modelMatrix * _osPos;
       vec3 wp = worldPos.xyz;
       float faceDistance = dot(wp, uFaceNormal);
       float rawHeight = faceDistance - 1.0;
