@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
+import type { DepthOfFieldEffect } from 'postprocessing'
 import {
   EffectComposer,
   Bloom,
@@ -171,10 +172,30 @@ export function PostFx() {
   // Interaction.tsx publishes hudUniforms.uHudCursor + uHudCursorActive on
   // every pointermove raycast; TutorialHint publishes them when the tutorial
   // is up. Either signal drives the focus naturally.
+  //
+  // We attach the target VECTOR3 IMPERATIVELY via a ref (useLayoutEffect)
+  // rather than the <DepthOfField target={vec3}> prop. The React wrapper
+  // conditionally replaces the Vector3 on each prop-diff which breaks
+  // the in-place-mutation pattern this useFrame relies on. Direct .target
+  // assignment on the effect instance is stable across re-renders.
+  const dofRef = useRef<DepthOfFieldEffect | null>(null)
   const dofTarget = useMemo(() => new THREE.Vector3(), [])
   const dofDesired = useMemo(() => new THREE.Vector3(), [])
+
+  useLayoutEffect(() => {
+    if (!dofEnabled || !dofRef.current) return
+    dofRef.current.target = dofTarget
+    if (import.meta.env.DEV) {
+      ;(window as unknown as Record<string, unknown>).__dofEffect = dofRef.current
+      ;(window as unknown as Record<string, unknown>).__dofTarget = dofTarget
+    }
+    return () => {
+      if (dofRef.current) dofRef.current.target = null
+    }
+  }, [dofEnabled, dofTarget])
+
   useFrame(() => {
-    if (!dofEnabled) return
+    if (!dofEnabled || !dofRef.current) return
     const active = hudUniforms.uHudCursorActive.value > 0 && dofFollowCursor
     if (active) dofDesired.copy(hudUniforms.uHudCursor.value)
     else dofDesired.set(0, 0, 0)
@@ -220,7 +241,7 @@ export function PostFx() {
       ) : <></>}
       {dofEnabled ? (
         <DepthOfField
-          target={dofTarget}
+          ref={dofRef}
           focalLength={dofFocalLength}
           bokehScale={dofBokehScale}
         />
