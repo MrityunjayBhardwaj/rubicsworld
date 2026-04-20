@@ -162,15 +162,23 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   const exclusions: Rect[] = []
   const _box = new THREE.Box3()
   const excludeSet = new Set(excludeNames)
-  dioramaRoot.traverse(obj => {
-    if (!obj.name || !excludeSet.has(obj.name)) return
-    _box.makeEmpty().setFromObject(obj)
-    if (_box.isEmpty() || !isFinite(_box.min.x)) return
-    exclusions.push({
-      xMin: _box.min.x - exclusionMargin,
-      xMax: _box.max.x + exclusionMargin,
-      zMin: _box.min.z - exclusionMargin,
-      zMax: _box.max.z + exclusionMargin,
+  // Per-mesh AABBs, not per-root-group: the `trees` group spans the whole
+  // planting area, so its group-AABB would kill every candidate in the gaps
+  // between trunks. Walk each excluded root's descendants and record a rect
+  // per leaf mesh so grass fills the spaces between instances.
+  dioramaRoot.traverse(root => {
+    if (!root.name || !excludeSet.has(root.name)) return
+    root.traverse(leaf => {
+      const m = leaf as THREE.Mesh
+      if (!m.isMesh) return
+      _box.makeEmpty().setFromObject(m)
+      if (_box.isEmpty() || !isFinite(_box.min.x)) return
+      exclusions.push({
+        xMin: _box.min.x - exclusionMargin,
+        xMax: _box.max.x + exclusionMargin,
+        zMin: _box.min.z - exclusionMargin,
+        zMax: _box.max.z + exclusionMargin,
+      })
     })
   })
 
@@ -333,6 +341,9 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   // Publish shared handle so Leva panel can scale mesh.count + toggle visible.
   grassRefs.mesh = mesh
   grassRefs.maxCount = count
+  if (import.meta.env?.DEV && typeof window !== 'undefined') {
+    ;(window as unknown as Record<string, unknown>).__grass = { mesh, uniforms: grassUniforms, refs: grassRefs }
+  }
 
   const update = (elapsed: number) => {
     grassUniforms.uTime.value = elapsed
