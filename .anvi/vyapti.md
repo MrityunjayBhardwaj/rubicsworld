@@ -106,6 +106,43 @@ _(Each entry must include a `**REF:**` field pointing to a Ground Truth doc.)_
 **Implication:** For shared scene state, prefer `useFrame` over `useEffect`. Cost is trivial (scalar assignments); robustness gain is total. Add a diagnostic harness that snapshots store + scene to detect divergence when introducing a new shared property.
 **REF:** UNGROUNDED — canonical instance `src/world/HDRIEnvironment.tsx:48-62`.
 
+### PV3: Mutable-ref props behind React wrappers need per-frame re-attach
+**Statement:** Wherever a library wraps an imperative instance in a `useMemo` keyed on every prop AND exposes a mutable-ref prop (e.g. `target={vec3}`, `depthTexture={tex}`), the ref prop must be re-attached to the live instance on every frame via an identity check — not via `useEffect` keyed on a stable dep list.
+**Causal status:** STRUCTURAL — the wrapper's re-memoisation invalidates any external ref connection silently; React doesn't know the ref should re-run its effect.
+**Scope:** `@react-three/postprocessing` `DepthOfField`, any similar wrapper pattern where the inner instance gets recreated on prop change. Likely applies to many pmndrs wrappers around postprocessing passes.
+**Breaks when:** The wrapper stabilises the inner instance across prop changes (most R3F primitive wrappers do this). Check via `dispose` behaviour in the wrapper source.
+**Confirmed by:** 2026-04-21 — DoF cursor-follow worked at mount, silently broke on first Leva slider drag. Probe proved effect re-instantiation; per-frame identity check fixed it permanently.
+**Implication:** For ANY R3F/drei/postprocessing wrapper where we need to drive a mutable parameter from our own animation loop, pattern is:
+```tsx
+useFrame(() => {
+  if (!ref.current) return
+  if (ref.current.target !== ourVec3) ref.current.target = ourVec3
+  // ...mutate ourVec3 here
+})
+```
+**REF:** UNGROUNDED — canonical instance `src/world/PostFx.tsx` (DoF target re-attach).
+
+### PV4: Tone mapping belongs on the renderer, not in the effect chain
+**Statement:** Wherever a scene uses postprocessing effect passes (especially realism-effects SSGI/SSR/TRAA, or any effect reading from the input buffer expecting linear color), the tone mapping must be applied by the renderer (`gl.toneMapping = ACESFilmicToneMapping`), NOT via a `<ToneMapping>` effect component.
+**Causal status:** CAUSAL — effects read inputBuffer.texture; if tone mapping is upstream in the effect chain, effects read already-compressed non-linear color and produce visually wrong output (SSGI bounce light reads too dim, bloom highlights over-bloom, etc.).
+**Scope:** Any scene with effect-based postprocessing that reads scene color.
+**Breaks when:** No effects read color (pure overlays like selective bloom, screen-space UI). Then tone mapping location doesn't matter.
+**Confirmed by:** 2026-04-20 — Path 1 architecture; SSGI's built-in tonemapping block assumes linear input. Moving ACES to renderer kept the effect chain correct.
+**Implication:** Configure ACES tone mapping on the R3F Canvas gl config; don't add a `<ToneMapping>` to PostFx. Compensate with `toneMappingExposure` for HDRI brightness (we run at 1.35).
+**REF:** UNGROUNDED — canonical instance `src/App.tsx` (Canvas gl config).
+
+### PV5: Effect chain contract with Canvas config
+**Statement:** Wherever an R3F scene uses a pmndrs `<EffectComposer>`, the Canvas + composer config must satisfy:
+- `<Canvas gl={{ antialias: false }}>` — SMAA runs in the effect chain instead
+- `<EffectComposer multisampling={0}>` — SSGI (Path 2) needs full MSAA control
+- `<EffectComposer stencilBuffer depthBuffer>` — standardises depth texture format so downstream passes (DoF, AO) read consistent formats
+**Causal status:** STRUCTURAL — each clause is driven by a specific downstream pass requirement.
+**Scope:** Any scene preparing for or running SSGI / SSR / TRAA alongside standard effects.
+**Breaks when:** Scene uses only screen-space overlays (UI), no depth-dependent effects.
+**Confirmed by:** 2026-04-20 — enabling stencilBuffer flipped depth format from DepthFormat+FloatType to DepthStencilFormat+UnsignedInt248Type, which is what most passes expect.
+**Implication:** Treat this as the default recipe for any R3F scene with realism-effects-adjacent ambitions. Deviate only with reason.
+**REF:** UNGROUNDED — canonical instance `src/App.tsx` (Canvas) + `src/world/PostFx.tsx` (EffectComposer).
+
 ### Entry Format (with mandatory REF)
 
 ```

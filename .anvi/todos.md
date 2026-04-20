@@ -1,22 +1,49 @@
 # Todos — RubicsWorld
 
 ## ONBOARDING_TUTORIAL — replace attract intro with guided 3-move tutorial
-**Captured:** 2026-04-19 (Day 10 session)
-**Status:** planned, not started
+**Captured:** 2026-04-19 · **Status:** ✅ shipped in PR #13 (merged)
 
-**Intent:**
-- Camera orbits solved planet for a few seconds (current intro behaviour)
-- Scramble with just **3** rotations (not 18) — gentle enough to teach
-- Lottie hand/swipe overlay hovers near the target tile urging the swipe direction
-- User swipes → overlay advances to the next required move
-- Continue guiding until the planet is back to solved
-- One-time onboarding — gate on `localStorage.rubicsworld:tutorialSeen`; subsequent visits fall back to the current 18-move attract intro
+---
 
-**Why:** current intro demonstrates atmosphere but doesn't teach mechanics. New players land on a scrambled planet with no affordance for how to interact. A 3-move guided loop converts the attract sequence into a playable tutorial in the same screen-time budget.
+## POSTFX_PATH_1 — pmndrs stack polish pass
+**Captured:** 2026-04-20 · **Status:** ✅ shipped in PR #15 (merged)
 
-**Success criteria:**
-- First visit: scramble(3) → tutorial overlay guides user through 3 correct commits → `planet:settled` fires → overlay dismisses → flag written
-- Repeat visit: current attract intro plays (scramble 18, no overlay)
-- Skip path: Esc or dev Leva button bypasses tutorial + sets flag
-- Works via drag AND keyboard rotation paths (both funnel through `applyRotation`)
-- No regressions to walk-mode entry, HDRI panel, or bezier editor interactivity
+---
+
+## POSTFX_PATH_2 — realism-effects integration (SSGI + motion blur + TRAA)
+**Captured:** 2026-04-20 · **Status:** ✅ **infrastructure shipped** in PR #15 (merged)
+
+SSGI + SSR + motion blur all verified working on three 0.183 via a 5-round patch-package patch (`patches/realism-effects+1.1.2.patch`). Defaults off — exposed in Leva under `PostFx → SSGI / SSR / Motion Blur`. Will become visually relevant when the photoreal Blender diorama lands (PBR materials with bounce-light-worthy geometry).
+
+---
+
+## N8AO_SPHERE_INCOMPAT — N8AO doesn't detect occlusion on our planet
+**Captured:** 2026-04-21 · **Status:** diagnosed, workaround shipped, awaiting photoreal diorama
+
+**Finding:** N8AO reconstructs normals from depth neighbour-deltas. Our sphere-projection vertex shader displaces geometry non-linearly → micro-discontinuities at tile seams → `finalAo = 1.0` everywhere (AO-only debug mode renders pure white). DoF and other depth-reading passes work fine on the same buffer.
+
+**Workaround:** SSAO is exposed alongside N8AO in the Leva panel — `PostFx → SSAO → on`. Uses sampled-hemisphere with explicit normal pass; unaffected by depth continuity.
+
+**Expected resolution:** when the photoreal Blender diorama loads (standard MVP-rendered geometry, no custom vertex displacement), N8AO should start working. Verify at that time; if still broken, fork n8ao's shader — but priority: low, SSAO already covers the case.
+
+**Cross-ref:** hetvabhasa P8.
+
+---
+
+## BUNDLE_SPLIT — code-split drei/three/lottie/realism-effects heavy chunks
+**Captured:** 2026-04-19 · **Status:** planned, own phase, non-blocking
+
+Bundle is ~850 KB gzipped after Path 1 + realism-effects + lottie. Vite flags >500 KB. Before photoreal Blender diorama lands (adds more mesh + PBR data), split:
+- `@react-three/drei` Environment helpers → dynamic import
+- `realism-effects` → chunked, lazy loaded only when `sceneGrade === 'photoreal'`
+- `lottie-web` → swap for SVG/CSS or load on demand (only needed in tutorial)
+- `three` core → separate chunk
+
+Own branch: `feat/bundle-split`.
+
+---
+
+## LOTTIE_POLISH — swap placeholder swipe-hint for designed asset
+**Captured:** 2026-04-19 · **Status:** quick polish, pre-jam
+
+`src/world/assets/swipe-hint.json` is a hand-authored pulsing dot. Functional but not a "hand swipe" per original intent. Swap for a LottieFiles asset (or a designed custom Lottie). Drop into same path; no code change needed.

@@ -91,6 +91,49 @@ N. [Your code can safely run here]
 _(Add entries below as they're discovered during this project.)_
 _(Each entry must include a `**REF:**` field pointing to a Ground Truth doc.)_
 
+### PK1: React-wrapped imperative effect — mount, param-driven remount, every-frame update
+**Lifecycle:**
+1. `<DepthOfField .../>` mounts — SYNC — wrapper's `useMemo` creates the imperative effect instance; `ref.current` populated
+2. `<primitive object={instance} target={vec3}>` assigns `instance.target = vec3` via R3F `applyProps` — SYNC at mount
+3. Our `useFrame` begins running — mutates `vec3.x/y/z` each frame; effect's `update()` reads `this.target.x/y/z` via `calculateFocusDistance` — OK
+4. User drags a Leva slider → component re-renders with new prop value → wrapper's `useMemo` deps change → creates NEW imperative effect instance → `ref.current` swapped → new instance's `.target` is the wrapper's internal placeholder Vector3, not ours — BROKEN
+5. Our `useFrame` continues mutating old `vec3`, which the new instance doesn't read
+
+**Common violation:** Attaching the target ref via `useEffect(..., [stableDeps])` once on mount. React doesn't know about the wrapper's silent re-memoisation, so the effect doesn't re-fire. Our mutations become orphaned.
+
+**Detection:** Feature works on page load, silently breaks on first slider drag. Comes back after hard refresh. Expose the effect instance via `window.__x` and compare `window.__x.target === ourVec3` across slider drags — will flip to `false` after the first drag.
+
+**Root fix:** Per-frame identity check INSIDE useFrame:
+```tsx
+useFrame(() => {
+  if (!ref.current) return
+  if (ref.current.target !== ourVec3) ref.current.target = ourVec3
+  // safe to mutate ourVec3 now
+})
+```
+
+**REF:** UNGROUNDED — canonical instance `src/world/PostFx.tsx` DoF target re-attach. Wrapper remount confirmed at `node_modules/@react-three/postprocessing/dist/index.js` DepthOfField `useMemo` (deps include all config props).
+
+### PK2: Leva useControls arg positions
+**Lifecycle:**
+1. User calls `useControls(folderName, schema, ???)` — SYNC — Leva registers the controls in the store
+2. Leva treats the third positional arg as **deps array**, NOT a settings object like `{collapsed: true}`
+3. If a non-array is passed as 3rd arg, Leva may coerce/ignore OR re-register controls on every render (object identity changes per render)
+
+**Common violation:** Passing `{ collapsed: true }` as the 3rd arg of `useControls('PostFx', schema, { collapsed: true })` — interpreted as deps. To collapse the outer folder, there is no option on the top-level call; use per-`folder()` `{collapsed: true}` instead, or no outer wrapper.
+
+**Detection:** Leva panel shows only the root-level knobs (`exposure`) but not folder labels (`SMAA`, `N8AO`, ...). Folders are missing from the rendered UI. In our case it was actually fine; we found this chasing a false alarm — BUT the no-op 3rd arg object was identity-unstable, causing potential re-registration churn.
+
+**Root fix:** Drop the no-op 3rd arg. Per-folder settings go in `folder(schema, { collapsed: true })`:
+```tsx
+useControls('PostFx', {
+  someFolder: folder({ /* ... */ }, { collapsed: true }),
+  // NOT useControls('PostFx', {...}, { collapsed: true })
+})
+```
+
+**REF:** UNGROUNDED — canonical instance `src/world/PostFx.tsx` (outer `useControls` has no 3rd arg).
+
 ### Entry Format (with mandatory REF)
 
 ```

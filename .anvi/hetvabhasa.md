@@ -73,6 +73,36 @@ _(At every 10th entry: review, prune stale/non-generalizable entries.)_
 **The trap:** Move the guard ref out of the component (module-level boolean) — but that breaks component remount (route change) and still races HMR. Root fix: don't guard. Let the effect re-run on each mount; rely on cleanup (`clearTimeout`, `unsubscribe`) to abort correctly, plus a store-state gate at the top of the effect (`if (store.introPhase === 'done') return`) for idempotent skip after completion.
 **REF:** UNGROUNDED — canonical instance `src/world/IntroCinematic.tsx:30-38` (Strict-Mode-compatible re-mount pattern).
 
+## P4: React-wrapper-reinstantiated effect loses mutable ref props
+**Root cause:** A library (e.g. `@react-three/postprocessing`) wraps an imperative instance (DoF effect, N8AO pass) in a `useMemo` whose deps include EVERY config prop. Changing any slider re-runs the memo → new instance → any mutable-ref prop (`target={vec3}`, `depthTexture={tex}`) is assigned to the NEW instance once, but our external in-place mutation pipeline still points at the old one. Re-attachment via `useEffect` / `useLayoutEffect` keyed on stable deps won't fire, because from React's POV nothing changed.
+**Detection signal:** Feature works immediately after page load; silently breaks the first time any slider is touched. Works again after hard refresh.
+**The trap:** Expanding `useEffect` deps to include every prop that MIGHT trigger a remount — fragile, misses new props. Root fix: **per-frame identity check** in `useFrame`: `if (ref.current.target !== ourVec3) ref.current.target = ourVec3`. Cheap, self-healing, survives any wrapper behaviour.
+**REF:** UNGROUNDED — canonical instance `src/world/PostFx.tsx` (DoF target re-attach). Wrapper source `node_modules/@react-three/postprocessing/dist/index.js` (DepthOfField forwardRef — useMemo with full prop list).
+
+## P5: Library-version API drift — pre-r163 three.js libs need patch-package surgery on modern three
+**Root cause:** A library peer-pinned to three ^0.151 (e.g. realism-effects 1.1.2) imports classes/functions that three.js removed or renamed in r163+: `WebGLMultipleRenderTargets` (removed), `copyFramebufferToTexture(pos, tex)` arg order (flipped), `OptimizedCineonToneMapping` GLSL function (renamed to `CineonToneMapping`), `renderTarget.texture[]` array (now `.textures[]`; `.texture` is a scalar getter).
+**Detection signal:** Import fails at module load (missing export), OR runtime `TypeError: X is not a function`, OR shader compile error (`'X' : function already has a body` / `unrecognized pragma`). Cascades: fix one, another surfaces.
+**The trap:** Pinning three backwards to match the library — breaks drei, R3F v9, HDRI, everything else on modern three. Forking the library — owns maintenance forever. Root fix: **patch-package** for targeted rewrites (3-round patch covers most drift). If patch grows past ~500 lines, the library is too stale — wait for upstream or use alternative.
+**REF:** UNGROUNDED — canonical instance `patches/realism-effects+1.1.2.patch` (5-round patch). Wrapper `src/world/RealismFX.tsx`.
+
+## P6: Deprecated prop aliases silently change units between major versions
+**Root cause:** A library renames a prop across versions but keeps the old name as a deprecated alias pointing at the new semantics. Example: postprocessing 6.x aliases `focalLength` → `focusRange`, and `focusRange` is now in **world units** (thickness of sharp slab), where `focalLength` in 5.x was in normalised depth space. A value of `0.12` that meant "quick falloff" in 5.x means "12 cm thick sharp slab" in 6.x — almost nothing in focus.
+**Detection signal:** Effect visually broken in a way that scales weirdly — "everything is blurred regardless of zoom" or "only one pixel is sharp". Params look sane but produce absurd results.
+**The trap:** Tuning the old param name by trial-and-error; never converges because the semantics changed. Root fix: **use the non-deprecated prop names** (`worldFocusRange` explicitly), check for unit changes in the library CHANGELOG, and label Leva sliders with units (`focus range (world)`).
+**REF:** UNGROUNDED — canonical instance `src/world/PostFx.tsx` (DoF worldFocusRange).
+
+## P7: Effect merging collides on shared shader chunks
+**Root cause:** `@react-three/postprocessing`'s `EffectComposer` merges consecutive `Effect` children into a single `EffectPass` for perf. If two effects each `#include <tonemapping_pars_fragment>` (or any shared chunk), the merged fragment shader contains the chunk twice → `LinearToneMapping / CineonToneMapping / etc. : function already has a body` compile error.
+**Detection signal:** Scene compiles fine with either effect alone; enabling both together throws WebGL shader compile errors referencing redefined functions.
+**The trap:** Trying to #ifdef-guard the chunk, or editing the merged shader. Root fix: **put each colliding effect in its own EffectPass** (add them imperatively via `composer.addPass`). Costs one draw call per effect; buys independent shader scope.
+**REF:** UNGROUNDED — canonical instance `src/world/RealismFX.tsx` (one EffectPass per realism-effect).
+
+## P8: Depth-derived normal reconstruction breaks on custom vertex displacement
+**Root cause:** Occlusion passes like N8AO reconstruct surface normals by taking DEPTH DELTAS between neighbouring screen pixels and unprojecting. This assumes depth varies smoothly and linearly with screen position. A vertex shader that displaces geometry non-linearly (sphere projection, bezier height curve) produces valid-but-discontinuous depth at tile seams → normal reconstruction yields garbage → `finalAo = 1.0` (no occlusion) everywhere.
+**Detection signal:** N8AO enabled with aggressive params shows zero AO. AO-only debug mode renders pure white. DoF on the same scene works correctly (confirms depth IS populated). Extreme params (radius 30, screen-space mode) don't help.
+**The trap:** Tuning params endlessly; fiddling with depth format; patching n8ao's shader (open-ended). Root fix: **use SSAO** (`@react-three/postprocessing`'s classic `<SSAO>`) — it uses sampled hemisphere with explicit normal pass input, NOT depth-derived normals. Works on displaced-geometry scenes where N8AO fails.
+**REF:** UNGROUNDED — canonical instance `src/world/PostFx.tsx` (dual N8AO + SSAO exposure). Diagnosis: `src/diorama/TileGrid.tsx:patchMaterialForSphere` displaces vertices; N8AO's neighbour-delta normal reconstruction in `node_modules/n8ao/dist/N8AO.js` assumes smooth depth.
+
 ### Entry Format (MANDATORY fields)
 
 ```
