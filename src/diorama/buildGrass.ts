@@ -32,11 +32,21 @@ const FACE_BLOCKS: readonly { face: 0 | 1 | 2 | 3 | 4 | 5; cx: number; cz: numbe
 
 // Named diorama roots that should get NO grass around them. `terrain` is the
 // domain itself; `birds` are airborne; `car` is always over the road, which
-// is already excluded. Margin is applied on top of each AABB.
+// is already excluded. Per-name margin overrides default exclusionMargin —
+// road is a thin strip where even a tiny spillover visually overlaps; pond
+// and windmill benefit from a softer skirt around the prop.
 const DEFAULT_EXCLUDE = [
   'pond', 'stream', 'windmill', 'trees', 'hut', 'fence',
   'flowers', 'stonepath', 'well', 'rocks', 'road', 'smoke',
 ] as const
+
+const PROP_MARGIN: Record<string, number> = {
+  road:     0.14,
+  pond:     0.10,
+  stream:   0.08,
+  windmill: 0.10,
+  hut:      0.08,
+}
 
 export interface GrassOpts {
   /** Blades per flat u² sampled (before exclusion). Max instances = 24 × this. */
@@ -63,6 +73,9 @@ export interface GrassUniforms {
   uWindDir:       { value: THREE.Vector2 }
   uWindStrength:  { value: number }
   uWindFreq:      { value: number }
+  /** Spatial frequency of the wind wave: cycles per world unit. Higher =
+   *  tighter ripples; 0 collapses the field to a single synchronised sway. */
+  uWaveScale:     { value: number }
   uBendAmount:    { value: number }
   uBaseColor:     { value: THREE.Color }
   uTipColor:      { value: THREE.Color }
@@ -74,8 +87,9 @@ export const grassUniforms: GrassUniforms = {
   uTime:         { value: 0 },
   uWindDir:      { value: new THREE.Vector2(1, 0.35).normalize() },
   uWindStrength: { value: 1.0 },
-  uWindFreq:     { value: 1.8 },
-  uBendAmount:   { value: 0.18 },
+  uWindFreq:     { value: 1.5 },
+  uWaveScale:    { value: 3.5 },
+  uBendAmount:   { value: 0.35 },
   uBaseColor:    { value: new THREE.Color('#3c6a2a') },
   uTipColor:     { value: new THREE.Color('#cfe489') },
   uHueJitter:    { value: 0.18 },
@@ -88,6 +102,23 @@ export const grassRefs: {
   mesh: THREE.InstancedMesh | null
   maxCount: number
 } = { mesh: null, maxCount: 0 }
+
+/** Flat-space debug data for the density map overlay. Populated at build time
+ *  and consumed by GrassPanel to render a 2D preview of allowed / excluded
+ *  regions on the 8×6 cross cube-net. */
+export interface GrassDebugData {
+  /** 8×6 flat-net bounds (hard-coded from HALF_W/HALF_H). */
+  halfW: number
+  halfH: number
+  /** Face-block rectangles in flat space (for drawing the allowed domain). */
+  blocks: { face: number; cx: number; cz: number; halfSize: number }[]
+  /** Exclusion rectangles in flat XZ, labelled by prop owner. */
+  exclusions: { xMin: number; xMax: number; zMin: number; zMax: number; owner: string }[]
+  /** Surviving blade root positions (flat XZ). */
+  flatPositions: Float32Array  // interleaved x0, z0, x1, z1, …
+  stats: { candidates: number; allowed: number; excluded: number }
+}
+export const grassDebug: { data: GrassDebugData | null } = { data: null }
 
 /** Flat (x, z) in block `block` → sphere world position. Formula matches the
  *  shader: cube-face-local (u, v) along face.right / face.up, plus the face
@@ -149,8 +180,8 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   const {
     densityPerUnit2 = 400,
     exclusionMargin = 0.05,
-    bladeHeight     = 0.075,
-    bladeWidth      = 0.014,
+    bladeHeight     = 0.015,
+    bladeWidth      = 0.003,
     excludeNames    = DEFAULT_EXCLUDE,
   } = opts
 
@@ -158,35 +189,40 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   // Matrices must be current — diorama was just built and may not have been
   // rendered yet, so Object3D.matrixWorld is still identity in places.
   dioramaRoot.updateMatrixWorld(true)
-  type Rect = { xMin: number; xMax: number; zMin: number; zMax: number }
+  type Rect = { xMin: number; xMax: number; zMin: number; zMax: number; owner: string }
   const exclusions: Rect[] = []
   const _box = new THREE.Box3()
-  const excludeSet = new Set(excludeNames)
   // Per-mesh AABBs, not per-root-group: the `trees` group spans the whole
   // planting area, so its group-AABB would kill every candidate in the gaps
   // between trunks. Walk each excluded root's descendants and record a rect
-  // per leaf mesh so grass fills the spaces between instances.
-  dioramaRoot.traverse(root => {
-    if (!root.name || !excludeSet.has(root.name)) return
+  // per leaf mesh so grass fills the spaces between instances. Road gets a
+  // wider margin (PROP_MARGIN) because it's a thin strip where tiny spillover
+  // visually overlaps the asphalt.
+  for (const name of excludeNames) {
+    const root = dioramaRoot.getObjectByName(name)
+    if (!root) continue
+    const margin = PROP_MARGIN[name] ?? exclusionMargin
     root.traverse(leaf => {
       const m = leaf as THREE.Mesh
       if (!m.isMesh) return
       _box.makeEmpty().setFromObject(m)
       if (_box.isEmpty() || !isFinite(_box.min.x)) return
       exclusions.push({
-        xMin: _box.min.x - exclusionMargin,
-        xMax: _box.max.x + exclusionMargin,
-        zMin: _box.min.z - exclusionMargin,
-        zMax: _box.max.z + exclusionMargin,
+        xMin: _box.min.x - margin,
+        xMax: _box.max.x + margin,
+        zMin: _box.min.z - margin,
+        zMax: _box.max.z + margin,
+        owner: name,
       })
     })
-  })
+  }
 
   // ── Step 2: sample candidates per block, reject against exclusions ─────
   const candidatesPerBlock = Math.max(1, Math.floor(densityPerUnit2 * 4)) // 2×2 = 4 u²
   const totalCandidates = candidatesPerBlock * 6
 
   const spherePositions: THREE.Vector3[] = []
+  const flatPositions: THREE.Vector2[] = []  // retained for the debug overlay
   const hues:   number[] = []
   const yaws:   number[] = []
   const scales: number[] = []
@@ -209,6 +245,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       if (inside) { excluded++; continue }
       flatToSphere(flatX, flatZ, block.face, block.cx, block.cz, _tmp)
       spherePositions.push(_tmp.clone())
+      flatPositions.push(new THREE.Vector2(flatX, flatZ))
       hues.push(Math.random())
       yaws.push(Math.random() * Math.PI * 2)
       scales.push(0.75 + Math.random() * 0.5) // 0.75–1.25
@@ -242,6 +279,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       shader.uniforms.uWindDir      = grassUniforms.uWindDir
       shader.uniforms.uWindStrength = grassUniforms.uWindStrength
       shader.uniforms.uWindFreq     = grassUniforms.uWindFreq
+      shader.uniforms.uWaveScale    = grassUniforms.uWaveScale
       shader.uniforms.uBendAmount   = grassUniforms.uBendAmount
       shader.uniforms.uBaseColor    = grassUniforms.uBaseColor
       shader.uniforms.uTipColor     = grassUniforms.uTipColor
@@ -259,6 +297,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
           uniform vec2  uWindDir;
           uniform float uWindStrength;
           uniform float uWindFreq;
+          uniform float uWaveScale;
           uniform float uBendAmount;
           `,
         )
@@ -269,16 +308,26 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
           vGrassUv = uv;
           vHue = iHue;
           float bendT = uv.y;
-          // Per-instance phase from hash of iHue; keeps blades out of sync.
-          float phase = iHue * 6.28318;
-          float wave1 = sin(uTime * uWindFreq + phase);
-          float wave2 = sin(uTime * uWindFreq * 0.47 + phase * 1.7);
-          // Blade-local displacement. World-frame direction isn't applied
-          // because per-instance random yaw already randomises world bend;
-          // combining two frequencies gives a figure-8-ish tip motion.
-          float bend = bendT * bendT * uWindStrength * uBendAmount;
-          transformed.x += wave1 * bend * uWindDir.x;
-          transformed.z += wave2 * bend * uWindDir.y;
+          // Instance world origin (before this vertex's local offset) — this
+          // is the blade's root on the sphere. Used to compute a SPATIAL wave
+          // phase so the whole field moves as one coherent wave travelling
+          // in the wind direction, instead of per-blade random sway.
+          vec3 instOrigin = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+          // Lift windDir to a 3D tangent direction by dropping its x,y as the
+          // world xz plane — good enough for a roughly spherical field. The
+          // wave propagates along (uWindDir.x, 0, uWindDir.y).
+          vec3 worldWind3 = normalize(vec3(uWindDir.x, 0.0, uWindDir.y) + vec3(1e-4));
+          float spatialPhase = dot(instOrigin, worldWind3) * uWaveScale;
+          float wave  = sin(uTime * uWindFreq - spatialPhase);
+          // Second harmonic, out of phase, for natural unevenness.
+          float gust  = sin(uTime * uWindFreq * 0.47 - spatialPhase * 0.63);
+          float amp   = wave * 0.75 + gust * 0.25;
+          // Bend tip in blade-local X; amplitude is spatially coherent, but
+          // bending axis inherits the blade's random yaw (varies directions
+          // per instance — reads as "hair of the grass" under a rolling wind).
+          float bend = bendT * bendT * uWindStrength * uBendAmount * amp;
+          transformed.x += bend;
+          transformed.z += bend * 0.25;
           `,
         )
 
@@ -341,6 +390,21 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   // Publish shared handle so Leva panel can scale mesh.count + toggle visible.
   grassRefs.mesh = mesh
   grassRefs.maxCount = count
+
+  // Publish density-map debug data for the overlay.
+  const flatArr = new Float32Array(flatPositions.length * 2)
+  for (let i = 0; i < flatPositions.length; i++) {
+    flatArr[i * 2] = flatPositions[i].x
+    flatArr[i * 2 + 1] = flatPositions[i].y
+  }
+  grassDebug.data = {
+    halfW: 4,
+    halfH: 3,
+    blocks: FACE_BLOCKS.map(b => ({ face: b.face, cx: b.cx, cz: b.cz, halfSize: 1 })),
+    exclusions: exclusions.map(e => ({ ...e })),
+    flatPositions: flatArr,
+    stats: { candidates: totalCandidates, allowed: count, excluded },
+  }
   if (import.meta.env?.DEV && typeof window !== 'undefined') {
     ;(window as unknown as Record<string, unknown>).__grass = { mesh, uniforms: grassUniforms, refs: grassRefs }
   }
