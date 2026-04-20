@@ -176,10 +176,11 @@ function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry
 
 export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): GrassResult {
   const {
-    // Base budget sized so Leva density=10 saturates with a lush field;
-    // density=1 is ~old look. ~96K candidates → ~45K survivors post-exclusion
-    // (still cheap — modern GPUs eat millions of instances for breakfast).
-    densityPerUnit2 = 4000,
+    // Base budget sized so Leva density=50 saturates with a very lush field.
+    // ~480K candidates → ~230K survivors post-exclusion. Still cheap — modern
+    // GPUs eat millions of instances for breakfast — but mount time grows
+    // linearly, so tune down if build hitches show up on slow machines.
+    densityPerUnit2 = 20000,
     exclusionMargin = 0.05,
     bladeHeight     = 0.015,
     bladeWidth      = 0.003,
