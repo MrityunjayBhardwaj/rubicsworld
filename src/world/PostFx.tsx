@@ -154,7 +154,7 @@ export function PostFx() {
       motionBlurJitter: { value: 1, min: 0, max: 4, step: 0.05, label: 'jitter' },
       motionBlurSamples: { value: 16, min: 4, max: 64, step: 1, label: 'samples' },
     }, { collapsed: true }),
-  }, { collapsed: true })
+  })
 
   // Live-tune the renderer's tone-mapping exposure. ACES compresses highlights,
   // so this is the knob to keep bright zones from feeling dim.
