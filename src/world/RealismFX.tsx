@@ -57,11 +57,27 @@ export interface RealismFXProps {
   ssgi: boolean
   ssr: boolean
   motionBlur: boolean
-  // SSGI options
+  // SSGI options — SSR shares all of these (SSREffect extends SSGIEffect).
   ssgiDistance: number
   ssgiThickness: number
+  ssgiAutoThickness: boolean
+  ssgiMaxRoughness: number
   ssgiBlend: number
   ssgiDenoiseIterations: number
+  ssgiDenoiseKernel: number
+  ssgiDenoiseDiffuse: number
+  ssgiDenoiseSpecular: number
+  ssgiDepthPhi: number
+  ssgiNormalPhi: number
+  ssgiRoughnessPhi: number
+  ssgiEnvBlur: number
+  ssgiImportanceSampling: boolean
+  ssgiDirectLightMultiplier: number
+  ssgiSteps: number
+  ssgiRefineSteps: number
+  ssgiSpp: number
+  ssgiResolutionScale: number
+  ssgiMissedRays: boolean
   // MotionBlur options
   motionBlurIntensity: number
   motionBlurJitter: number
@@ -77,9 +93,33 @@ export function RealismFX(props: RealismFXProps) {
   const ssgiOpts = useMemo(() => ({
     distance: props.ssgiDistance,
     thickness: props.ssgiThickness,
+    autoThickness: props.ssgiAutoThickness,
+    maxRoughness: props.ssgiMaxRoughness,
     blend: props.ssgiBlend,
     denoiseIterations: props.ssgiDenoiseIterations,
-  }), [props.ssgiDistance, props.ssgiThickness, props.ssgiBlend, props.ssgiDenoiseIterations])
+    denoiseKernel: props.ssgiDenoiseKernel,
+    denoiseDiffuse: props.ssgiDenoiseDiffuse,
+    denoiseSpecular: props.ssgiDenoiseSpecular,
+    depthPhi: props.ssgiDepthPhi,
+    normalPhi: props.ssgiNormalPhi,
+    roughnessPhi: props.ssgiRoughnessPhi,
+    envBlur: props.ssgiEnvBlur,
+    importanceSampling: props.ssgiImportanceSampling,
+    directLightMultiplier: props.ssgiDirectLightMultiplier,
+    steps: props.ssgiSteps,
+    refineSteps: props.ssgiRefineSteps,
+    spp: props.ssgiSpp,
+    resolutionScale: props.ssgiResolutionScale,
+    missedRays: props.ssgiMissedRays,
+  }), [
+    props.ssgiDistance, props.ssgiThickness, props.ssgiAutoThickness,
+    props.ssgiMaxRoughness, props.ssgiBlend, props.ssgiDenoiseIterations,
+    props.ssgiDenoiseKernel, props.ssgiDenoiseDiffuse, props.ssgiDenoiseSpecular,
+    props.ssgiDepthPhi, props.ssgiNormalPhi, props.ssgiRoughnessPhi,
+    props.ssgiEnvBlur, props.ssgiImportanceSampling, props.ssgiDirectLightMultiplier,
+    props.ssgiSteps, props.ssgiRefineSteps, props.ssgiSpp,
+    props.ssgiResolutionScale, props.ssgiMissedRays,
+  ])
 
   const motionOpts = useMemo(() => ({
     intensity: props.motionBlurIntensity,
