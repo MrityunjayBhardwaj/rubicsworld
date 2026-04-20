@@ -21,13 +21,14 @@ export function GrassPanel() {
     Grass: folder(
       {
         visible:       { value: true },
-        density:       { value: 1.0, min: 0, max: 1, step: 0.01, label: 'density (×max)' },
-        windStrength:  { value: grassUniforms.uWindStrength.value, min: 0, max: 4, step: 0.01 },
-        windFreq:      { value: grassUniforms.uWindFreq.value,     min: 0, max: 6, step: 0.01, label: 'wind freq (temporal)' },
+        density:       { value: 1.0, min: 0, max: 1, step: 0.01, label: 'density' },
+        length:        { value: grassUniforms.uLengthScale.value,  min: 0.1, max: 6, step: 0.01, label: 'length' },
+        windSpeed:     { value: grassUniforms.uWindFreq.value,     min: 0, max: 6, step: 0.01, label: 'wind speed' },
+        windStrength:  { value: grassUniforms.uWindStrength.value, min: 0, max: 4, step: 0.01, label: 'wind strength' },
+        bendAmount:    { value: grassUniforms.uBendAmount.value,   min: 0, max: 1.2, step: 0.005, label: 'bend (rad)' },
         waveScale:     { value: grassUniforms.uWaveScale.value,    min: 0, max: 12, step: 0.05, label: 'wave scale (spatial)' },
-        bendAmount:    { value: grassUniforms.uBendAmount.value,   min: 0, max: 0.8, step: 0.005, label: 'bend' },
-        windDirX:      { value: grassUniforms.uWindDir.value.x,    min: -1, max: 1, step: 0.01 },
-        windDirZ:      { value: grassUniforms.uWindDir.value.y,    min: -1, max: 1, step: 0.01 },
+        windDirX:      { value: grassUniforms.uWindDir.value.x,    min: -1, max: 1, step: 0.01, label: 'wind dir x' },
+        windDirZ:      { value: grassUniforms.uWindDir.value.y,    min: -1, max: 1, step: 0.01, label: 'wind dir z' },
         baseColor:     { value: '#' + grassUniforms.uBaseColor.value.getHexString(), label: 'base colour' },
         tipColor:      { value: '#' + grassUniforms.uTipColor.value.getHexString(),  label: 'tip colour' },
         hueJitter:     { value: grassUniforms.uHueJitter.value, min: 0, max: 0.5, step: 0.01, label: 'hue jitter' },
@@ -39,16 +40,18 @@ export function GrassPanel() {
 
   useEffect(() => {
     grassUniforms.uWindStrength.value = controls.windStrength
-    grassUniforms.uWindFreq.value     = controls.windFreq
+    grassUniforms.uWindFreq.value     = controls.windSpeed
     grassUniforms.uWaveScale.value    = controls.waveScale
     grassUniforms.uBendAmount.value   = controls.bendAmount
+    grassUniforms.uLengthScale.value  = controls.length
     grassUniforms.uWindDir.value.set(controls.windDirX, controls.windDirZ)
     grassUniforms.uHueJitter.value    = controls.hueJitter
     grassUniforms.uBaseColor.value.set(new THREE.Color(controls.baseColor))
     grassUniforms.uTipColor.value.set(new THREE.Color(controls.tipColor))
   }, [
-    controls.windStrength, controls.windFreq, controls.waveScale,
-    controls.bendAmount, controls.windDirX, controls.windDirZ,
+    controls.windStrength, controls.windSpeed, controls.waveScale,
+    controls.bendAmount, controls.length,
+    controls.windDirX, controls.windDirZ,
     controls.hueJitter, controls.baseColor, controls.tipColor,
   ])
 
