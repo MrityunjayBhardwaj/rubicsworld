@@ -97,12 +97,12 @@ def _glb_path(context) -> str:
 #: these names.
 WHOLE_NET_ALLOWED = {"terrain", "sphere-terrain", "ground"}
 
-#: Small overflow past a row boundary that's OK (per-cell clip planes eat it
-#: visually). Anything larger gets elevated to an error.
-ROW_OVERFLOW_SOFT = 0.25
-
 #: Below this depth we warn; above is treated as modelling noise.
 SUBTERRAIN_NOISE = 0.10
+
+#: Hard bounds of the whole 8×6 cross. Anything outside is clearly stray.
+DOMAIN_X = (-4.0, 4.0)
+DOMAIN_Y = (-3.0, 3.0)
 
 
 def _name_prefix_allowed(name: str) -> bool:
@@ -110,30 +110,16 @@ def _name_prefix_allowed(name: str) -> bool:
     return base in WHOLE_NET_ALLOWED
 
 
-def _row_overflow(x_min, x_max, y_min, y_max):
-    """Return (row_name, overflow) for the best-fitting row.
-    Overflow is 0 when the AABB fits; otherwise the max signed distance that
-    sticks out of the closest row. Picks the row with the smallest overflow.
-    """
-    best = ("(outside domain)", float('inf'))
-    for name, rx0, rx1, ry0, ry1 in UNFOLD_ROWS:
-        ovf = max(
-            rx0 - x_min, x_max - rx1,
-            ry0 - y_min, y_max - ry1,
-            0.0,
-        )
-        if ovf < best[1]:
-            best = (name, ovf)
-    return best
-
-
 def validate_scene(context):
     """Return a list of (level, message) tuples — WARNING / ERROR.
 
-    Blender-native axes: X, Y = ground plane; Z = height. Validator is
-    PERMISSIVE — it only hard-errors on clearly broken placements and lets
-    the three-js per-cell clip planes handle minor overflows (trees whose
-    leaf sphere barely kisses a face-block edge, etc.)
+    Blender-native axes: X, Y = ground plane; Z = height.
+
+    Validator design: the sphere-projection pipeline stitches cross-row
+    meshes seamlessly (each tile's clip planes chop the mesh to its cell;
+    shared cube edges produce identical world positions from both sides).
+    So row containment is NOT a hard rule — only subdivision, sub-terrain
+    dipping, and stray-from-domain actually break the render.
     """
     issues = []
     for obj in bpy.data.objects:
@@ -142,7 +128,7 @@ def validate_scene(context):
         if obj.name.startswith("rubics-guide-"):
             continue
         if _name_prefix_allowed(obj.name):
-            continue  # Terrain / ground plane — expected to span everything.
+            continue  # Terrain / ground — expected to span everything.
 
         corners = [obj.matrix_world @ mathutils.Vector(c) for c in obj.bound_box]
         xs = [v.x for v in corners]
@@ -152,27 +138,20 @@ def validate_scene(context):
         y_min, y_max = min(ys), max(ys)
         z_min, z_max = min(zs), max(zs)
 
-        # Row containment. Small overflow → warning; deep crossing → error.
-        # "Deep" means the mesh's bulk is clearly in two rows, not just its
-        # edge poking over.
-        row, overflow = _row_overflow(x_min, x_max, y_min, y_max)
-        if overflow > ROW_OVERFLOW_SOFT:
+        # ERROR — mesh is completely outside the 8×6 cross domain. Nothing
+        # inside the addon renders meshes there; clip planes reject it from
+        # every tile pass. Usually a lost object that drifted off the grid.
+        if (x_max < DOMAIN_X[0] or x_min > DOMAIN_X[1] or
+            y_max < DOMAIN_Y[0] or y_min > DOMAIN_Y[1]):
             issues.append(('ERROR',
-                f"'{obj.name}' crosses cube-net rows by {overflow:.2f} units "
+                f"'{obj.name}' is entirely outside the cube-net domain "
                 f"(x={x_min:.2f}..{x_max:.2f}, y={y_min:.2f}..{y_max:.2f}). "
-                f"Split it into per-row meshes; rows don't share cube edges."))
-        elif overflow > 1e-3:
-            issues.append(('WARNING',
-                f"'{obj.name}' pokes over a row boundary by {overflow:.2f} units "
-                f"— clip planes will handle it, but a tighter fit is safer."))
-
-        # Sub-terrain dip. Ignore the first 10 cm as modelling noise.
-        if z_min < -SUBTERRAIN_NOISE:
-            issues.append(('WARNING',
-                f"'{obj.name}' extends {abs(z_min):.2f} below ground "
-                f"(z_min={z_min:.3f}) — will be buried in the planet interior."))
+                f"Domain is x∈[-4,4], y∈[-3,3]; this mesh won't render."))
 
         # vyapti PV1 — long meshes need subdivision for the sphere projection.
+        # This is the actual quality gate: without enough verts along the long
+        # axis, the mesh chords between sparse vertices and cuts through the
+        # sphere (invisible / wrong-elevation rendering).
         long_axis = max(x_max - x_min, y_max - y_min)
         if long_axis > 1.0:
             mesh = obj.data
@@ -182,6 +161,12 @@ def validate_scene(context):
                     f"'{obj.name}' spans {long_axis:.1f} flat-units with only "
                     f"{nverts} verts — add loop cuts (≥8 per unit) or it will "
                     f"chord through the sphere."))
+
+        # Sub-terrain dip. Ignore first 10 cm as modelling noise.
+        if z_min < -SUBTERRAIN_NOISE:
+            issues.append(('WARNING',
+                f"'{obj.name}' extends {abs(z_min):.2f} below ground "
+                f"(z_min={z_min:.3f}) — will be buried in the planet interior."))
 
     return issues
 

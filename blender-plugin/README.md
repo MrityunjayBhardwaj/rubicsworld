@@ -53,23 +53,20 @@ the N-sidebar, one preference (project path), three main buttons.
 ## Pre-flight validator
 
 Fires on **Export Diorama** and **Validate Scene**. Coordinates are Blender
-native (Z up, XY ground). Checks:
+native (Z up, XY ground). The validator is intentionally permissive — the
+sphere-projection pipeline stitches cross-row geometry seamlessly via
+per-tile clip planes + shared cube edges, so row containment is NOT a
+real constraint. What actually breaks the render:
 
 | Level | Rule | Why |
 |---|---|---|
-| ERROR | mesh world-AABB must fit inside one **unfold row** | rows don't share cube edges — a mesh crossing from the middle row into the top or bottom row folds into a non-adjacent face |
-| WARNING | `z_min < 0` | sub-terrain geometry gets spherified into the planet interior (usually a modelling accident) |
-| WARNING | ground-plane span > 1 unit with fewer than 8 verts per unit along that axis | vyapti PV1 — long low-poly meshes chord through the sphere and render invisible. This is why the road is subdivided. |
+| ERROR | mesh AABB is **entirely outside** the `x∈[-4,4], y∈[-3,3]` domain | nothing renders meshes outside the cross cube-net — likely a stray / lost object |
+| WARNING | ground-plane span > 1 unit with fewer than 8 verts per unit along that axis | vyapti PV1 — long low-poly meshes chord between sparse verts and cut through the sphere surface, rendering invisible or at the wrong elevation. This is why the road is subdivided. |
+| WARNING | `z_min < −0.10` (below 10 cm modelling-noise threshold) | sub-terrain geometry gets buried in the planet interior |
 
 Errors abort the export. Warnings are printed but the export proceeds.
-
-**Unfold rows** — an object must fit inside ONE of these (spanning X within the middle row is fine, e.g. the road):
-
-| Row | X range | Y range |
-|---|---|---|
-| middle (B, E, A, F) | [−4, 4] | [−1, 1] |
-| top (C) | [−2, 0] | [ 1, 3] |
-| bottom (D) | [−2, 0] | [−3, −1] |
+Objects named `terrain` / `sphere-terrain` / `ground` are skipped (they're
+supposed to span everything).
 
 ## Face-block table (Blender Z-up)
 
