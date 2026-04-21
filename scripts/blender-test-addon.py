@@ -74,15 +74,15 @@ def main():
     print(f"[addon-test] register OK — {len(expected_ops)} operators, "
           f"{len(expected_types)} UI classes")
 
-    # 3. Validator sanity — feed a fabricated scene that straddles a face
-    #    block and confirm it gets flagged.
+    # 3. Validator sanity — place a mesh completely outside the cube-net
+    #    domain (stray-object error) and confirm it gets flagged.
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.mesh.primitive_cube_add(size=4.0, location=(0.0, 0.2, 0.0))
-    bpy.context.active_object.name = "bad-mesh-straddles-boundary"
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(10.0, 10.0, 0.5))
+    bpy.context.active_object.name = "stray-outside-domain"
     issues = mod.validate_scene(bpy.context)
     has_error = any(lvl == 'ERROR' for (lvl, _) in issues)
     if not has_error:
-        die(f"validator didn't catch a seam-straddling mesh: {issues}")
+        die(f"validator didn't catch a stray-outside-domain mesh: {issues}")
     print(f"[addon-test] validator caught {len(issues)} issue(s) — OK")
 
     # 4. Unregister cleanly.
