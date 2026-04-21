@@ -33,15 +33,33 @@ import bpy
 import mathutils
 
 # ── Cross cube-net geometry (matches buildDiorama.ts / buildGrass.ts) ──────
+# IMPORTANT: coordinates below are in BLENDER space (Z-up). The glTF exporter
+# is invoked with export_yup=True, so the three-js side receives the scene
+# with our Blender Y→Z flip undone. In three-js-speak these tables use
+# `z` for what Blender sees as `y` — but everything you author / see in
+# Blender uses the native axes listed here.
 
+# Face blocks: 6 × 2×2 squares arranged in a cross on the XY plane.
 FACE_BLOCKS = [
-    # (name, cube face, x_min, x_max, z_min, z_max)
-    ("E", "+Z", -2.0,  0.0, -1.0,  1.0),
-    ("A", "+X",  0.0,  2.0, -1.0,  1.0),
-    ("B", "-X", -4.0, -2.0, -1.0,  1.0),
-    ("F", "-Z",  2.0,  4.0, -1.0,  1.0),
-    ("C", "+Y", -2.0,  0.0,  1.0,  3.0),
-    ("D", "-Y", -2.0,  0.0, -3.0, -1.0),
+    # (name, cube face, x_min, x_max, y_min, y_max)
+    ("E", "+Z (front)", -2.0,  0.0, -1.0,  1.0),
+    ("A", "+X (right)",  0.0,  2.0, -1.0,  1.0),
+    ("B", "-X (left)",  -4.0, -2.0, -1.0,  1.0),
+    ("F", "-Z (back)",   2.0,  4.0, -1.0,  1.0),
+    ("C", "+Y (top)",   -2.0,  0.0,  1.0,  3.0),
+    ("D", "-Y (bottom)", -2.0,  0.0, -3.0, -1.0),
+]
+
+# Unfold rows — a mesh's world AABB must fit INSIDE ONE of these. Spanning
+# X inside the middle row is fine (the row folds continuously from -X face
+# through +Z, +X, -Z), and that's where the road/fence legitimately live.
+# Crossing between rows is NOT fine because those edges meet non-adjacent
+# faces on the cube.
+UNFOLD_ROWS = [
+    # (name, x_min, x_max, y_min, y_max)
+    ("middle (B, E, A, F)", -4.0, 4.0, -1.0,  1.0),
+    ("top (C)",             -2.0, 0.0,  1.0,  3.0),
+    ("bottom (D)",          -2.0, 0.0, -3.0, -1.0),
 ]
 
 
@@ -74,40 +92,53 @@ def _glb_path(context) -> str:
 # ── Validation ─────────────────────────────────────────────────────────────
 
 def validate_scene(context):
-    """Return a list of (level, message) tuples — WARNING / ERROR."""
+    """Return a list of (level, message) tuples — WARNING / ERROR.
+
+    Axes below use Blender-native Z-up:
+      X, Y  → ground plane (the cross cube-net lies flat on XY, Z=0)
+      Z     → height (blades grow up along +Z)
+    """
     issues = []
     for obj in bpy.data.objects:
         if obj.type != 'MESH':
             continue
-        # World-space bounding box.
+        if obj.name.startswith("rubics-guide-"):
+            continue  # Don't validate our own reference wireframes.
         corners = [obj.matrix_world @ mathutils.Vector(c) for c in obj.bound_box]
         xs = [v.x for v in corners]
-        zs = [v.z for v in corners]
         ys = [v.y for v in corners]
+        zs = [v.z for v in corners]
         x_min, x_max = min(xs), max(xs)
-        z_min, z_max = min(zs), max(zs)
         y_min, y_max = min(ys), max(ys)
+        z_min, z_max = min(zs), max(zs)
 
-        in_block = any(
-            x_min >= bx0 - 1e-3 and x_max <= bx1 + 1e-3 and
-            z_min >= bz0 - 1e-3 and z_max <= bz1 + 1e-3
-            for _, _, bx0, bx1, bz0, bz1 in FACE_BLOCKS
+        # Cube-fold rule — must fit inside ONE unfold row (crossing rows
+        # means the flat-adjacent edge folds into a non-adjacent cube edge).
+        # Crossing face-block boundaries WITHIN a row is fine so long as the
+        # mesh is subdivided (PV1 check below) — the road does this on the
+        # equator.
+        in_row = any(
+            x_min >= rx0 - 1e-3 and x_max <= rx1 + 1e-3 and
+            y_min >= ry0 - 1e-3 and y_max <= ry1 + 1e-3
+            for _, rx0, rx1, ry0, ry1 in UNFOLD_ROWS
         )
-        if not in_block:
+        if not in_row:
             issues.append(('ERROR',
-                f"'{obj.name}' straddles face-block boundaries "
-                f"(x={x_min:.2f}..{x_max:.2f}, z={z_min:.2f}..{z_max:.2f}). "
-                f"Move it inside one 2×2 block."))
+                f"'{obj.name}' crosses cube-net rows "
+                f"(x={x_min:.2f}..{x_max:.2f}, y={y_min:.2f}..{y_max:.2f}). "
+                f"Middle row: x∈[-4,4], y∈[-1,1]. Top: x∈[-2,0], y∈[1,3]. "
+                f"Bottom: x∈[-2,0], y∈[-3,-1]."))
 
-        if y_min < -0.01:
+        if z_min < -0.01:
             issues.append(('WARNING',
-                f"'{obj.name}' extends below y=0 (y_min={y_min:.3f}) — "
-                f"anything under the terrain gets spherified into the planet."))
+                f"'{obj.name}' extends below z=0 (z_min={z_min:.3f}) — "
+                f"sub-terrain geometry gets spherified into the planet interior."))
 
-        # vyapti PV1: long meshes need enough segments along the long axis.
-        # Heuristic: if the mesh is wider than 1 unit along X or Z, it should
-        # have ≥8 verts across that dimension.
-        long_axis = max(x_max - x_min, z_max - z_min)
+        # vyapti PV1 — long meshes need subdivision for the sphere projection.
+        # Heuristic: ≥8 verts per flat unit along whichever ground axis is
+        # long. Crossing face-block boundaries without enough verts is the
+        # canonical cause of invisible-road bugs.
+        long_axis = max(x_max - x_min, y_max - y_min)
         if long_axis > 1.0:
             mesh = obj.data
             nverts = len(mesh.vertices)
@@ -229,10 +260,11 @@ class RUBICS_OT_AddGuides(bpy.types.Operator):
             if obj.name.startswith("rubics-guide-"):
                 bpy.data.objects.remove(obj, do_unlink=True)
 
-        for name, face, x0, x1, z0, z1 in FACE_BLOCKS:
+        for name, face, x0, x1, y0, y1 in FACE_BLOCKS:
+            # Guides lie flat on Blender's ground plane (XY, Z=0).
             verts = [
-                (x0, 0, z0), (x1, 0, z0),
-                (x1, 0, z1), (x0, 0, z1),
+                (x0, y0, 0), (x1, y0, 0),
+                (x1, y1, 0), (x0, y1, 0),
             ]
             edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
             mesh = bpy.data.meshes.new(f"rubics-guide-{name}")
@@ -243,13 +275,14 @@ class RUBICS_OT_AddGuides(bpy.types.Operator):
             obj.hide_select = True
             context.scene.collection.objects.link(obj)
 
-            # Text label at block centre.
+            # Text label at block centre, also flat on XY at Z=0.01 so it's
+            # readable from the top-down view that authors use while laying
+            # out the diorama.
             txt_data = bpy.data.curves.new(name=f"rubics-guide-{name}-label", type='FONT')
-            txt_data.body = f"{name} ({face})"
-            txt_data.size = 0.25
+            txt_data.body = f"{name} {face}"
+            txt_data.size = 0.22
             txt_obj = bpy.data.objects.new(f"rubics-guide-{name}-label", txt_data)
-            txt_obj.location = ((x0 + x1) * 0.5 - 0.4, 0.01, (z0 + z1) * 0.5)
-            txt_obj.rotation_euler = (1.5708, 0, 0)  # lay flat on xz plane
+            txt_obj.location = ((x0 + x1) * 0.5 - 0.45, (y0 + y1) * 0.5 - 0.1, 0.01)
             txt_obj.hide_select = True
             context.scene.collection.objects.link(txt_obj)
 
