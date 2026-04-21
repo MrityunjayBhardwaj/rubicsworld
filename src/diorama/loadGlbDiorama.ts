@@ -31,6 +31,17 @@ export async function loadGlbDiorama(
     return null
   }
 
+  // Defensive check — a stub glb (only the root node, no children) produces
+  // a blank planet and silently looks "broken" unless you know to check.
+  // Treat it the same as a fetch failure so the caller falls back cleanly.
+  let meshCount = 0
+  gltf.scene.traverse(c => { if ((c as THREE.Mesh).isMesh) meshCount++ })
+  if (meshCount === 0) {
+    // eslint-disable-next-line no-console
+    console.warn('[diorama] GLB contains zero meshes; falling back to imperative:', url)
+    return null
+  }
+
   const root = new THREE.Group()
   root.name = 'diorama'
   // Keep frustum culling off to match the imperative build — sphere
