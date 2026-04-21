@@ -28,6 +28,68 @@ const SLICE_ROT_MS = 380
 // don't allocate 24 ints per frame. 24 slots, one per current tile position.
 const _atHomeScratch = new Uint8Array(24)
 
+// ── Per-cell visibility culling ───────────────────────────────────────────
+// Sphere mode renders the diorama 24× per frame (once per cell, each with
+// its own clip planes). The clip planes reject fragments post-rasterisation,
+// but the vertex shader + draw call already ran. For a diorama with many
+// meshes, most cells have nothing to do with most meshes — the cost of the
+// doomed passes adds up fast. We fix that here: tag every mesh with a
+// bitmask of which cells its flat-space AABB overlaps, then toggle
+// mesh.visible per-tile so Three.js skips doomed draws entirely.
+
+interface CellRect {
+  xMin: number; xMax: number; zMin: number; zMax: number
+  /** Stable 0..23 index: face*4 + localV*2 + localU. Used as the bit index. */
+  bit: number
+}
+
+function buildCellRects(cells: CellDef[]): CellRect[] {
+  const half = CELL / 2
+  return cells.map(c => ({
+    xMin: c.homeX - half,
+    xMax: c.homeX + half,
+    zMin: c.homeZ - half,
+    zMax: c.homeZ + half,
+    bit: c.face * 4 + c.localV * 2 + c.localU,
+  }))
+}
+
+/** Walks `root`, computes each mesh's flat-space AABB, and tags
+ *  `mesh.userData.__cellMask` with the OR of bits for every CellRect the
+ *  AABB overlaps. InstancedMeshes (grass / flower) are skipped — their
+ *  instance positions span the whole net and they need full visibility
+ *  in every pass. The mask check is purely a CPU-side draw-call gate;
+ *  no shader changes, so P8/P5 don't apply. Returns the list of tagged
+ *  meshes so the per-frame loop can iterate a flat array instead of
+ *  walking the whole tree every tile. */
+function tagCellMasks(root: THREE.Object3D, cellRects: CellRect[]): THREE.Mesh[] {
+  root.updateMatrixWorld(true)
+  const tagged: THREE.Mesh[] = []
+  const _box = new THREE.Box3()
+  root.traverse(obj => {
+    const m = obj as THREE.Mesh
+    if (!m.isMesh) return
+    if (m.isInstancedMesh) return  // meadow: always visible
+    _box.makeEmpty().setFromObject(m)
+    if (_box.isEmpty() || !isFinite(_box.min.x)) {
+      m.userData.__cellMask = 0xFFFFFF  // 24 bits — visible everywhere
+      tagged.push(m)
+      return
+    }
+    let mask = 0
+    for (const r of cellRects) {
+      // Rect-rect overlap on the flat XZ ground plane.
+      if (_box.max.x >= r.xMin && _box.min.x <= r.xMax &&
+          _box.max.z >= r.zMin && _box.min.z <= r.zMax) {
+        mask |= (1 << r.bit)
+      }
+    }
+    m.userData.__cellMask = mask
+    tagged.push(m)
+  })
+  return tagged
+}
+
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
 }
@@ -465,6 +527,8 @@ export function TileGrid({ mode = 'split', bezier }: {
   const dioramaRef = useRef<DioramaScene | null>(null)
   const dioramaSceneRef = useRef<THREE.Scene | null>(null)
   const cellsRef = useRef<CellDef[]>([])
+  const cellRectsRef = useRef<CellRect[]>([])
+  const taggedMeshesRef = useRef<THREE.Mesh[]>([])
   const overlaySceneRef = useRef<THREE.Scene | null>(null)
   const rendersRef = useRef<CellRender[]>([])
   const sphereUniformsRef = useRef<SphereUniforms | null>(null)
@@ -572,6 +636,10 @@ export function TileGrid({ mode = 'split', bezier }: {
 
     const cells = buildCellDefs()
     cellsRef.current = cells
+    cellRectsRef.current = buildCellRects(cells)
+    // Initial tagging for the imperative path — the glb async swap tags
+    // again after its load completes.
+    taggedMeshesRef.current = tagCellMasks(diorama.root, cellRectsRef.current)
 
     // Pre-compute per-cell transforms + clip planes
     const gap = mode === 'split' ? SPLIT_GAP : CUBE_GAP
@@ -633,6 +701,9 @@ export function TileGrid({ mode = 'split', bezier }: {
         }
         diorama = next
         dioramaRef.current = next
+        // Re-tag cell masks on the fresh scene so the per-tile visibility
+        // cull has current geometry to work with.
+        taggedMeshesRef.current = tagCellMasks(next.root, cellRectsRef.current)
         // Re-apply the Leva panel's current values to the fresh meadow so
         // density / flower split / colours / wind survive the hot reload.
         // buildGrass defaults mesh.count to 50% otherwise, which would read
@@ -1035,7 +1106,19 @@ export function TileGrid({ mode = 'split', bezier }: {
         gl.render(terrainScene, camera)
       }
 
+      const tagged = taggedMeshesRef.current
       for (const tile of tiles) {
+        // Per-cell visibility cull — skip draw calls for meshes whose flat
+        // AABB doesn't overlap this tile's home cell. The clip planes
+        // still reject fragments from meshes that DO overlap but extend
+        // past the cell edge; this just avoids submitting meshes that
+        // couldn't contribute at all.
+        const bit = 1 << (tile.homeFace * 4 + tile.homeV * 2 + tile.homeU)
+        for (let i = 0; i < tagged.length; i++) {
+          const m = tagged[i]
+          m.visible = ((m.userData.__cellMask as number) & bit) !== 0
+        }
+
         const r = storeTileCubeRender(tile, SPHERE_GAP)
         let position = r.position
         let quaternion = r.quaternion
