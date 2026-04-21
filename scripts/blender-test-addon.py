@@ -66,7 +66,7 @@ def main():
         if not hasattr(bpy.types, name):
             die(f"bpy.types missing {name}")
     expected_ops = ["import_diorama", "export_diorama", "validate_scene",
-                    "add_guides", "remove_guides"]
+                    "live_toggle", "add_guides", "remove_guides"]
     rubics_ops = [o for o in dir(bpy.ops.rubics) if not o.startswith("_")]
     for name in expected_ops:
         if name not in rubics_ops:
