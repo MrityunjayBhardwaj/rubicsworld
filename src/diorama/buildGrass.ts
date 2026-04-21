@@ -124,6 +124,10 @@ export const grassRefs: {
    *  and export it as a .glb Blob via GLTFExporter. Registered by TileGrid so
    *  the Leva panel can trigger a download without owning an exporter. */
   saveDiorama: (() => Promise<Blob | null>) | null
+  /** Re-apply the current Leva state to uniforms + every mesh's count.
+   *  Registered by GrassPanel, called by TileGrid after a hot-reload swap
+   *  so density / flower split / colours / wind survive the scene rebuild. */
+  reapplyControls: (() => void) | null
 } = {
   mesh: null,
   maxCount: 0,
@@ -132,6 +136,7 @@ export const grassRefs: {
   captureTopView: null,
   rebuildWithMask: null,
   saveDiorama: null,
+  reapplyControls: null,
 }
 
 export interface GrassDebugData {
