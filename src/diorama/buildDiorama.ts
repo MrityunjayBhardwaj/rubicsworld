@@ -1335,12 +1335,12 @@ export function buildDiorama(opts: BuildDioramaOpts = {}): DioramaScene {
   // collisions (hetvabhasa P7).
   applyFresnelPatchToScene(root)
 
-  // Grass runs LAST: all other props must be in `root` so their flat-space
+  // Meadow runs LAST: all other props must be in `root` so their flat-space
   // AABBs are available for exclusion sampling. Authored in flat cube-net
-  // coordinates, grass then rides the same per-cell → sphere projection
-  // pipeline as every other prop.
+  // coordinates, grass + flowers then ride the same per-cell → sphere
+  // projection pipeline as every other prop.
   const grass = buildGrass(root)
-  root.add(grass.mesh)
+  for (const m of grass.meshes) root.add(m)
 
   const update = (t: number) => {
     pond.update(t)

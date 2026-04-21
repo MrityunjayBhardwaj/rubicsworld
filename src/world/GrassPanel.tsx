@@ -14,7 +14,7 @@
 import { useControls, folder, button } from 'leva'
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
-import { grassDebug, grassRefs, grassUniforms } from '../diorama/buildGrass'
+import { flowerColorUniforms, FLOWER_KEYS, grassDebug, grassRefs, grassUniforms, type FlowerKey } from '../diorama/buildGrass'
 
 function triggerDownload(dataUrl: string, filename: string) {
   const a = document.createElement('a')
@@ -92,6 +92,7 @@ export function GrassPanel() {
         windDirZ:      { value: grassUniforms.uWindDir.value.y,    min: -1, max: 1, step: 0.01, label: 'wind dir z' },
         baseColor:     { value: '#' + grassUniforms.uBaseColor.value.getHexString(), label: 'base colour' },
         tipColor:      { value: '#' + grassUniforms.uTipColor.value.getHexString(),  label: 'tip colour' },
+        stemColor:     { value: '#' + grassUniforms.uStemColor.value.getHexString(), label: 'flower stem colour' },
         hueJitter:     { value: grassUniforms.uHueJitter.value, min: 0, max: 0.5, step: 0.01, label: 'hue jitter' },
         densityMap:    { value: false, label: 'show density map' },
         saveDensityMap: button(() => saveOverlayPng()),
@@ -99,6 +100,20 @@ export function GrassPanel() {
         saveCubenet:    button(() => { void saveCubenetPng() }),
         loadMask:       button(() => { void loadMaskPng() }),
         clearMask:      button(() => { grassRefs.rebuildWithMask?.(null) }),
+      },
+      { collapsed: true },
+    ),
+    Flowers: folder(
+      {
+        flowerPct:    { value: 50, min: 0, max: 100, step: 0.5, label: 'flower % (vs grass)' },
+        pinkWeight:   { value: 1.0, min: 0, max: 1, step: 0.01, label: 'pink ratio' },
+        purpleWeight: { value: 1.0, min: 0, max: 1, step: 0.01, label: 'purple ratio' },
+        yellowWeight: { value: 1.0, min: 0, max: 1, step: 0.01, label: 'yellow ratio' },
+        redWeight:    { value: 1.0, min: 0, max: 1, step: 0.01, label: 'red ratio' },
+        pinkColor:    { value: '#' + flowerColorUniforms.pink.value.getHexString(),   label: 'pink' },
+        purpleColor:  { value: '#' + flowerColorUniforms.purple.value.getHexString(), label: 'purple' },
+        yellowColor:  { value: '#' + flowerColorUniforms.yellow.value.getHexString(), label: 'yellow' },
+        redColor:     { value: '#' + flowerColorUniforms.red.value.getHexString(),    label: 'red' },
       },
       { collapsed: true },
     ),
@@ -114,22 +129,57 @@ export function GrassPanel() {
     grassUniforms.uHueJitter.value    = controls.hueJitter
     grassUniforms.uBaseColor.value.set(new THREE.Color(controls.baseColor))
     grassUniforms.uTipColor.value.set(new THREE.Color(controls.tipColor))
+    grassUniforms.uStemColor.value.set(new THREE.Color(controls.stemColor))
+    flowerColorUniforms.pink.value.set(new THREE.Color(controls.pinkColor))
+    flowerColorUniforms.purple.value.set(new THREE.Color(controls.purpleColor))
+    flowerColorUniforms.yellow.value.set(new THREE.Color(controls.yellowColor))
+    flowerColorUniforms.red.value.set(new THREE.Color(controls.redColor))
   }, [
     controls.windStrength, controls.windSpeed, controls.waveScale,
     controls.bendAmount, controls.length,
     controls.windDirX, controls.windDirZ,
-    controls.hueJitter, controls.baseColor, controls.tipColor,
+    controls.hueJitter, controls.baseColor, controls.tipColor, controls.stemColor,
+    controls.pinkColor, controls.purpleColor, controls.yellowColor, controls.redColor,
   ])
 
+  // Per-bucket visible-count control. The meadow contains ONE grass mesh +
+  // FOUR flower meshes, each pre-built at roughly 1/5 of total survivors.
+  //   totalVisible = maxGrass × (density / 50)
+  //   flowerShare  = totalVisible × flowerPct / 100
+  //   grassCount   = totalVisible − flowerShare (clamped to grass max)
+  //   per-colour   = flowerShare × weight / sumWeights (clamped per-colour)
+  // maxGrass is treated as the ballpark "total slots visible" since each of
+  // the 5 buckets is allocated ≈ the same capacity — simpler than juggling a
+  // composite number and stays consistent with the density=0..50 UX.
   useEffect(() => {
-    const m = grassRefs.mesh
-    if (!m) return
-    m.visible = controls.visible
-    // Slider 0..50 maps to 0..maxCount. density=50 saturates; default 25 is
-    // 50% coverage (matches the initial mesh.count seeded in buildGrass).
-    const frac = Math.min(1, Math.max(0, controls.density / 50))
-    m.count = Math.floor(grassRefs.maxCount * frac)
-  }, [controls.visible, controls.density])
+    const refs = grassRefs
+    if (!refs.mesh) return
+    refs.mesh.visible = controls.visible
+    for (const m of refs.meadowMeshes) m.visible = controls.visible
+
+    const totalVisible = Math.floor(refs.maxCount * (controls.density / 50))
+    const flowerFrac = controls.flowerPct / 100
+    const flowerShare = Math.floor(totalVisible * flowerFrac)
+    const grassCount = Math.max(0, Math.min(refs.maxCount, totalVisible - flowerShare))
+    refs.mesh.count = grassCount
+
+    const weights: Record<FlowerKey, number> = {
+      pink:   controls.pinkWeight,
+      purple: controls.purpleWeight,
+      yellow: controls.yellowWeight,
+      red:    controls.redWeight,
+    }
+    const sumW = Math.max(1e-6, weights.pink + weights.purple + weights.yellow + weights.red)
+    for (const key of FLOWER_KEYS) {
+      const desired = Math.floor(flowerShare * (weights[key] / sumW))
+      const mesh = refs.meadowMeshes.find(m => m.name === `flower-${key}`)
+      if (!mesh) continue
+      mesh.count = Math.max(0, Math.min(refs.meadowMax[key], desired))
+    }
+  }, [
+    controls.visible, controls.density, controls.flowerPct,
+    controls.pinkWeight, controls.purpleWeight, controls.yellowWeight, controls.redWeight,
+  ])
 
   return controls.densityMap ? <DensityMapOverlay /> : null
 }

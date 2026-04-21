@@ -655,8 +655,9 @@ export function TileGrid({ mode = 'split', bezier }: {
     grassRefs.rebuildWithMask = (mask) => {
       const diorama = dioramaRef.current
       if (!diorama) return
-      const old = grassRefs.mesh
-      if (old) {
+      // Dispose every previous meadow mesh (grass + 4 flowers) before building
+      // fresh ones. The old handles live in grassRefs.meadowMeshes.
+      for (const old of grassRefs.meadowMeshes) {
         old.parent?.remove(old)
         old.geometry.dispose()
         const m = old.material
@@ -664,8 +665,7 @@ export function TileGrid({ mode = 'split', bezier }: {
         else m.dispose()
       }
       const grass = buildGrass(diorama.root, { maskImage: mask ?? undefined })
-      grass.mesh.frustumCulled = false
-      diorama.root.add(grass.mesh)
+      for (const mesh of grass.meshes) diorama.root.add(mesh)
       if (mode === 'sphere' && sphereUniformsRef.current) {
         patchSceneForSphere(diorama.root, sphereUniformsRef.current)
       }
