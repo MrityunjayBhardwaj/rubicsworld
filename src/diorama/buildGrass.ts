@@ -1,27 +1,24 @@
 /**
- * Fluffy-grass builder. Samples flat-net candidates, rejects positions that
- * fall inside any diorama prop's flat-space AABB, and emits an InstancedMesh
- * of crossed-plane blades **authored in flat cube-net space** — so it rides
- * the same cube-net → split → cube → sphere pipeline as every other diorama
- * prop (trees, hut, pond, road, …). In sphere mode the existing
- * `patchMaterialForSphere` onBeforeCompile patch spherifies grass alongside
- * the rest of the scene; in flat/cube previews the blades render upright on
- * their flat face-block.
+ * Meadow builder — grass + 4 flower types (pink / purple / yellow / red)
+ * sampled as ONE categorical pass so the allocated candidates are shared:
+ * the user's flower-% knob trades grass for flowers without double-placing
+ * either one.
  *
- * Wind is a **rigid rotation** of each blade around its root, Rodrigues
- * formula in the vertex shader. Blade length is strictly preserved under
- * bending (isometry). Phase is spatial — derived from the instance world
- * origin projected onto the wind direction — so the whole field moves as
- * one coherent wave rolling through the grass, not per-strand random sway.
+ * Each category lives in its own InstancedMesh so `mesh.count` gives
+ * independent per-category visibility control without a rebuild. All 5
+ * materials share the same wind vertex shader (rigid Rodrigues rotation
+ * around the blade root — length is preserved as a strict isometry) and
+ * the same grassUniforms for spatial/temporal wave phase. Fragment differs:
+ * grass uses a base→tip colour gradient on a tapered blade; flowers use a
+ * narrow stem below + a coloured circular blossom above, per-mesh uniform.
  *
- * Density budget: blades-per-flat-unit² sampled in each 2×2 face-block
- * (24 u² total). Allowed area / blade count falls out of the exclusion
- * pass naturally.
+ * Authored in flat cube-net space so every mesh rides the existing
+ * cube-net → split → cube → sphere pipeline with patchMaterialForSphere
+ * chaining onto the meadow vertex patch.
  */
 import * as THREE from 'three'
 
 // Face-block definitions mirroring `buildDiorama.ts` header geometry.
-// centreX/centreZ are the (x, z) midpoint of each 2×2 block in flat space.
 const FACE_BLOCKS: readonly { face: 0 | 1 | 2 | 3 | 4 | 5; cx: number; cz: number }[] = [
   { face: 4, cx: -1, cz:  0 }, // E (+Z)
   { face: 0, cx:  1, cz:  0 }, // A (+X)
@@ -31,11 +28,6 @@ const FACE_BLOCKS: readonly { face: 0 | 1 | 2 | 3 | 4 | 5; cx: number; cz: numbe
   { face: 3, cx: -1, cz: -2 }, // D (-Y)
 ] as const
 
-// Named diorama roots that should get NO grass around them. `terrain` is the
-// domain itself; `birds` are airborne; `car` is always over the road, which
-// is already excluded. Per-name margin overrides default exclusionMargin —
-// road is a thin strip where even a tiny spillover visually overlaps; pond
-// and windmill benefit from a softer skirt around the prop.
 const DEFAULT_EXCLUDE = [
   'pond', 'stream', 'windmill', 'trees', 'hut', 'fence',
   'flowers', 'stonepath', 'well', 'rocks', 'road', 'smoke',
@@ -49,57 +41,46 @@ const PROP_MARGIN: Record<string, number> = {
   hut:      0.08,
 }
 
+// ── Flower type keys ───────────────────────────────────────────────────────
+
+export type FlowerKey = 'pink' | 'purple' | 'yellow' | 'red'
+export const FLOWER_KEYS: readonly FlowerKey[] = ['pink', 'purple', 'yellow', 'red'] as const
+export type Bucket = 'grass' | FlowerKey
+const BUCKETS: readonly Bucket[] = ['grass', ...FLOWER_KEYS] as const
+
+// ── Options / result / uniforms ────────────────────────────────────────────
+
 export interface GrassOpts {
-  /** Blades per flat u² sampled (before exclusion). Max instances = 24 × this. */
   densityPerUnit2?: number
-  /** Outer margin added to each excluded prop's AABB (flat units). */
   exclusionMargin?: number
-  /** Blade height in flat units (flat-net space). Small — e.g. 0.015. */
+  /** Grass blade height (thin tapered blade). Small — e.g. 0.015. */
   bladeHeight?: number
   bladeWidth?: number
-  /** Names of diorama children whose AABB kills grass inside. */
+  /** Flower blade height — a bit taller so the blossom reads above grass. */
+  flowerHeight?: number
+  flowerWidth?: number
   excludeNames?: readonly string[]
-  /** Tiny lift off y=0 to avoid z-fight with the flat terrain plane in
-   *  non-sphere modes (the sphere terrain lives in a separate scene). */
   groundOffset?: number
-  /** Optional painted mask. Pixel space is the same 8×6 flat-net frame as
-   *  the saved mask PNG (x ∈ [-halfW, halfW], z ∈ [-halfH, halfH], image y
-   *  maps 1:1 with z). Luminance > threshold → grass allowed at that flat
-   *  coord. When set, AABB prop-exclusion is SKIPPED — the painted mask is
-   *  authoritative. Out-of-face-block samples are still rejected. */
   maskImage?: ImageData | null
-  /** 0..255 luminance threshold. Pixels brighter than this are allowed. */
   maskThreshold?: number
-}
-
-export interface GrassResult {
-  mesh: THREE.InstancedMesh
-  uniforms: GrassUniforms
-  update: (elapsed: number) => void
-  dispose: () => void
-  stats: { candidates: number; allowed: number; excluded: number }
 }
 
 export interface GrassUniforms {
   uTime:          { value: number }
   uWindDir:       { value: THREE.Vector2 }
   uWindStrength:  { value: number }
-  /** Wind speed — how fast the wave propagates through time (rad/s). */
   uWindFreq:      { value: number }
-  /** Spatial frequency of the wind wave: cycles per world unit. Higher =
-   *  tighter ripples; 0 collapses the field to a single synchronised sway. */
   uWaveScale:     { value: number }
-  /** Maximum bend angle in radians (scaled by wave amplitude × strength). */
   uBendAmount:    { value: number }
-  /** Multiplies blade height at runtime. Scaling is applied BEFORE the
-   *  rigid-rotation wind, so length preservation under wind still holds. */
   uLengthScale:   { value: number }
   uBaseColor:     { value: THREE.Color }
   uTipColor:      { value: THREE.Color }
   uHueJitter:     { value: number }
+  /** Shared across all flower materials (stem colour). */
+  uStemColor:     { value: THREE.Color }
 }
 
-/** Module-scoped shared uniforms — GrassPanel writes into these each render. */
+/** Module-scoped uniforms shared by grass + flowers (wind, lighting-ish). */
 export const grassUniforms: GrassUniforms = {
   uTime:         { value: 0 },
   uWindDir:      { value: new THREE.Vector2(1, 0.35).normalize() },
@@ -111,38 +92,56 @@ export const grassUniforms: GrassUniforms = {
   uBaseColor:    { value: new THREE.Color('#3c6a2a') },
   uTipColor:     { value: new THREE.Color('#cfe489') },
   uHueJitter:    { value: 0.18 },
+  uStemColor:    { value: new THREE.Color('#3f6a2c') },
 }
 
-/** Shared handle so the Leva panel can scale visible instance count without
- *  rebuilding geometry. `maxCount` is the allocated instance budget; the
- *  visible count is `Math.floor(maxCount * density)`. `captureTopView` is
- *  registered by TileGrid so the panel's "save" button can snapshot the
- *  flat cube-net view without owning a renderer itself. */
-export const grassRefs: {
-  mesh: THREE.InstancedMesh | null
-  maxCount: number
-  captureTopView: (() => Promise<Blob | null>) | null
-  /** Dispose the current grass and rebuild with a painted mask (or clear the
-   *  mask by passing null). Registered by TileGrid so GrassPanel can request
-   *  a rebuild without owning diorama.root. */
-  rebuildWithMask: ((mask: ImageData | null) => void) | null
-} = { mesh: null, maxCount: 0, captureTopView: null, rebuildWithMask: null }
+/** Per-flower-colour uniforms — one vec3 per flower type, written by Leva. */
+export const flowerColorUniforms: Record<FlowerKey, { value: THREE.Color }> = {
+  pink:   { value: new THREE.Color('#ff6aa3') },
+  purple: { value: new THREE.Color('#b868d8') },
+  yellow: { value: new THREE.Color('#f5d23a') },
+  red:    { value: new THREE.Color('#e03a3a') },
+}
 
-/** Flat-space debug data for the density map overlay. Populated at build time
- *  and consumed by GrassPanel to render a 2D preview of allowed / excluded
- *  regions on the 8×6 cross cube-net. */
+export interface GrassResult {
+  grass: THREE.InstancedMesh
+  flowers: Record<FlowerKey, THREE.InstancedMesh>
+  meshes: THREE.InstancedMesh[]   // convenience — [grass, pink, purple, yellow, red]
+  uniforms: GrassUniforms
+  update: (elapsed: number) => void
+  dispose: () => void
+  stats: { candidates: number; allowed: number; excluded: number; perBucket: Record<Bucket, number> }
+}
+
+export const grassRefs: {
+  mesh: THREE.InstancedMesh | null             // grass mesh (kept for back-compat)
+  maxCount: number                              // grass max count
+  meadowMeshes: THREE.InstancedMesh[]           // all five meshes in build order
+  meadowMax: Record<Bucket, number>             // per-bucket allocated max
+  captureTopView: (() => Promise<Blob | null>) | null
+  rebuildWithMask: ((mask: ImageData | null) => void) | null
+} = {
+  mesh: null,
+  maxCount: 0,
+  meadowMeshes: [],
+  meadowMax: { grass: 0, pink: 0, purple: 0, yellow: 0, red: 0 },
+  captureTopView: null,
+  rebuildWithMask: null,
+}
+
 export interface GrassDebugData {
   halfW: number
   halfH: number
   blocks: { face: number; cx: number; cz: number; halfSize: number }[]
   exclusions: { xMin: number; xMax: number; zMin: number; zMax: number; owner: string }[]
-  flatPositions: Float32Array  // interleaved x0, z0, x1, z1, …
+  flatPositions: Float32Array
   stats: { candidates: number; allowed: number; excluded: number }
 }
 export const grassDebug: { data: GrassDebugData | null } = { data: null }
 
-/** Crossed-plane blade: two quads on perpendicular axes, shared indexed mesh.
- *  Local frame: root at y=0, tip at y=height, blade width spans local ±w/2. */
+// ── Geometry helpers ───────────────────────────────────────────────────────
+
+/** Tapered grass blade — two crossed quads. Narrow, procedural taper in shader. */
 function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry()
   const w = width / 2
@@ -151,8 +150,8 @@ function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry
   const normals: number[] = []
   const indices: number[] = []
   const quads = [
-    { ax: 1, az: 0, nx: 0, nz: 1 }, // spans along X, facing ±Z
-    { ax: 0, az: 1, nx: 1, nz: 0 }, // spans along Z, facing ±X
+    { ax: 1, az: 0, nx: 0, nz: 1 },
+    { ax: 0, az: 1, nx: 1, nz: 0 },
   ]
   for (let q = 0; q < 2; q++) {
     const base = q * 4
@@ -174,39 +173,191 @@ function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry
   return g
 }
 
+// Flowers reuse the crossed-quad geometry but with a wider quad — the
+// fragment shader discards sides of the stem portion and draws a blossom
+// circle in the upper portion. Using the same geometry (and same vertex
+// shader hook) keeps the wind bend identical between grass and flowers.
+
+// ── Shader patches (shared vertex, per-kind fragment) ──────────────────────
+
+const VERTEX_COMMON = /* glsl */`
+  #include <common>
+  attribute float iHue;
+  varying float vHue;
+  varying vec2  vGrassUv;
+  uniform float uTime;
+  uniform vec2  uWindDir;
+  uniform float uWindStrength;
+  uniform float uWindFreq;
+  uniform float uWaveScale;
+  uniform float uBendAmount;
+  uniform float uLengthScale;
+`
+
+const VERTEX_BEGIN = /* glsl */`
+  vec3 transformed = vec3(position);
+  vGrassUv = uv;
+  vHue = iHue;
+
+  vec3 instOrigin = vec3(instanceMatrix[3].xyz);
+  vec3 worldWind3 = normalize(vec3(uWindDir.x, 0.0, uWindDir.y) + vec3(1e-4));
+
+  float spatialPhase = dot(instOrigin, worldWind3) * uWaveScale;
+  float wave = sin(uTime * uWindFreq - spatialPhase);
+  float gust = sin(uTime * uWindFreq * 0.47 - spatialPhase * 0.63);
+  float amp  = wave * 0.75 + gust * 0.25;
+
+  mat3 iRot = mat3(
+    normalize(instanceMatrix[0].xyz),
+    normalize(instanceMatrix[1].xyz),
+    normalize(instanceMatrix[2].xyz)
+  );
+  vec3 localWind = transpose(iRot) * worldWind3;
+  vec2 bendDir2 = normalize(vec2(localWind.x, localWind.z) + vec2(1e-5));
+
+  float theta = amp * uWindStrength * uBendAmount;
+  float c = cos(theta);
+  float s = sin(theta);
+  float oc = 1.0 - c;
+  vec3 k = vec3(bendDir2.y, 0.0, -bendDir2.x);
+
+  vec3 p = vec3(position.x, position.y * uLengthScale, position.z);
+
+  vec3 kxp = cross(k, p);
+  float kdotp = dot(k, p);
+  transformed = p * c + kxp * s + k * kdotp * oc;
+`
+
+const GRASS_FRAG_COMMON = /* glsl */`
+  #include <common>
+  varying float vHue;
+  varying vec2  vGrassUv;
+  uniform vec3  uBaseColor;
+  uniform vec3  uTipColor;
+  uniform float uHueJitter;
+`
+
+const GRASS_FRAG_MAP = /* glsl */`
+  float ux     = abs(vGrassUv.x - 0.5) * 2.0;
+  float taper  = mix(1.0, 0.18, vGrassUv.y);
+  if (ux > taper) discard;
+  vec3 gc = mix(uBaseColor, uTipColor, vGrassUv.y);
+  gc *= 1.0 + (vHue - 0.5) * 2.0 * uHueJitter;
+  diffuseColor.rgb *= gc;
+`
+
+const FLOWER_FRAG_COMMON = /* glsl */`
+  #include <common>
+  varying float vHue;
+  varying vec2  vGrassUv;
+  uniform vec3  uFlowerColor;
+  uniform vec3  uStemColor;
+  uniform float uHueJitter;
+`
+
+// Flower: thin stem along bottom 45% of uv.y, then a coloured blossom disc
+// centred at (0.5, 0.75). Stem shares the grass stem colour; blossom gets
+// per-flower-type uFlowerColor + a small per-instance hue jitter so a field
+// of pinks isn't flat.
+const FLOWER_FRAG_MAP = /* glsl */`
+  float ux = abs(vGrassUv.x - 0.5) * 2.0;
+  if (vGrassUv.y < 0.45) {
+    if (ux > 0.18) discard;
+    diffuseColor.rgb *= uStemColor;
+  } else {
+    vec2 d = vec2(ux, (vGrassUv.y - 0.75) * 3.2);
+    if (dot(d, d) > 1.0) discard;
+    vec3 fc = uFlowerColor;
+    fc *= 1.0 + (vHue - 0.5) * 2.0 * uHueJitter;
+    diffuseColor.rgb *= fc;
+  }
+`
+
+function createGrassMaterial(): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.88,
+    metalness: 0,
+    side: THREE.DoubleSide,
+    alphaTest: 0.5,
+    transparent: false,
+  })
+  mat.onBeforeCompile = shader => {
+    shader.uniforms.uTime         = grassUniforms.uTime
+    shader.uniforms.uWindDir      = grassUniforms.uWindDir
+    shader.uniforms.uWindStrength = grassUniforms.uWindStrength
+    shader.uniforms.uWindFreq     = grassUniforms.uWindFreq
+    shader.uniforms.uWaveScale    = grassUniforms.uWaveScale
+    shader.uniforms.uBendAmount   = grassUniforms.uBendAmount
+    shader.uniforms.uLengthScale  = grassUniforms.uLengthScale
+    shader.uniforms.uBaseColor    = grassUniforms.uBaseColor
+    shader.uniforms.uTipColor     = grassUniforms.uTipColor
+    shader.uniforms.uHueJitter    = grassUniforms.uHueJitter
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', VERTEX_COMMON)
+      .replace('#include <begin_vertex>', VERTEX_BEGIN)
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', GRASS_FRAG_COMMON)
+      .replace('#include <map_fragment>', GRASS_FRAG_MAP)
+  }
+  return mat
+}
+
+function createFlowerMaterial(color: { value: THREE.Color }): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.85,
+    metalness: 0,
+    side: THREE.DoubleSide,
+    alphaTest: 0.5,
+    transparent: false,
+  })
+  mat.onBeforeCompile = shader => {
+    shader.uniforms.uTime         = grassUniforms.uTime
+    shader.uniforms.uWindDir      = grassUniforms.uWindDir
+    shader.uniforms.uWindStrength = grassUniforms.uWindStrength
+    shader.uniforms.uWindFreq     = grassUniforms.uWindFreq
+    shader.uniforms.uWaveScale    = grassUniforms.uWaveScale
+    shader.uniforms.uBendAmount   = grassUniforms.uBendAmount
+    shader.uniforms.uLengthScale  = grassUniforms.uLengthScale
+    shader.uniforms.uHueJitter    = grassUniforms.uHueJitter
+    shader.uniforms.uStemColor    = grassUniforms.uStemColor
+    shader.uniforms.uFlowerColor  = color
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', VERTEX_COMMON)
+      .replace('#include <begin_vertex>', VERTEX_BEGIN)
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', FLOWER_FRAG_COMMON)
+      .replace('#include <map_fragment>', FLOWER_FRAG_MAP)
+  }
+  return mat
+}
+
+// ── Main builder ───────────────────────────────────────────────────────────
+
 export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): GrassResult {
   const {
-    // Base budget sized so Leva density=50 saturates with a very lush field.
-    // ~480K candidates → ~230K survivors post-exclusion. Still cheap — modern
-    // GPUs eat millions of instances for breakfast — but mount time grows
-    // linearly, so tune down if build hitches show up on slow machines.
     densityPerUnit2 = 20000,
     exclusionMargin = 0.05,
     bladeHeight     = 0.015,
     bladeWidth      = 0.003,
+    flowerHeight    = 0.020,
+    flowerWidth     = 0.018,
     excludeNames    = DEFAULT_EXCLUDE,
     groundOffset    = 0.0005,
     maskImage       = null,
     maskThreshold   = 128,
   } = opts
 
-  // Flat-net bounds the mask encodes; matches HALF_W/HALF_H from buildDiorama
-  // and the mask PNG exporter in GrassPanel.
   const MASK_HALF_W = 4
   const MASK_HALF_H = 3
 
-  // ── Step 1: collect exclusion rects in flat XZ space ───────────────────
-  // When a painted mask is supplied, the mask is authoritative — we skip the
-  // AABB pass entirely and sample the mask pixel at each candidate. The rects
-  // array is still populated (empty) for the debug overlay payload.
+  // Step 1 — exclusion rects (skipped if a painted mask is in use).
   dioramaRoot.updateMatrixWorld(true)
   type Rect = { xMin: number; xMax: number; zMin: number; zMax: number; owner: string }
   const exclusions: Rect[] = []
   const _box = new THREE.Box3()
   if (!maskImage) {
-    // Per-mesh AABBs, not per-root-group: the `trees` group spans the whole
-    // planting area, so its group-AABB would kill every candidate in the gaps
-    // between trunks.
     for (const name of excludeNames) {
       const root = dioramaRoot.getObjectByName(name)
       if (!root) continue
@@ -227,9 +378,6 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     }
   }
 
-  // Mask-sampling helper. Returns true if the flat point is ALLOWED per the
-  // painted mask (luminance > threshold). Called per candidate when a mask
-  // image is supplied.
   const maskW = maskImage?.width ?? 0
   const maskH = maskImage?.height ?? 0
   const maskData = maskImage?.data
@@ -245,253 +393,156 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     return lum > maskThreshold
   }
 
-  // ── Step 2: sample candidates per block, reject against exclusions ─────
-  const candidatesPerBlock = Math.max(1, Math.floor(densityPerUnit2 * 4)) // 2×2 = 4 u²
-  const totalCandidates = candidatesPerBlock * 6
+  // Step 2 — sample candidates + classify each into one of 5 buckets. Even
+  // split at BUILD time (each bucket gets 1/5 of survivors on average). The
+  // Leva panel then controls per-bucket visible count independently, so the
+  // flower-% and per-colour-weight sliders just scale each mesh.count.
+  type Per = {
+    positions: THREE.Vector3[]
+    positions2D: THREE.Vector2[]
+    hues: number[]
+    yaws: number[]
+    scales: number[]
+  }
+  const emptyPer = (): Per => ({ positions: [], positions2D: [], hues: [], yaws: [], scales: [] })
+  const per: Record<Bucket, Per> = {
+    grass:  emptyPer(),
+    pink:   emptyPer(),
+    purple: emptyPer(),
+    yellow: emptyPer(),
+    red:    emptyPer(),
+  }
 
-  const flatPositions: THREE.Vector3[] = []
-  const flatPositions2D: THREE.Vector2[] = []  // for the debug overlay
-  const hues:   number[] = []
-  const yaws:   number[] = []
-  const scales: number[] = []
+  const candidatesPerBlock = Math.max(1, Math.floor(densityPerUnit2 * 4))
+  const totalCandidates = candidatesPerBlock * 6
   let excluded = 0
+  const debugFlat: number[] = []
 
   for (const block of FACE_BLOCKS) {
     for (let i = 0; i < candidatesPerBlock; i++) {
       const flatX = block.cx + (Math.random() * 2 - 1)
       const flatZ = block.cz + (Math.random() * 2 - 1)
       if (maskImage) {
-        // Mask path: single texture lookup per candidate, skip AABB pass.
         if (!allowedByMask(flatX, flatZ)) { excluded++; continue }
       } else {
         let inside = false
         for (const r of exclusions) {
           if (flatX >= r.xMin && flatX <= r.xMax && flatZ >= r.zMin && flatZ <= r.zMax) {
-            inside = true
-            break
+            inside = true; break
           }
         }
         if (inside) { excluded++; continue }
       }
-      // Flat-net authoring: root at (x, groundOffset, z). Sphere projection
-      // shader (applied in sphere mode) will warp y into the radial direction;
-      // in flat/cube-net/split previews the blade stays at this Y directly.
-      flatPositions.push(new THREE.Vector3(flatX, groundOffset, flatZ))
-      flatPositions2D.push(new THREE.Vector2(flatX, flatZ))
-      hues.push(Math.random())
-      yaws.push(Math.random() * Math.PI * 2)
-      scales.push(0.75 + Math.random() * 0.5) // 0.75–1.25
+      // Even 20% split across buckets.
+      const bucketIdx = Math.min(4, Math.floor(Math.random() * 5))
+      const bucket = BUCKETS[bucketIdx]
+      const bp = per[bucket]
+      bp.positions.push(new THREE.Vector3(flatX, groundOffset, flatZ))
+      bp.positions2D.push(new THREE.Vector2(flatX, flatZ))
+      bp.hues.push(Math.random())
+      bp.yaws.push(Math.random() * Math.PI * 2)
+      bp.scales.push(0.75 + Math.random() * 0.5)
+      debugFlat.push(flatX, flatZ)
     }
   }
 
-  const count = flatPositions.length
+  const allowedTotal =
+    per.grass.positions.length + per.pink.positions.length + per.purple.positions.length +
+    per.yellow.positions.length + per.red.positions.length
 
-  // Shuffle the candidate order so that reducing mesh.count (density < 100%)
-  // produces a UNIFORMLY RANDOM subset of blades across the whole net. Without
-  // this, candidates are grouped face-by-face (E, A, B, F, C, D in that
-  // order), and Three.js renders the first N instances — so the field would
-  // appear block-by-block instead of thinning out everywhere equally.
-  // Fisher-Yates on an index array keeps the four parallel arrays in sync.
-  const perm = new Array(count)
-  for (let i = 0; i < count; i++) perm[i] = i
-  for (let i = count - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1))
-    const tmp = perm[i]
-    perm[i] = perm[j]
-    perm[j] = tmp
-  }
-  const shuffledHues = new Float32Array(count)
-  for (let i = 0; i < count; i++) shuffledHues[i] = hues[perm[i]]
-
-  // ── Step 3: geometry + per-instance hue attribute ──────────────────────
-  const geom = buildBladeGeometry(bladeWidth, bladeHeight)
-  const hueAttr = new THREE.InstancedBufferAttribute(shuffledHues, 1)
-  geom.setAttribute('iHue', hueAttr)
-
-  // ── Step 4: material — MSM + onBeforeCompile for rigid-rotation wind +
-  //            procedural blade alpha. Sphere projection patch in TileGrid
-  //            chains onto this patch via prevOBC; both stack cleanly. ────
-  const material = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    roughness: 0.88,
-    metalness: 0,
-    side: THREE.DoubleSide,
-    alphaTest: 0.5,
-    transparent: false,
-  })
-  const ud = material.userData as { __grassPatched?: boolean }
-  if (!ud.__grassPatched) {
-    ud.__grassPatched = true
-    material.onBeforeCompile = shader => {
-      shader.uniforms.uTime         = grassUniforms.uTime
-      shader.uniforms.uWindDir      = grassUniforms.uWindDir
-      shader.uniforms.uWindStrength = grassUniforms.uWindStrength
-      shader.uniforms.uWindFreq     = grassUniforms.uWindFreq
-      shader.uniforms.uWaveScale    = grassUniforms.uWaveScale
-      shader.uniforms.uBendAmount   = grassUniforms.uBendAmount
-      shader.uniforms.uLengthScale  = grassUniforms.uLengthScale
-      shader.uniforms.uBaseColor    = grassUniforms.uBaseColor
-      shader.uniforms.uTipColor     = grassUniforms.uTipColor
-      shader.uniforms.uHueJitter    = grassUniforms.uHueJitter
-
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          '#include <common>',
-          /* glsl */`
-          #include <common>
-          attribute float iHue;
-          varying float vHue;
-          varying vec2  vGrassUv;
-          uniform float uTime;
-          uniform vec2  uWindDir;
-          uniform float uWindStrength;
-          uniform float uWindFreq;
-          uniform float uWaveScale;
-          uniform float uBendAmount;
-          uniform float uLengthScale;
-          `,
-        )
-        .replace(
-          '#include <begin_vertex>',
-          /* glsl */`
-          vec3 transformed = vec3(position);
-          vGrassUv = uv;
-          vHue = iHue;
-
-          // --- Instance world origin (translation column of instanceMatrix).
-          //     Used as the spatial reference for the wave phase so the whole
-          //     field rolls as one coherent sheet in the wind direction.
-          vec3 instOrigin = vec3(instanceMatrix[3].xyz);
-
-          // --- World-space wind direction, lifted to 3D by interpreting
-          //     uWindDir.x,y as (x, z) components on the world xz plane.
-          vec3 worldWind3 = normalize(vec3(uWindDir.x, 0.0, uWindDir.y) + vec3(1e-4));
-
-          // --- Spatial + temporal phase → single coherent wave.
-          float spatialPhase = dot(instOrigin, worldWind3) * uWaveScale;
-          float wave = sin(uTime * uWindFreq - spatialPhase);
-          float gust = sin(uTime * uWindFreq * 0.47 - spatialPhase * 0.63);
-          float amp  = wave * 0.75 + gust * 0.25;
-
-          // --- Wind direction in the BLADE-LOCAL tangent plane. Extract the
-          //     instance rotation by normalising each column of instanceMatrix
-          //     (handles the per-instance uniform scale). Transpose = inverse
-          //     for the orthonormalised rotation.
-          mat3 iRot = mat3(
-            normalize(instanceMatrix[0].xyz),
-            normalize(instanceMatrix[1].xyz),
-            normalize(instanceMatrix[2].xyz)
-          );
-          vec3 localWind = transpose(iRot) * worldWind3;
-          vec2 bendDir2 = normalize(vec2(localWind.x, localWind.z) + vec2(1e-5));
-
-          // --- Length-preserving rigid rotation of the blade around its root.
-          //     Axis of rotation k = Y × bendDir (in the local XZ plane), so
-          //     tilting by angle θ sends local +Y toward (bendDir.x, *, bendDir.y).
-          //     Length is preserved by construction — rotations are isometries.
-          float theta = amp * uWindStrength * uBendAmount;
-          float c = cos(theta);
-          float s = sin(theta);
-          float oc = 1.0 - c;
-          vec3 k = vec3(bendDir2.y, 0.0, -bendDir2.x);
-
-          // Scale height by uLengthScale BEFORE the rigid rotation — this
-          // grows/shrinks the blade uniformly from root. Rotation is still
-          // an isometry on the scaled vector, so length preservation under
-          // wind holds for whatever the user dialled in.
-          vec3 p = vec3(position.x, position.y * uLengthScale, position.z);
-
-          // Rodrigues: p' = p·cos + (k×p)·sin + k·(k·p)·(1−cos)
-          vec3 kxp = cross(k, p);
-          float kdotp = dot(k, p);
-          transformed = p * c + kxp * s + k * kdotp * oc;
-          `,
-        )
-
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
-          '#include <common>',
-          /* glsl */`
-          #include <common>
-          varying float vHue;
-          varying vec2  vGrassUv;
-          uniform vec3  uBaseColor;
-          uniform vec3  uTipColor;
-          uniform float uHueJitter;
-          `,
-        )
-        .replace(
-          '#include <map_fragment>',
-          /* glsl */`
-          // Procedural blade shape — taper narrower toward tip, discard
-          // fragments outside the taper envelope. alphaTest handles sorting.
-          float ux     = abs(vGrassUv.x - 0.5) * 2.0;
-          float taper  = mix(1.0, 0.18, vGrassUv.y);
-          if (ux > taper) discard;
-          vec3 gc = mix(uBaseColor, uTipColor, vGrassUv.y);
-          gc *= 1.0 + (vHue - 0.5) * 2.0 * uHueJitter;
-          diffuseColor.rgb *= gc;
-          `,
-        )
+  // Step 3 — build five meshes via a helper. Each bucket gets its own shuffle
+  // so per-mesh density scaling thins uniformly across the whole net within
+  // that bucket.
+  function buildBucketMesh(bucket: Bucket): { mesh: THREE.InstancedMesh; max: number } {
+    const bp = per[bucket]
+    const n = bp.positions.length
+    const perm: number[] = []
+    for (let i = 0; i < n; i++) perm.push(i)
+    for (let i = n - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      const t = perm[i]; perm[i] = perm[j]; perm[j] = t
     }
+    const shuffledHues = new Float32Array(n)
+    for (let i = 0; i < n; i++) shuffledHues[i] = bp.hues[perm[i]]
+
+    const isGrass = bucket === 'grass'
+    const geom = isGrass
+      ? buildBladeGeometry(bladeWidth, bladeHeight)
+      : buildBladeGeometry(flowerWidth, flowerHeight)
+    geom.setAttribute('iHue', new THREE.InstancedBufferAttribute(shuffledHues, 1))
+
+    const material = isGrass
+      ? createGrassMaterial()
+      : createFlowerMaterial(flowerColorUniforms[bucket])
+
+    const mesh = new THREE.InstancedMesh(geom, material, Math.max(1, n))
+    mesh.name = isGrass ? 'grass' : `flower-${bucket}`
+    mesh.frustumCulled = false
+    mesh.castShadow = false
+    mesh.receiveShadow = false
+    mesh.raycast = () => {}
+
+    const _mat   = new THREE.Matrix4()
+    const _q     = new THREE.Quaternion()
+    const _scale = new THREE.Vector3()
+    const _axisY = new THREE.Vector3(0, 1, 0)
+    for (let i = 0; i < n; i++) {
+      const src = perm[i]
+      _q.setFromAxisAngle(_axisY, bp.yaws[src])
+      const s = bp.scales[src]
+      _scale.set(s, s, s)
+      _mat.compose(bp.positions[src], _q, _scale)
+      mesh.setMatrixAt(i, _mat)
+    }
+    mesh.instanceMatrix.needsUpdate = true
+    // Initial visible count: grass ~50% of its max so the planet reads green
+    // by default; flowers 25% so there are visible blossoms without the field
+    // being drowned in colour.
+    mesh.count = Math.floor(n * (isGrass ? 0.5 : 0.25))
+    return { mesh, max: n }
   }
 
-  // ── Step 5: InstancedMesh + per-instance matrices ─────────────────────
-  const mesh = new THREE.InstancedMesh(geom, material, count)
-  mesh.name = 'grass'
-  // Authoring frame is flat cube-net space. Sphere projection moves vertices
-  // far from the geometry's bounding sphere, so rely on the surrounding cell
-  // clip-planes for culling instead of frustum culling (matches every other
-  // patched prop in the diorama).
-  mesh.frustumCulled = false
-  mesh.castShadow = false
-  mesh.receiveShadow = false
-  // Don't let raycasts hit grass — the DoF cursor-follow and tile interaction
-  // raycast against the planet and must land on the tile-owning surface.
-  mesh.raycast = () => {}
-
-  const _mat   = new THREE.Matrix4()
-  const _q     = new THREE.Quaternion()
-  const _scale = new THREE.Vector3()
-  const _axisY = new THREE.Vector3(0, 1, 0)
-  for (let i = 0; i < count; i++) {
-    // Walk instances in shuffled order so `mesh.count = N` selects a random
-    // subset across ALL face blocks, not just the first ones sampled.
-    const src = perm[i]
-    _q.setFromAxisAngle(_axisY, yaws[src])
-    const s = scales[src]
-    _scale.set(s, s, s)
-    _mat.compose(flatPositions[src], _q, _scale)
-    mesh.setMatrixAt(i, _mat)
+  const built: Record<Bucket, { mesh: THREE.InstancedMesh; max: number }> = {
+    grass:  buildBucketMesh('grass'),
+    pink:   buildBucketMesh('pink'),
+    purple: buildBucketMesh('purple'),
+    yellow: buildBucketMesh('yellow'),
+    red:    buildBucketMesh('red'),
   }
-  mesh.instanceMatrix.needsUpdate = true
 
-  // Initial visible count matches Leva's default density slider value (5/10).
-  // GrassPanel's useEffect may fire BEFORE this mesh is published (the panel
-  // mounts outside Canvas), so set the default here to avoid a first-frame
-  // flash at full density.
-  mesh.count = Math.floor(count * 0.5)
-
-  // Publish shared handle so Leva panel can scale mesh.count + toggle visible.
-  grassRefs.mesh = mesh
-  grassRefs.maxCount = count
-
-  // Publish density-map debug data for the overlay.
-  const flatArr = new Float32Array(flatPositions2D.length * 2)
-  for (let i = 0; i < flatPositions2D.length; i++) {
-    flatArr[i * 2] = flatPositions2D[i].x
-    flatArr[i * 2 + 1] = flatPositions2D[i].y
+  const meshes = BUCKETS.map(b => built[b].mesh)
+  const maxPerBucket: Record<Bucket, number> = {
+    grass:  built.grass.max,
+    pink:   built.pink.max,
+    purple: built.purple.max,
+    yellow: built.yellow.max,
+    red:    built.red.max,
   }
+
+  // Publish refs.
+  grassRefs.mesh        = built.grass.mesh
+  grassRefs.maxCount    = built.grass.max
+  grassRefs.meadowMeshes = meshes
+  grassRefs.meadowMax   = maxPerBucket
+
+  // Density-map debug data.
+  const flatArr = new Float32Array(debugFlat)
   grassDebug.data = {
     halfW: 4,
     halfH: 3,
     blocks: FACE_BLOCKS.map(b => ({ face: b.face, cx: b.cx, cz: b.cz, halfSize: 1 })),
     exclusions: exclusions.map(e => ({ ...e })),
     flatPositions: flatArr,
-    stats: { candidates: totalCandidates, allowed: count, excluded },
+    stats: { candidates: totalCandidates, allowed: allowedTotal, excluded },
   }
   if (import.meta.env?.DEV && typeof window !== 'undefined') {
-    ;(window as unknown as Record<string, unknown>).__grass = { mesh, uniforms: grassUniforms, refs: grassRefs }
+    ;(window as unknown as Record<string, unknown>).__grass = {
+      mesh: built.grass.mesh,
+      meshes,
+      uniforms: grassUniforms,
+      flowerColors: flowerColorUniforms,
+      refs: grassRefs,
+    }
   }
 
   const update = (elapsed: number) => {
@@ -499,19 +550,38 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   }
 
   const dispose = () => {
-    geom.dispose()
-    material.dispose()
-    if (grassRefs.mesh === mesh) {
+    for (const b of BUCKETS) {
+      built[b].mesh.geometry.dispose()
+      const m = built[b].mesh.material
+      if (Array.isArray(m)) m.forEach(x => x.dispose())
+      else m.dispose()
+    }
+    if (grassRefs.mesh === built.grass.mesh) {
       grassRefs.mesh = null
       grassRefs.maxCount = 0
+      grassRefs.meadowMeshes = []
+      grassRefs.meadowMax = { grass: 0, pink: 0, purple: 0, yellow: 0, red: 0 }
     }
   }
 
   return {
-    mesh,
+    grass:   built.grass.mesh,
+    flowers: { pink: built.pink.mesh, purple: built.purple.mesh, yellow: built.yellow.mesh, red: built.red.mesh },
+    meshes,
     uniforms: grassUniforms,
     update,
     dispose,
-    stats: { candidates: totalCandidates, allowed: count, excluded },
+    stats: {
+      candidates: totalCandidates,
+      allowed: allowedTotal,
+      excluded,
+      perBucket: {
+        grass:  built.grass.max,
+        pink:   built.pink.max,
+        purple: built.purple.max,
+        yellow: built.yellow.max,
+        red:    built.red.max,
+      },
+    },
   }
 }
