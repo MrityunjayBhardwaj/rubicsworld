@@ -29,8 +29,10 @@ either side means changing both — the validator reads these from here.
 """
 
 import os
+import time
 import bpy
 import mathutils
+from bpy.app.handlers import persistent
 
 # ── Cross cube-net geometry (matches buildDiorama.ts / buildGrass.ts) ──────
 # IMPORTANT: coordinates below are in BLENDER space (Z-up). The glTF exporter
@@ -89,6 +91,104 @@ def _glb_path(context) -> str:
     return os.path.join(bpy.path.abspath(root), "public", "diorama.glb")
 
 
+# ── Live mode (auto-export on scene change) ────────────────────────────────
+
+# Module-scoped state — BoolProperty on Scene would persist per-blend, but
+# timers and handlers need a stable cross-scene reference. Kept minimal:
+# one flag for the toggle, a dirty-bit the depsgraph handler sets, and the
+# last-export wall-clock so the panel can show "exported Xs ago".
+_LIVE = {
+    "enabled": False,
+    "dirty": False,
+    "last_export_wall": 0.0,
+    "last_export_ok": True,
+    "last_path": "",
+}
+
+
+def _do_export_current(path: str) -> tuple[bool, int]:
+    """Run the glTF exporter with the pipeline flags. Returns (ok, size).
+    Safe to call from a timer — doesn't touch the active operator's stack.
+    """
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        bpy.ops.export_scene.gltf(
+            filepath=path,
+            export_format='GLB',
+            export_yup=True,
+            export_apply=True,
+            export_animations=True,
+            export_skins=True,
+            export_morph=True,
+            export_cameras=False,
+            export_lights=False,
+        )
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        return True, size
+    except Exception as e:
+        print(f"[rubics-live] export failed: {e}")
+        return False, 0
+
+
+@persistent
+def _live_depsgraph_handler(scene, depsgraph):
+    """Fired on EVERY depsgraph update when Blender has finished recomputing.
+    Just flips a dirty bit; the timer does the actual work so we don't run
+    the exporter from inside the evaluation pipeline (which is fragile).
+    """
+    if _LIVE["enabled"]:
+        _LIVE["dirty"] = True
+
+
+def _live_tick():
+    """Timer callback — runs every LIVE_DEBOUNCE seconds while live mode is
+    on. Exports iff the dirty bit was set since the last tick. Returns the
+    next interval, or None to stop the timer.
+    """
+    if not _LIVE["enabled"]:
+        return None
+    # Don't export mid-edit — mesh data can be in an intermediate state.
+    if bpy.context.mode != 'OBJECT':
+        return LIVE_DEBOUNCE
+    if not _LIVE["dirty"]:
+        return LIVE_DEBOUNCE
+    _LIVE["dirty"] = False
+    # Resolve path via preferences without a context arg (timers get no ctx).
+    try:
+        prefs = bpy.context.preferences.addons[__name__].preferences
+        root = prefs.project_path
+    except Exception:
+        root = ""
+    if not root:
+        return LIVE_DEBOUNCE
+    path = os.path.join(bpy.path.abspath(root), "public", "diorama.glb")
+    ok, size = _do_export_current(path)
+    _LIVE["last_export_wall"] = time.time()
+    _LIVE["last_export_ok"] = ok
+    _LIVE["last_path"] = path
+    if ok:
+        print(f"[rubics-live] auto-exported {size} bytes → {path}")
+    return LIVE_DEBOUNCE
+
+
+def _live_start():
+    if _live_depsgraph_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_live_depsgraph_handler)
+    _LIVE["enabled"] = True
+    _LIVE["dirty"] = True  # Force an export on first tick so the initial
+                            # state matches the live file immediately.
+    if not bpy.app.timers.is_registered(_live_tick):
+        bpy.app.timers.register(_live_tick, first_interval=LIVE_DEBOUNCE)
+
+
+def _live_stop():
+    _LIVE["enabled"] = False
+    if _live_depsgraph_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_live_depsgraph_handler)
+    if bpy.app.timers.is_registered(_live_tick):
+        bpy.app.timers.unregister(_live_tick)
+
+
 # ── Validation ─────────────────────────────────────────────────────────────
 
 #: object names that are allowed to span the entire cross cube-net without
@@ -108,6 +208,11 @@ DOMAIN_Y = (-3.0, 3.0)
 #: The sphere-projection shader saturates prop elevation against a bezier
 #: curve normalised over [0, MAX_HEIGHT]; authoring above this just clamps.
 MAX_HEIGHT = 1.0
+
+#: Live-mode debounce (seconds) — minimum gap between auto-exports. The
+#: depsgraph fires constantly during editing, so we coalesce updates into
+#: at most one export per this interval.
+LIVE_DEBOUNCE = 1.5
 
 
 def _name_prefix_allowed(name: str) -> bool:
@@ -325,6 +430,31 @@ class RUBICS_OT_AddGuides(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RUBICS_OT_LiveToggle(bpy.types.Operator):
+    bl_idname = "rubics.live_toggle"
+    bl_label = "Live Mode"
+    bl_description = ("Auto-export to <project>/public/diorama.glb on every "
+                      "scene change (debounced). Vite HMR reloads the app "
+                      "so your edits appear at http://localhost:5174/?glb=1 "
+                      "within a couple of seconds.")
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        path = _glb_path(context)
+        if not path:
+            self.report({'ERROR'}, "Set Project Path in addon preferences first")
+            return {'CANCELLED'}
+        if _LIVE["enabled"]:
+            _live_stop()
+            self.report({'INFO'}, "Live mode OFF")
+        else:
+            _live_start()
+            self.report({'INFO'},
+                "Live mode ON — edits auto-export to public/diorama.glb. "
+                "Visit http://localhost:5174/?glb=1")
+        return {'FINISHED'}
+
+
 class RUBICS_OT_RemoveGuides(bpy.types.Operator):
     bl_idname = "rubics.remove_guides"
     bl_label = "Remove Guides"
@@ -368,6 +498,26 @@ class RUBICS_PT_Panel(bpy.types.Panel):
         col.operator(RUBICS_OT_Validate.bl_idname, icon='CHECKMARK')
 
         layout.separator()
+        box = layout.box()
+        row = box.row()
+        row.label(text="Live mode:", icon='REC' if _LIVE["enabled"] else 'PAUSE')
+        row.operator(
+            RUBICS_OT_LiveToggle.bl_idname,
+            text="ON" if _LIVE["enabled"] else "OFF",
+            depress=_LIVE["enabled"],
+        )
+        if _LIVE["enabled"]:
+            if _LIVE["last_export_wall"] > 0:
+                ago = max(0, int(time.time() - _LIVE["last_export_wall"]))
+                status = "✓" if _LIVE["last_export_ok"] else "✗"
+                box.label(text=f"  last export: {ago}s ago {status}")
+            else:
+                box.label(text="  waiting for first change…")
+            box.label(text="http://localhost:5174/?glb=1")
+        else:
+            box.label(text="Toggle ON to auto-export on change")
+
+        layout.separator()
         col = layout.column(align=True)
         col.label(text="Reference guides:")
         col.operator(RUBICS_OT_AddGuides.bl_idname,    icon='GRID')
@@ -375,9 +525,9 @@ class RUBICS_PT_Panel(bpy.types.Panel):
 
         layout.separator()
         box = layout.box()
-        box.label(text="Live preview:")
-        box.label(text="npm run dev → visit")
-        box.label(text="http://localhost:5174/?glb=1")
+        box.label(text="Dev server:")
+        box.label(text="cd <project> && npm run dev")
+        box.label(text="→ http://localhost:5174/?glb=1")
 
 
 # ── Registration ───────────────────────────────────────────────────────────
@@ -387,6 +537,7 @@ CLASSES = [
     RUBICS_OT_Import,
     RUBICS_OT_Export,
     RUBICS_OT_Validate,
+    RUBICS_OT_LiveToggle,
     RUBICS_OT_AddGuides,
     RUBICS_OT_RemoveGuides,
     RUBICS_PT_Panel,
@@ -399,6 +550,10 @@ def register():
 
 
 def unregister():
+    # Make sure live mode's handler + timer are torn down before classes go
+    # away — otherwise Blender holds references to dead operator classes and
+    # crashes on the next depsgraph update.
+    _live_stop()
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
 

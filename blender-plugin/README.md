@@ -29,14 +29,42 @@ the N-sidebar, one preference (project path), three main buttons.
 │ [ Export Diorama ]   validate + write back to public/diorama.glb    │
 │ [ Validate Scene ]   pre-flight checks (no export)                  │
 ├─────────────────────────────────────────────────────────────────────┤
+│ Live mode:    [ ON / OFF ]                                          │
+│   last export: 2s ago  ✓                                            │
+│   http://localhost:5174/?glb=1                                      │
+├─────────────────────────────────────────────────────────────────────┤
 │ Reference guides:                                                   │
-│ [ Add Face-Block Guides ]     6 labelled wireframe rects at y=0     │
+│ [ Add Face-Block Guides ]     6 labelled wireframe cages @ Z∈[0,1]  │
 │ [ Remove Guides ]                                                   │
 ├─────────────────────────────────────────────────────────────────────┤
-│ Live preview:                                                       │
-│   npm run dev → http://localhost:5174/?glb=1                        │
+│ Dev server:                                                         │
+│   cd <project> && npm run dev                                       │
+│   → http://localhost:5174/?glb=1                                    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+## Live mode
+
+Toggle the **Live Mode** button in the panel. While it's ON, the addon:
+
+1. Registers a `depsgraph_update_post` handler that flags the scene "dirty"
+   whenever anything changes.
+2. Polls every 1.5 s via `bpy.app.timers`. If the dirty flag is set AND
+   you're in Object mode (no mid-edit state), it runs the same glTF export
+   as the **Export Diorama** button and clears the flag.
+3. Vite's dev server is already watching `public/`, so as soon as the new
+   `.glb` lands it hot-reloads the page.
+
+**View the live diorama at → http://localhost:5174/?glb=1**
+
+Notes:
+- Edit-mode changes don't export until you leave edit-mode (safer than
+  exporting mid-triangulation).
+- Debounce is 1.5 s — rapid-fire edits collapse into one export per tick.
+- The panel shows `last export: Ns ago ✓` so you know the round-trip is
+  working.
+- Turn OFF when you're done iterating — the handler adds some per-update
+  overhead.
 
 1. **Start the dev server** in the project: `npm run dev`.
 2. **Import Diorama** — or use the included sample from `make-sample.py`
