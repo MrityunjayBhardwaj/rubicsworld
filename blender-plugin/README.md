@@ -52,29 +52,42 @@ the N-sidebar, one preference (project path), three main buttons.
 
 ## Pre-flight validator
 
-Fires on **Export Diorama** and **Validate Scene**. Checks:
+Fires on **Export Diorama** and **Validate Scene**. Coordinates are Blender
+native (Z up, XY ground). Checks:
 
 | Level | Rule | Why |
 |---|---|---|
-| ERROR | mesh world-AABB must fit inside one face-block | seam-straddling breaks the fold: what looks adjacent in flat space may meet a non-adjacent face on the cube |
-| WARNING | `y_min < 0` | the sphere shader projects sub-zero y into the planet interior — usually a modelling accident |
-| WARNING | flat span > 1 unit with fewer than 8 verts per unit along that axis | vyapti PV1: long low-poly meshes chord through the sphere and render invisible |
+| ERROR | mesh world-AABB must fit inside one **unfold row** | rows don't share cube edges — a mesh crossing from the middle row into the top or bottom row folds into a non-adjacent face |
+| WARNING | `z_min < 0` | sub-terrain geometry gets spherified into the planet interior (usually a modelling accident) |
+| WARNING | ground-plane span > 1 unit with fewer than 8 verts per unit along that axis | vyapti PV1 — long low-poly meshes chord through the sphere and render invisible. This is why the road is subdivided. |
 
 Errors abort the export. Warnings are printed but the export proceeds.
 
-## Face-block table
+**Unfold rows** — an object must fit inside ONE of these (spanning X within the middle row is fine, e.g. the road):
 
-Matches `src/diorama/buildDiorama.ts` 1:1 — changing either side means
-changing both.
+| Row | X range | Y range |
+|---|---|---|
+| middle (B, E, A, F) | [−4, 4] | [−1, 1] |
+| top (C) | [−2, 0] | [ 1, 3] |
+| bottom (D) | [−2, 0] | [−3, −1] |
 
-| Name | Cube face | X range | Z range |
+## Face-block table (Blender Z-up)
+
+Labelled reference for each 2×2 block inside the rows above. Guides use
+these:
+
+| Name | Cube face | X range | Y range |
 |---|---|---|---|
-| E | +Z | [−2, 0] | [−1, 1] |
-| A | +X | [ 0, 2] | [−1, 1] |
-| B | −X | [−4, −2] | [−1, 1] |
-| F | −Z | [ 2, 4] | [−1, 1] |
-| C | +Y | [−2, 0] | [ 1, 3] |
-| D | −Y | [−2, 0] | [−3, −1] |
+| E | +Z (front) | [−2, 0] | [−1, 1] |
+| A | +X (right) | [ 0, 2] | [−1, 1] |
+| B | −X (left) | [−4, −2] | [−1, 1] |
+| F | −Z (back) | [ 2, 4] | [−1, 1] |
+| C | +Y (top) | [−2, 0] | [ 1, 3] |
+| D | −Y (bottom) | [−2, 0] | [−3, −1] |
+
+The glTF export uses `+Y Up`, so on the three-js side Blender Y becomes
+three's Z — the app's `buildDiorama.ts` table uses that three-js frame.
+Same cross shape, axes renamed.
 
 ## Animations
 
