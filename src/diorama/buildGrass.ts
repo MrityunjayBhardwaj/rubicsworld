@@ -128,6 +128,11 @@ export const grassRefs: {
    *  Registered by GrassPanel, called by TileGrid after a hot-reload swap
    *  so density / flower split / colours / wind survive the scene rebuild. */
   reapplyControls: (() => void) | null
+  /** Currently-loaded painted mask. Persists across hot-reload swaps so a
+   *  glb rewrite doesn't drop back to AABB exclusion. Set by rebuildWithMask,
+   *  cleared when rebuildWithMask(null) is called. loadGlbDiorama reads
+   *  this and forwards it to buildGrass on every rebuild. */
+  activeMask: ImageData | null
 } = {
   mesh: null,
   maxCount: 0,
@@ -137,6 +142,7 @@ export const grassRefs: {
   rebuildWithMask: null,
   saveDiorama: null,
   reapplyControls: null,
+  activeMask: null,
 }
 
 export interface GrassDebugData {
