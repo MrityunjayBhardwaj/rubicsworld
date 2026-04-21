@@ -603,17 +603,19 @@ export function TileGrid({ mode = 'split', bezier }: {
     // the stub root and attach the loaded scene (reapplying the sphere
     // projection patch on the new materials). All cleanup goes through
     // dioramaRef.current so whatever root is live gets disposed on unmount.
-    if (glbPath) {
-      let cancelled = false
-      void loadGlbDiorama(glbPath).then(loaded => {
-        if (cancelled) return
-        const next = loaded ?? buildDiorama({ includeTerrain: mode !== 'sphere' })
+    let swapCancelled = false
+    const swapInScene = (url: string, fallbackMode: 'imperative' | 'none' = 'imperative') => {
+      return loadGlbDiorama(url).then(loaded => {
+        if (swapCancelled) return
+        const next = loaded ?? (
+          fallbackMode === 'imperative'
+            ? buildDiorama({ includeTerrain: mode !== 'sphere' })
+            : null
+        )
+        if (!next) return  // keep current scene on failed reload
         const prev = dioramaRef.current
         if (prev) {
           dScene.remove(prev.root)
-          // Dispose the stub root's contents (cheap — it was empty) or the
-          // throwaway imperative meshes if the glb load failed AFTER we
-          // built one.
           prev.root.traverse(c => {
             const m = c as THREE.Mesh
             if (!m.isMesh) return
@@ -632,11 +634,32 @@ export function TileGrid({ mode = 'split', bezier }: {
         diorama = next
         dioramaRef.current = next
       })
-      // Register a cancellation hook so unmount during load doesn't attach
-      // into a stale dScene. Uses the existing return-cleanup closure.
-      const origCleanup = () => { cancelled = true }
-      // Stash on the ref so the outer cleanup can call it (see return below).
-      ;(dioramaRef as unknown as { _cancelSwap?: () => void })._cancelSwap = origCleanup
+    }
+
+    if (glbPath) {
+      void swapInScene(glbPath)
+      // Stash cancellation on the ref so the outer cleanup can flip it.
+      ;(dioramaRef as unknown as { _cancelSwap?: () => void })._cancelSwap = () => {
+        swapCancelled = true
+      }
+
+      // HMR hot-reload: Vite plugin fires `diorama:changed` when
+      // public/diorama.glb is rewritten (by the Blender addon's Live Mode).
+      // We refetch with a cache-bust query, swap scene in place — no page
+      // reload, so Leva knobs + camera angle + tutorial state all survive.
+      // `fallbackMode='none'` → if the new file is briefly invalid (mid-
+      // write race), keep the previous scene instead of dropping back to
+      // imperative.
+      if (import.meta.hot) {
+        const onDioramaChanged = ({ ts }: { ts: number }) => {
+          void swapInScene(`${glbPath}?t=${ts}`, 'none')
+        }
+        import.meta.hot.on('diorama:changed', onDioramaChanged)
+        // Cleanup wired into the effect teardown below via the hmr off hook.
+        ;(dioramaRef as unknown as { _offHmr?: () => void })._offHmr = () => {
+          import.meta.hot?.off('diorama:changed', onDioramaChanged)
+        }
+      }
     }
 
     // Publish a top-down cube-net snapshot callback for GrassPanel's "save"
@@ -771,6 +794,7 @@ export function TileGrid({ mode = 'split', bezier }: {
       grassRefs.rebuildWithMask = null
       grassRefs.saveDiorama = null
       ;(dioramaRef as unknown as { _cancelSwap?: () => void })._cancelSwap?.()
+      ;(dioramaRef as unknown as { _offHmr?: () => void })._offHmr?.()
       // Dispose whatever root is LIVE in the ref (may be the stub, the
       // imperative fallback, or the loaded glb — all same disposal shape).
       const live = dioramaRef.current ?? diorama
