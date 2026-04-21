@@ -14,7 +14,7 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import type { DioramaScene } from './buildDiorama'
-import { buildGrass } from './buildGrass'
+import { buildGrass, grassRefs } from './buildGrass'
 
 /** Collapse visually-identical materials onto a single shared instance.
  *  Fingerprint includes every property the sphere-projection onBeforeCompile
@@ -147,7 +147,10 @@ export async function loadGlbDiorama(
   // pond, road, etc. — so blender outliner naming carries over.
   let grass: ReturnType<typeof buildGrass> | null = null
   if (includeMeadow) {
-    grass = buildGrass(root)
+    // Thread the currently-loaded painted mask (if any) through to buildGrass
+    // so hot-reload swaps don't silently drop back to AABB exclusion. Null
+    // ⇒ default AABB path.
+    grass = buildGrass(root, { maskImage: grassRefs.activeMask })
     for (const m of grass.meshes) root.add(m)
   }
 
