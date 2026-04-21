@@ -104,6 +104,11 @@ SUBTERRAIN_NOISE = 0.10
 DOMAIN_X = (-4.0, 4.0)
 DOMAIN_Y = (-3.0, 3.0)
 
+#: Portal-region height ceiling — matches `uMaxHeight` in TileGrid.tsx.
+#: The sphere-projection shader saturates prop elevation against a bezier
+#: curve normalised over [0, MAX_HEIGHT]; authoring above this just clamps.
+MAX_HEIGHT = 1.0
+
 
 def _name_prefix_allowed(name: str) -> bool:
     base = name.lower().split('.')[0]
@@ -281,12 +286,22 @@ class RUBICS_OT_AddGuides(bpy.types.Operator):
                 bpy.data.objects.remove(obj, do_unlink=True)
 
         for name, face, x0, x1, y0, y1 in FACE_BLOCKS:
-            # Guides lie flat on Blender's ground plane (XY, Z=0).
+            # 3D wireframe cage showing the full authoring volume per block:
+            # ground rectangle (Z=0) + ceiling rectangle at Z=MAX_HEIGHT
+            # (the sphere-projection height cap — props above this clamp)
+            # + four vertical edges connecting them. Reads as a translucent
+            # "portal region" box so you know when a tree is poking past
+            # the ceiling.
+            z0, z1 = 0.0, MAX_HEIGHT
             verts = [
-                (x0, y0, 0), (x1, y0, 0),
-                (x1, y1, 0), (x0, y1, 0),
+                (x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),  # ground
+                (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1),  # ceiling
             ]
-            edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+            edges = [
+                (0, 1), (1, 2), (2, 3), (3, 0),  # ground rect
+                (4, 5), (5, 6), (6, 7), (7, 4),  # ceiling rect
+                (0, 4), (1, 5), (2, 6), (3, 7),  # vertical posts
+            ]
             mesh = bpy.data.meshes.new(f"rubics-guide-{name}")
             mesh.from_pydata(verts, edges, [])
             mesh.update()
@@ -295,9 +310,9 @@ class RUBICS_OT_AddGuides(bpy.types.Operator):
             obj.hide_select = True
             context.scene.collection.objects.link(obj)
 
-            # Text label at block centre, also flat on XY at Z=0.01 so it's
-            # readable from the top-down view that authors use while laying
-            # out the diorama.
+            # Text label at block centre, floating just above the ground rect
+            # so it's visible from both orthographic and perspective views.
+            # Preserves the face name + cube-normal annotation.
             txt_data = bpy.data.curves.new(name=f"rubics-guide-{name}-label", type='FONT')
             txt_data.body = f"{name} {face}"
             txt_data.size = 0.22
