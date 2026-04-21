@@ -30,6 +30,7 @@ either side means changing both — the validator reads these from here.
 
 import os
 import time
+import hashlib
 import bpy
 import mathutils
 from bpy.app.handlers import persistent
@@ -103,7 +104,47 @@ _LIVE = {
     "last_export_wall": 0.0,
     "last_export_ok": True,
     "last_path": "",
+    "last_fingerprint": "",  # set after each successful export
 }
+
+#: Blender datablock types whose updates we care about. Selection / view
+#: rotations / depsgraph housekeeping all get filtered out — only changes
+#: to these types can flip the dirty bit.
+_LIVE_RELEVANT_TYPES = {
+    'Object', 'Mesh', 'Curve', 'Armature',
+    'Material', 'Action', 'ShapeKey', 'Light', 'Camera',
+}
+
+
+def _scene_fingerprint() -> str:
+    """Cheap content hash: object transforms + mesh vert counts + modifier
+    signatures + action frame range. Same fingerprint twice in a row ⇒ the
+    user-visible authoring state hasn't actually changed (the depsgraph may
+    have ticked anyway for reasons we don't care about — viewport rotation,
+    driver re-eval, animation preview, etc.)
+    """
+    h = hashlib.blake2b(digest_size=16)
+    for obj in sorted(bpy.data.objects, key=lambda o: o.name):
+        if obj.name.startswith("rubics-guide-"):
+            continue
+        m = obj.matrix_world
+        # Round to 5 decimal places so sub-micron noise doesn't spoof changes.
+        row_bytes = ";".join(
+            f"{v:.5f}" for v in (
+                m[0][0], m[0][1], m[0][2], m[0][3],
+                m[1][0], m[1][1], m[1][2], m[1][3],
+                m[2][0], m[2][1], m[2][2], m[2][3],
+            )
+        )
+        h.update(f"{obj.name}|{obj.type}|{row_bytes}|".encode())
+        if obj.type == 'MESH' and obj.data is not None:
+            h.update(f"v{len(obj.data.vertices)}p{len(obj.data.polygons)}|".encode())
+        for mod in getattr(obj, "modifiers", []) or []:
+            h.update(f"{mod.type}:{mod.name}|".encode())
+    for act in sorted(bpy.data.actions, key=lambda a: a.name):
+        fs, fe = act.frame_range
+        h.update(f"ACT|{act.name}|{fs:.3f}|{fe:.3f}|".encode())
+    return h.hexdigest()
 
 
 def _do_export_current(path: str) -> tuple[bool, int]:
@@ -133,11 +174,23 @@ def _do_export_current(path: str) -> tuple[bool, int]:
 @persistent
 def _live_depsgraph_handler(scene, depsgraph):
     """Fired on EVERY depsgraph update when Blender has finished recomputing.
-    Just flips a dirty bit; the timer does the actual work so we don't run
-    the exporter from inside the evaluation pipeline (which is fragile).
+    Filter aggressively — selection changes, viewport orbits, animation
+    preview ticks, and driver re-evaluations all trigger this handler even
+    though nothing the user cares about actually changed. We only flip the
+    dirty bit if at least one relevant datablock had a transform / geometry
+    / shading mutation; the fingerprint check in _live_tick is the final
+    gate before any bytes hit the disk.
     """
-    if _LIVE["enabled"]:
-        _LIVE["dirty"] = True
+    if not _LIVE["enabled"]:
+        return
+    for upd in depsgraph.updates:
+        # Only real data mutations — not mere re-evaluation triggered by
+        # selection or view state.
+        if not (upd.is_updated_transform or upd.is_updated_geometry or upd.is_updated_shading):
+            continue
+        if type(upd.id).__name__ in _LIVE_RELEVANT_TYPES:
+            _LIVE["dirty"] = True
+            return
 
 
 def _live_tick():
@@ -153,6 +206,15 @@ def _live_tick():
     if not _LIVE["dirty"]:
         return LIVE_DEBOUNCE
     _LIVE["dirty"] = False
+
+    # Second-layer gate: even if the depsgraph flagged a real mutation, the
+    # resulting scene state may match what we already exported (undo/redo
+    # round trip, modal operator cancelled, etc.). Fingerprint check skips
+    # the write when the authoring state is byte-equivalent.
+    fp = _scene_fingerprint()
+    if fp == _LIVE["last_fingerprint"]:
+        return LIVE_DEBOUNCE
+
     # Resolve path via preferences without a context arg (timers get no ctx).
     try:
         prefs = bpy.context.preferences.addons[__name__].preferences
@@ -167,6 +229,7 @@ def _live_tick():
     _LIVE["last_export_ok"] = ok
     _LIVE["last_path"] = path
     if ok:
+        _LIVE["last_fingerprint"] = fp
         print(f"[rubics-live] auto-exported {size} bytes → {path}")
     return LIVE_DEBOUNCE
 
@@ -175,8 +238,8 @@ def _live_start():
     if _live_depsgraph_handler not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_live_depsgraph_handler)
     _LIVE["enabled"] = True
-    _LIVE["dirty"] = True  # Force an export on first tick so the initial
-                            # state matches the live file immediately.
+    _LIVE["dirty"] = True            # force first export on next tick
+    _LIVE["last_fingerprint"] = ""   # so fingerprint compare can't short-circuit
     if not bpy.app.timers.is_registered(_live_tick):
         bpy.app.timers.register(_live_tick, first_interval=LIVE_DEBOUNCE)
 
