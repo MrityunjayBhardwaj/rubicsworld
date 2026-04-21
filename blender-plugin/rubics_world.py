@@ -91,19 +91,59 @@ def _glb_path(context) -> str:
 
 # ── Validation ─────────────────────────────────────────────────────────────
 
+#: object names that are allowed to span the entire cross cube-net without
+#: being flagged — these are the continuous ground surfaces that every cell
+#: render clips per-face. buildDiorama's own terrain + sphere-terrain use
+#: these names.
+WHOLE_NET_ALLOWED = {"terrain", "sphere-terrain", "ground"}
+
+#: Small overflow past a row boundary that's OK (per-cell clip planes eat it
+#: visually). Anything larger gets elevated to an error.
+ROW_OVERFLOW_SOFT = 0.25
+
+#: Below this depth we warn; above is treated as modelling noise.
+SUBTERRAIN_NOISE = 0.10
+
+
+def _name_prefix_allowed(name: str) -> bool:
+    base = name.lower().split('.')[0]
+    return base in WHOLE_NET_ALLOWED
+
+
+def _row_overflow(x_min, x_max, y_min, y_max):
+    """Return (row_name, overflow) for the best-fitting row.
+    Overflow is 0 when the AABB fits; otherwise the max signed distance that
+    sticks out of the closest row. Picks the row with the smallest overflow.
+    """
+    best = ("(outside domain)", float('inf'))
+    for name, rx0, rx1, ry0, ry1 in UNFOLD_ROWS:
+        ovf = max(
+            rx0 - x_min, x_max - rx1,
+            ry0 - y_min, y_max - ry1,
+            0.0,
+        )
+        if ovf < best[1]:
+            best = (name, ovf)
+    return best
+
+
 def validate_scene(context):
     """Return a list of (level, message) tuples — WARNING / ERROR.
 
-    Axes below use Blender-native Z-up:
-      X, Y  → ground plane (the cross cube-net lies flat on XY, Z=0)
-      Z     → height (blades grow up along +Z)
+    Blender-native axes: X, Y = ground plane; Z = height. Validator is
+    PERMISSIVE — it only hard-errors on clearly broken placements and lets
+    the three-js per-cell clip planes handle minor overflows (trees whose
+    leaf sphere barely kisses a face-block edge, etc.)
     """
     issues = []
     for obj in bpy.data.objects:
         if obj.type != 'MESH':
             continue
         if obj.name.startswith("rubics-guide-"):
-            continue  # Don't validate our own reference wireframes.
+            continue
+        if _name_prefix_allowed(obj.name):
+            continue  # Terrain / ground plane — expected to span everything.
+
         corners = [obj.matrix_world @ mathutils.Vector(c) for c in obj.bound_box]
         xs = [v.x for v in corners]
         ys = [v.y for v in corners]
@@ -112,39 +152,34 @@ def validate_scene(context):
         y_min, y_max = min(ys), max(ys)
         z_min, z_max = min(zs), max(zs)
 
-        # Cube-fold rule — must fit inside ONE unfold row (crossing rows
-        # means the flat-adjacent edge folds into a non-adjacent cube edge).
-        # Crossing face-block boundaries WITHIN a row is fine so long as the
-        # mesh is subdivided (PV1 check below) — the road does this on the
-        # equator.
-        in_row = any(
-            x_min >= rx0 - 1e-3 and x_max <= rx1 + 1e-3 and
-            y_min >= ry0 - 1e-3 and y_max <= ry1 + 1e-3
-            for _, rx0, rx1, ry0, ry1 in UNFOLD_ROWS
-        )
-        if not in_row:
+        # Row containment. Small overflow → warning; deep crossing → error.
+        # "Deep" means the mesh's bulk is clearly in two rows, not just its
+        # edge poking over.
+        row, overflow = _row_overflow(x_min, x_max, y_min, y_max)
+        if overflow > ROW_OVERFLOW_SOFT:
             issues.append(('ERROR',
-                f"'{obj.name}' crosses cube-net rows "
+                f"'{obj.name}' crosses cube-net rows by {overflow:.2f} units "
                 f"(x={x_min:.2f}..{x_max:.2f}, y={y_min:.2f}..{y_max:.2f}). "
-                f"Middle row: x∈[-4,4], y∈[-1,1]. Top: x∈[-2,0], y∈[1,3]. "
-                f"Bottom: x∈[-2,0], y∈[-3,-1]."))
-
-        if z_min < -0.01:
+                f"Split it into per-row meshes; rows don't share cube edges."))
+        elif overflow > 1e-3:
             issues.append(('WARNING',
-                f"'{obj.name}' extends below z=0 (z_min={z_min:.3f}) — "
-                f"sub-terrain geometry gets spherified into the planet interior."))
+                f"'{obj.name}' pokes over a row boundary by {overflow:.2f} units "
+                f"— clip planes will handle it, but a tighter fit is safer."))
+
+        # Sub-terrain dip. Ignore the first 10 cm as modelling noise.
+        if z_min < -SUBTERRAIN_NOISE:
+            issues.append(('WARNING',
+                f"'{obj.name}' extends {abs(z_min):.2f} below ground "
+                f"(z_min={z_min:.3f}) — will be buried in the planet interior."))
 
         # vyapti PV1 — long meshes need subdivision for the sphere projection.
-        # Heuristic: ≥8 verts per flat unit along whichever ground axis is
-        # long. Crossing face-block boundaries without enough verts is the
-        # canonical cause of invisible-road bugs.
         long_axis = max(x_max - x_min, y_max - y_min)
         if long_axis > 1.0:
             mesh = obj.data
             nverts = len(mesh.vertices)
             if nverts < 8 * long_axis:
                 issues.append(('WARNING',
-                    f"'{obj.name}' spans {long_axis:.1f} flat-units but only has "
+                    f"'{obj.name}' spans {long_axis:.1f} flat-units with only "
                     f"{nverts} verts — add loop cuts (≥8 per unit) or it will "
                     f"chord through the sphere."))
 
