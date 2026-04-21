@@ -182,6 +182,54 @@ export function GrassPanel() {
     controls.pinkWeight, controls.purpleWeight, controls.yellowWeight, controls.redWeight,
   ])
 
+  // Hot-reload replay hook. On ?glb=1 scene swaps, buildGrass creates fresh
+  // meshes with default mesh.count = 50% of max — that wipes whatever the
+  // user had dialled in. Register a callback TileGrid calls after swap-in
+  // that re-applies every current slider / colour to the new uniforms +
+  // meshes. Controls closed over via a ref so the latest values are always
+  // read (no stale closure).
+  const controlsRef = useRef(controls)
+  controlsRef.current = controls
+  useEffect(() => {
+    grassRefs.reapplyControls = () => {
+      const c = controlsRef.current
+      grassUniforms.uWindStrength.value = c.windStrength
+      grassUniforms.uWindFreq.value     = c.windSpeed
+      grassUniforms.uWaveScale.value    = c.waveScale
+      grassUniforms.uBendAmount.value   = c.bendAmount
+      grassUniforms.uLengthScale.value  = c.length
+      grassUniforms.uWindDir.value.set(c.windDirX, c.windDirZ)
+      grassUniforms.uHueJitter.value    = c.hueJitter
+      grassUniforms.uBaseColor.value.set(new THREE.Color(c.baseColor))
+      grassUniforms.uTipColor.value.set(new THREE.Color(c.tipColor))
+      grassUniforms.uStemColor.value.set(new THREE.Color(c.stemColor))
+      flowerColorUniforms.pink.value.set(new THREE.Color(c.pinkColor))
+      flowerColorUniforms.purple.value.set(new THREE.Color(c.purpleColor))
+      flowerColorUniforms.yellow.value.set(new THREE.Color(c.yellowColor))
+      flowerColorUniforms.red.value.set(new THREE.Color(c.redColor))
+
+      const refs = grassRefs
+      if (!refs.mesh) return
+      refs.mesh.visible = c.visible
+      for (const m of refs.meadowMeshes) m.visible = c.visible
+      const totalVisible = Math.floor(refs.maxCount * (c.density / 50))
+      const flowerShare = Math.floor(totalVisible * (c.flowerPct / 100))
+      refs.mesh.count = Math.max(0, Math.min(refs.maxCount, totalVisible - flowerShare))
+      const weights: Record<FlowerKey, number> = {
+        pink: c.pinkWeight, purple: c.purpleWeight,
+        yellow: c.yellowWeight, red: c.redWeight,
+      }
+      const sumW = Math.max(1e-6, weights.pink + weights.purple + weights.yellow + weights.red)
+      for (const key of FLOWER_KEYS) {
+        const desired = Math.floor(flowerShare * (weights[key] / sumW))
+        const mesh = refs.meadowMeshes.find(m => m.name === `flower-${key}`)
+        if (!mesh) continue
+        mesh.count = Math.max(0, Math.min(refs.meadowMax[key], desired))
+      }
+    }
+    return () => { grassRefs.reapplyControls = null }
+  }, [])
+
   return controls.densityMap ? <DensityMapOverlay /> : null
 }
 

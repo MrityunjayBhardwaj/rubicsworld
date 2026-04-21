@@ -633,6 +633,11 @@ export function TileGrid({ mode = 'split', bezier }: {
         }
         diorama = next
         dioramaRef.current = next
+        // Re-apply the Leva panel's current values to the fresh meadow so
+        // density / flower split / colours / wind survive the hot reload.
+        // buildGrass defaults mesh.count to 50% otherwise, which would read
+        // as "all my settings got reset."
+        grassRefs.reapplyControls?.()
       })
     }
 
