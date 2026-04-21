@@ -13,6 +13,8 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useFBO } from '@react-three/drei'
 import { buildDiorama, buildSphereTerrain, fresnelUniform, sliceRotUniforms, hudUniforms, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
 import { buildGrass, grassRefs } from './buildGrass'
+import { loadGlbDiorama } from './loadGlbDiorama'
+import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
 import { usePlanet } from '../world/store'
@@ -503,11 +505,23 @@ export function TileGrid({ mode = 'split', bezier }: {
   useEffect(() => {
     gl.localClippingEnabled = true
 
+    // Check for a `?glb=<path>` (or `?glb=1` → /diorama.glb) URL query. When
+    // present, we start with an empty root and async-swap in the loaded
+    // scene as soon as it arrives — keeps the useEffect synchronous, avoids
+    // paying the ~500 ms imperative build cost just to throw it away, and
+    // falls back to imperative if the fetch/parse fails.
+    const glbParam = typeof window !== 'undefined'
+      ? new URLSearchParams(window.location.search).get('glb')
+      : null
+    const glbPath = glbParam === '1' ? '/diorama.glb' : glbParam
+
     // In sphere mode, terrain is rendered as a single global SphereGeometry
     // mesh (see globalTerrainScene below) — omit it from the per-tile root
     // to avoid double-drawing and so per-tile clip-plane rasterization gaps
     // simply expose the continuous global sphere underneath.
-    const diorama = buildDiorama({ includeTerrain: mode !== 'sphere' })
+    let diorama: DioramaScene = glbPath
+      ? { root: new THREE.Group(), update: () => {} }
+      : buildDiorama({ includeTerrain: mode !== 'sphere' })
     dioramaRef.current = diorama
 
     // Disable frustum culling — the sphere projection shader moves vertices
@@ -584,6 +598,47 @@ export function TileGrid({ mode = 'split', bezier }: {
     // Set matrixAutoUpdate false so we can set matrix directly
     diorama.root.matrixAutoUpdate = false
 
+    // Async swap-in for URL-requested glb. Keeps the mount synchronous —
+    // if the load fails, fall back to imperative; if it succeeds, detach
+    // the stub root and attach the loaded scene (reapplying the sphere
+    // projection patch on the new materials). All cleanup goes through
+    // dioramaRef.current so whatever root is live gets disposed on unmount.
+    if (glbPath) {
+      let cancelled = false
+      void loadGlbDiorama(glbPath).then(loaded => {
+        if (cancelled) return
+        const next = loaded ?? buildDiorama({ includeTerrain: mode !== 'sphere' })
+        const prev = dioramaRef.current
+        if (prev) {
+          dScene.remove(prev.root)
+          // Dispose the stub root's contents (cheap — it was empty) or the
+          // throwaway imperative meshes if the glb load failed AFTER we
+          // built one.
+          prev.root.traverse(c => {
+            const m = c as THREE.Mesh
+            if (!m.isMesh) return
+            m.geometry?.dispose()
+            const mat = m.material
+            if (Array.isArray(mat)) mat.forEach(x => x.dispose())
+            else mat?.dispose()
+          })
+        }
+        next.root.traverse(c => { c.frustumCulled = false })
+        next.root.matrixAutoUpdate = false
+        dScene.add(next.root)
+        if (mode === 'sphere' && sphereUniformsRef.current) {
+          patchSceneForSphere(next.root, sphereUniformsRef.current)
+        }
+        diorama = next
+        dioramaRef.current = next
+      })
+      // Register a cancellation hook so unmount during load doesn't attach
+      // into a stale dScene. Uses the existing return-cleanup closure.
+      const origCleanup = () => { cancelled = true }
+      // Stash on the ref so the outer cleanup can call it (see return below).
+      ;(dioramaRef as unknown as { _cancelSwap?: () => void })._cancelSwap = origCleanup
+    }
+
     // Publish a top-down cube-net snapshot callback for GrassPanel's "save"
     // button. Builds a THROWAWAY unpatched diorama so the shot is the flat
     // cube-net layout regardless of the mode currently on screen (sphere-mode
@@ -647,6 +702,43 @@ export function TileGrid({ mode = 'split', bezier }: {
       return new Promise<Blob | null>(res => canvas.toBlob(b => res(b), 'image/png'))
     }
 
+    // Export a clean flat cube-net .glb that Blender can open. Builds a
+    // throwaway imperative diorama with skipMeadow=true so the ~231K grass
+    // instance matrices don't balloon the file (meadow is procedural — it
+    // rebuilds from code on load). Includes the flat terrain plane so
+    // Blender shows the cross cube-net as a visible ground, and identity
+    // transforms throughout so the exported scene opens centred at origin.
+    grassRefs.saveDiorama = async () => {
+      const throwaway = buildDiorama({ includeTerrain: true, skipMeadow: true })
+      // Ensure matrices are current — newly built objects may have matrix
+      // auto-update disabled upstream, and the exporter serialises
+      // matrixWorld as-is.
+      throwaway.root.updateMatrixWorld(true)
+      const exporter = new GLTFExporter()
+      const arrayBuffer = await new Promise<ArrayBuffer | null>(resolve => {
+        exporter.parse(
+          throwaway.root,
+          result => {
+            if (result instanceof ArrayBuffer) resolve(result)
+            else resolve(null)   // { binary: true } guarantees ArrayBuffer
+          },
+          err => { console.error('[diorama] GLTFExporter failed:', err); resolve(null) },
+          { binary: true, animations: [] },
+        )
+      })
+      // Dispose the throwaway to keep memory clean.
+      throwaway.root.traverse(c => {
+        const m = c as THREE.Mesh
+        if (!m.isMesh) return
+        m.geometry?.dispose()
+        const mat = m.material
+        if (Array.isArray(mat)) mat.forEach(x => x.dispose())
+        else mat?.dispose()
+      })
+      if (!arrayBuffer) return null
+      return new Blob([arrayBuffer], { type: 'model/gltf-binary' })
+    }
+
     // Swap-rebuild grass using a user-painted mask (or clear back to AABB
     // exclusion). Disposes the previous grass InstancedMesh, asks buildGrass
     // for a new one driven by pixel sampling, then re-applies the sphere
@@ -677,7 +769,12 @@ export function TileGrid({ mode = 'split', bezier }: {
       gl.clippingPlanes = []
       grassRefs.captureTopView = null
       grassRefs.rebuildWithMask = null
-      diorama.root.traverse(child => {
+      grassRefs.saveDiorama = null
+      ;(dioramaRef as unknown as { _cancelSwap?: () => void })._cancelSwap?.()
+      // Dispose whatever root is LIVE in the ref (may be the stub, the
+      // imperative fallback, or the loaded glb — all same disposal shape).
+      const live = dioramaRef.current ?? diorama
+      live.root.traverse(child => {
         if ((child as THREE.Mesh).isMesh) {
           ;(child as THREE.Mesh).geometry?.dispose()
           const m = (child as THREE.Mesh).material

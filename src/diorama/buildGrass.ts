@@ -120,6 +120,10 @@ export const grassRefs: {
   meadowMax: Record<Bucket, number>             // per-bucket allocated max
   captureTopView: (() => Promise<Blob | null>) | null
   rebuildWithMask: ((mask: ImageData | null) => void) | null
+  /** Build a throwaway flat cube-net diorama (no meadow, no shader patches)
+   *  and export it as a .glb Blob via GLTFExporter. Registered by TileGrid so
+   *  the Leva panel can trigger a download without owning an exporter. */
+  saveDiorama: (() => Promise<Blob | null>) | null
 } = {
   mesh: null,
   maxCount: 0,
@@ -127,6 +131,7 @@ export const grassRefs: {
   meadowMax: { grass: 0, pink: 0, purple: 0, yellow: 0, red: 0 },
   captureTopView: null,
   rebuildWithMask: null,
+  saveDiorama: null,
 }
 
 export interface GrassDebugData {

@@ -100,6 +100,7 @@ export function GrassPanel() {
         saveCubenet:    button(() => { void saveCubenetPng() }),
         loadMask:       button(() => { void loadMaskPng() }),
         clearMask:      button(() => { grassRefs.rebuildWithMask?.(null) }),
+        saveDioramaGlb: button(() => { void saveDioramaGlb() }),
       },
       { collapsed: true },
     ),
@@ -226,6 +227,18 @@ async function saveCubenetPng() {
  *  exclusion map. Any resolution / aspect is accepted — the sampler maps
  *  the mask's full width/height onto the 8×6 flat-net frame. White pixels
  *  (luminance > threshold) allow grass; black/grey pixels exclude. */
+/** Downloads the flat cube-net as a .glb Blender can open. The export path
+ *  runs a clean throwaway buildDiorama (no meadow, no shader patches) so the
+ *  file stays lean and opens in Blender with identity transforms. */
+async function saveDioramaGlb() {
+  if (!grassRefs.saveDiorama) return
+  const blob = await grassRefs.saveDiorama()
+  if (!blob) return
+  const url = URL.createObjectURL(blob)
+  triggerDownload(url, `diorama-base_${tstamp()}.glb`)
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
+}
+
 async function loadMaskPng() {
   if (!grassRefs.rebuildWithMask) return
   const file = await new Promise<File | null>(resolve => {

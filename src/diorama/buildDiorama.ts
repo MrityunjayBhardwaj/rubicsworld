@@ -20,7 +20,6 @@
 
 import * as THREE from 'three'
 import { buildGrass } from './buildGrass'
-import { buildFluffyTree } from './buildFluffyTree'
 
 export const BASE_W = 8
 export const BASE_H = 6
@@ -600,17 +599,30 @@ function buildTrees() {
     const s = TREE_SCALES[i]
     const phase = i * 2.1
 
-    const { group, swayGroup } = buildFluffyTree({
-      position: pos,
-      scale: s,
-      // Slight green hue variation across trees so the forest isn't flat.
-      canopyColor: s > 0.9 ? '#3c7a36' : s > 0.75 ? '#4a8a3a' : '#5ea04a',
-      trunkColor: '#6b4c30',
-      seed: i * 7.31,
-    })
+    const tree = new THREE.Group()
+    tree.position.set(...pos)
 
-    root.add(group)
-    swayGroups.push({ g: swayGroup, phase })
+    const swayG = new THREE.Group()
+    const trunkH = 0.36 * s
+    const canopyR = 0.2 * s
+
+    const trunk = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.03 * s, 0.05 * s, trunkH, 6),
+      mat({ color: '#6b4c30', roughness: 0.9 }),
+    )
+    trunk.position.y = trunkH / 2; trunk.castShadow = true
+    swayG.add(trunk)
+
+    const canopy = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(canopyR, 1),
+      mat({ color: s > 0.9 ? '#3a7a3a' : '#4a8a3a', roughness: 0.8 }),
+    )
+    canopy.position.y = trunkH + canopyR * 0.6; canopy.castShadow = true
+    swayG.add(canopy)
+
+    tree.add(swayG)
+    root.add(tree)
+    swayGroups.push({ g: swayG, phase })
   }
 
   const update = (t: number) => {
@@ -1247,6 +1259,11 @@ export interface BuildDioramaOpts {
    *  in sphere mode where a separate global SphereGeometry terrain renders
    *  once per frame (avoids per-tile clip-plane seams entirely). */
   includeTerrain?: boolean
+  /** Skip building the grass + flower InstancedMeshes. Used by the
+   *  saveDiorama flow — exporting the meadow would serialise hundreds of
+   *  thousands of blade instance matrices into the glb and lose the
+   *  shader-driven wind anyway. Meadow is rebuilt in-code on load. */
+  skipMeadow?: boolean
 }
 
 /** Single global terrain mesh — a real sphere, not a sphere-projected plane.
@@ -1276,7 +1293,7 @@ export function buildSphereTerrain(): THREE.Mesh {
 }
 
 export function buildDiorama(opts: BuildDioramaOpts = {}): DioramaScene {
-  const { includeTerrain = true } = opts
+  const { includeTerrain = true, skipMeadow = false } = opts
   const root = new THREE.Group()
   root.name = 'diorama'
 
@@ -1326,9 +1343,11 @@ export function buildDiorama(opts: BuildDioramaOpts = {}): DioramaScene {
   // Meadow runs LAST: all other props must be in `root` so their flat-space
   // AABBs are available for exclusion sampling. Authored in flat cube-net
   // coordinates, grass + flowers then ride the same per-cell → sphere
-  // projection pipeline as every other prop.
-  const grass = buildGrass(root)
-  for (const m of grass.meshes) root.add(m)
+  // projection pipeline as every other prop. skipMeadow = true cuts the
+  // grass meshes entirely — used by saveDiorama so the exported glb stays
+  // lean and the meadow rebuilds from code on load.
+  const grass = skipMeadow ? null : buildGrass(root)
+  if (grass) for (const m of grass.meshes) root.add(m)
 
   const update = (t: number) => {
     pond.update(t)
@@ -1338,7 +1357,7 @@ export function buildDiorama(opts: BuildDioramaOpts = {}): DioramaScene {
     smoke.update(t)
     car.update(t)
     birds.update(t)
-    grass.update(t)
+    grass?.update(t)
   }
 
   return { root, update }
