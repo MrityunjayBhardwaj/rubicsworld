@@ -125,7 +125,7 @@ def validate_scene(context):
 class RUBICS_OT_Import(bpy.types.Operator):
     bl_idname = "rubics.import_diorama"
     bl_label = "Import Diorama"
-    bl_description = "Clear the scene and load <project>/public/diorama.glb"
+    bl_description = "Clear existing objects and load <project>/public/diorama.glb"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -136,7 +136,21 @@ class RUBICS_OT_Import(bpy.types.Operator):
         if not os.path.exists(path):
             self.report({'ERROR'}, f"Not found: {path}")
             return {'CANCELLED'}
-        bpy.ops.wm.read_factory_settings(use_empty=True)
+
+        # DO NOT call bpy.ops.wm.read_factory_settings from inside an operator
+        # — it invalidates the running operator's own RNA path and segfaults
+        # Blender on the very next self.report / return. Clear via the data
+        # API instead, which is scope-safe.
+        for obj in list(bpy.data.objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+        # Purge orphaned blocks so the scene doesn't accumulate detritus
+        # across successive Import cycles.
+        for coll in (bpy.data.meshes, bpy.data.materials, bpy.data.curves,
+                     bpy.data.actions, bpy.data.armatures):
+            for item in list(coll):
+                if item.users == 0:
+                    coll.remove(item)
+
         bpy.ops.import_scene.gltf(filepath=path)
         self.report({'INFO'}, f"Imported {path}")
         return {'FINISHED'}
