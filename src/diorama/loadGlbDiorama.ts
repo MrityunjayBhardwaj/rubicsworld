@@ -16,6 +16,75 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import type { DioramaScene } from './buildDiorama'
 import { buildGrass } from './buildGrass'
 
+/** Collapse visually-identical materials onto a single shared instance.
+ *  Fingerprint includes every property the sphere-projection onBeforeCompile
+ *  hook cares about: colour, PBR scalars, emission, alpha mode, texture
+ *  identities (by uuid, since loader-instantiated textures are already
+ *  unique per image), side. Materials with the same fingerprint are safe
+ *  to share — the sphere patch is idempotent on userData.__spherePatched,
+ *  so whichever of the N equivalents first reaches patchSceneForSphere
+ *  wins and the rest skip. */
+function dedupeMaterials(node: THREE.Object3D): void {
+  const canonical = new Map<string, THREE.Material>()
+  let dedupedCount = 0
+  let totalBefore = 0
+  node.traverse(obj => {
+    const m = obj as THREE.Mesh
+    if (!m.isMesh) return
+    const pick = (mat: THREE.Material): THREE.Material => {
+      totalBefore++
+      const key = materialFingerprint(mat)
+      const existing = canonical.get(key)
+      if (existing) { dedupedCount++; return existing }
+      canonical.set(key, mat)
+      return mat
+    }
+    if (Array.isArray(m.material)) m.material = m.material.map(pick)
+    else if (m.material) m.material = pick(m.material)
+  })
+  if (import.meta.env?.DEV) {
+    // eslint-disable-next-line no-console
+    console.log(`[diorama] material dedup: ${totalBefore} → ${canonical.size} unique (-${dedupedCount} duplicates)`)
+  }
+}
+
+function materialFingerprint(mat: THREE.Material): string {
+  // Work in the common PBR superset. Non-standard materials keep their own
+  // reference (key falls back on uuid).
+  if (!(mat instanceof THREE.MeshStandardMaterial) &&
+      !(mat instanceof THREE.MeshPhysicalMaterial)) {
+    return `uuid:${mat.uuid}`
+  }
+  const parts = [
+    mat.type,
+    mat.color.getHex().toString(16),
+    mat.roughness.toFixed(3),
+    mat.metalness.toFixed(3),
+    mat.emissive.getHex().toString(16),
+    mat.emissiveIntensity.toFixed(3),
+    mat.opacity.toFixed(3),
+    mat.transparent ? 'T' : 'O',
+    mat.side.toString(),
+    mat.alphaTest.toFixed(3),
+    mat.map?.uuid ?? '-',
+    mat.normalMap?.uuid ?? '-',
+    mat.roughnessMap?.uuid ?? '-',
+    mat.metalnessMap?.uuid ?? '-',
+    mat.emissiveMap?.uuid ?? '-',
+    mat.aoMap?.uuid ?? '-',
+    mat.alphaMap?.uuid ?? '-',
+  ]
+  if (mat instanceof THREE.MeshPhysicalMaterial) {
+    parts.push(
+      mat.clearcoat.toFixed(3),
+      mat.transmission.toFixed(3),
+      mat.ior.toFixed(3),
+      mat.sheen.toFixed(3),
+    )
+  }
+  return parts.join('|')
+}
+
 export async function loadGlbDiorama(
   url: string,
   opts: { includeMeadow?: boolean } = {},
@@ -48,6 +117,18 @@ export async function loadGlbDiorama(
   // projection moves vertices far from their geometry bounding sphere, which
   // would otherwise cull edge-of-screen meshes.
   gltf.scene.traverse(c => { c.frustumCulled = false })
+
+  // Deduplicate materials. Blender's glTF exporter hands every mesh its own
+  // material instance even when they're visually identical — a 150-mesh
+  // diorama commonly comes in with 100+ unique materials. Each unique
+  // material is a separate draw call (sphere mode renders the scene 24×
+  // per frame — so 100 materials × 24 passes = 2.4K draws/frame just for
+  // props). Each unique material also fires its own onBeforeCompile on
+  // first render, multiplying the sphere-projection shader-compile cost.
+  // Collapsing by visual fingerprint brings that down to the handful of
+  // truly distinct looks in the scene.
+  dedupeMaterials(gltf.scene)
+
   root.add(gltf.scene)
 
   // Animation mixer drives every clip the exporter baked in. Plays on loop;
