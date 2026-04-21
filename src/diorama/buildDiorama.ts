@@ -20,6 +20,7 @@
 
 import * as THREE from 'three'
 import { buildGrass } from './buildGrass'
+import { buildFluffyTree } from './buildFluffyTree'
 
 export const BASE_W = 8
 export const BASE_H = 6
@@ -599,30 +600,17 @@ function buildTrees() {
     const s = TREE_SCALES[i]
     const phase = i * 2.1
 
-    const tree = new THREE.Group()
-    tree.position.set(...pos)
+    const { group, swayGroup } = buildFluffyTree({
+      position: pos,
+      scale: s,
+      // Slight green hue variation across trees so the forest isn't flat.
+      canopyColor: s > 0.9 ? '#3c7a36' : s > 0.75 ? '#4a8a3a' : '#5ea04a',
+      trunkColor: '#6b4c30',
+      seed: i * 7.31,
+    })
 
-    const swayG = new THREE.Group()
-    const trunkH = 0.36 * s
-    const canopyR = 0.2 * s
-
-    const trunk = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.03 * s, 0.05 * s, trunkH, 6),
-      mat({ color: '#6b4c30', roughness: 0.9 }),
-    )
-    trunk.position.y = trunkH / 2; trunk.castShadow = true
-    swayG.add(trunk)
-
-    const canopy = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(canopyR, 1),
-      mat({ color: s > 0.9 ? '#3a7a3a' : '#4a8a3a', roughness: 0.8 }),
-    )
-    canopy.position.y = trunkH + canopyR * 0.6; canopy.castShadow = true
-    swayG.add(canopy)
-
-    tree.add(swayG)
-    root.add(tree)
-    swayGroups.push({ g: swayG, phase })
+    root.add(group)
+    swayGroups.push({ g: swayGroup, phase })
   }
 
   const update = (t: number) => {
