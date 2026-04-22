@@ -579,8 +579,14 @@ export function TileGrid({ mode = 'split', bezier }: {
     const cells = buildCellDefs()
     cellsRef.current = cells
 
-    // Pre-compute per-cell transforms + clip planes
-    const gap = mode === 'split' ? SPLIT_GAP : CUBE_GAP
+    // Pre-compute per-cell transforms + clip planes. Sphere mode uses NO
+    // gap — any positive gap manifests as sky-coloured strips at the cube
+    // edges (each within-face clip plane of size halfCell = (CELL-gap)/2
+    // stops short of the face border by gap/2; the old global sphere-
+    // terrain used to fill that, but in glb mode we skip it so the strips
+    // read as seams). cube/split previews keep their gaps — there they're
+    // an intentional visual separator between cells.
+    const gap = mode === 'split' ? SPLIT_GAP : mode === 'cube' ? CUBE_GAP : 0
     rendersRef.current = cells.map(c => {
       // Sphere uses CUBE clip planes (flat, no artifacts) — shader does the curving
       if (mode === 'sphere' || mode === 'cube') return cubeCellRender(c, gap)
