@@ -410,7 +410,37 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   // mesh whose name starts with "ground" or "terrain" (Blender exports add
   // ".001" suffixes — startsWith handles both). No ground found ⇒ the
   // diorama's author hasn't declared a meadow surface; log and skip.
+  //
+  // Every scene-space query below (setFromObject, applyMatrix4) reads
+  // ascending matrixWorld, so the diorama root's CURRENT matrix contaminates
+  // the results. On the initial build the root is a fresh Group (identity);
+  // on rebuildWithMask it's been mutated mid-frame by TileGrid's 24-pass
+  // per-cell transforms (root.position/quaternion is overwritten every
+  // pass — see TileGrid.tsx:1075-1078, 1092-1095). If we don't neutralize
+  // it, the ground AABB comes back in cube-space for one random cell,
+  // the triangle positions are pre-transformed to that same cube, and all
+  // downstream math is silently wrong — symptom: loadMask "doesn't work"
+  // because only a narrow sliver of candidates survive sampleGroundAt.
+  // Save/reset/restore so the build always runs in root-local space.
+  const _prevRootMatrix = dioramaRoot.matrix.clone()
+  const _prevRootMatrixAutoUpdate = dioramaRoot.matrixAutoUpdate
+  const _prevRootPosition = dioramaRoot.position.clone()
+  const _prevRootQuaternion = dioramaRoot.quaternion.clone()
+  const _prevRootScale = dioramaRoot.scale.clone()
+  dioramaRoot.position.set(0, 0, 0)
+  dioramaRoot.quaternion.identity()
+  dioramaRoot.scale.set(1, 1, 1)
+  dioramaRoot.matrix.identity()
+  dioramaRoot.matrixAutoUpdate = false
   dioramaRoot.updateMatrixWorld(true)
+  const restoreRoot = () => {
+    dioramaRoot.position.copy(_prevRootPosition)
+    dioramaRoot.quaternion.copy(_prevRootQuaternion)
+    dioramaRoot.scale.copy(_prevRootScale)
+    dioramaRoot.matrix.copy(_prevRootMatrix)
+    dioramaRoot.matrixAutoUpdate = _prevRootMatrixAutoUpdate
+    dioramaRoot.updateMatrixWorld(true)
+  }
   let groundMesh: THREE.Mesh | null = null
   dioramaRoot.traverse(obj => {
     if (groundMesh) return
@@ -422,6 +452,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   if (!groundMesh) {
     // eslint-disable-next-line no-console
     console.error('[grass] no ground object is found — add a mesh named "ground" (or "terrain") to the diorama. Skipping grass.')
+    restoreRoot()
     return emptyGrassResult()
   }
   const groundBox = new THREE.Box3().setFromObject(groundMesh)
@@ -435,6 +466,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   if (!isFinite(groundArea) || groundArea <= 0) {
     // eslint-disable-next-line no-console
     console.error('[grass] ground AABB is degenerate — skipping grass.', { name: (groundMesh as THREE.Mesh).name, groundMin, groundMax })
+    restoreRoot()
     return emptyGrassResult()
   }
 
@@ -460,6 +492,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     if (!posAttr) {
       // eslint-disable-next-line no-console
       console.error('[grass] ground mesh has no position attribute — skipping grass.', gm.name)
+      restoreRoot()
       return emptyGrassResult()
     }
     const indexAttr = geom.index as THREE.BufferAttribute | null
@@ -498,6 +531,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   if (groundTris.length === 0) {
     // eslint-disable-next-line no-console
     console.error('[grass] ground mesh has no valid triangles — skipping grass.', (groundMesh as THREE.Mesh).name)
+    restoreRoot()
     return emptyGrassResult()
   }
   // Grid sized so each cell holds a handful of tris on average. ~80×60 gives
@@ -798,6 +832,8 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       grassRefs.meadowMax = { grass: 0, pink: 0, purple: 0, yellow: 0, red: 0 }
     }
   }
+
+  restoreRoot()
 
   return {
     grass:   built.grass.mesh,
