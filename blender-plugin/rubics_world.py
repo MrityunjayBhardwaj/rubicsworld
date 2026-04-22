@@ -495,13 +495,48 @@ class RUBICS_OT_InitScene(bpy.types.Operator):
                 self.report({'ERROR'}, f"'{name}' already exists — delete it before Init")
                 return {'CANCELLED'}
 
-        # 1. Plane 8×6 at Z=0. primitive_plane_add sizes a unit plane; scale
-        #    then apply so vertex coords land in world units.
-        bpy.ops.mesh.primitive_plane_add(size=1, location=(0, 0, 0))
-        obj = context.active_object
-        obj.name = "ground"
-        obj.scale = (8.0, 6.0, 1.0)
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        # 1. Build a subdivided 8×6 grid at Z=0 via bmesh. A flat
+        #    primitive_plane_add produces a 2-triangle plane (4 verts) —
+        #    when the three-js side sphere-projects those, the giant
+        #    triangles CHORD THROUGH the sphere interior and the ground
+        #    renders inside-out / invisible (project vyapti: multi-face
+        #    meshes need ≥ ~8 subdivisions per cube face). 48×36 = 8 cuts
+        #    per face on the middle row (4 faces × 8 = 32, rounded up +
+        #    safety margin). UVs span [0, 1] so our cube-net alpha mask
+        #    image applies exactly once across the plane.
+        import bmesh
+        COLS, ROWS = 48, 36
+        W, D = 8.0, 6.0
+        bm = bmesh.new()
+        uv_layer = bm.loops.layers.uv.new()
+        grid = []
+        for j in range(ROWS + 1):
+            row = []
+            for i in range(COLS + 1):
+                x = -W * 0.5 + (i / COLS) * W
+                y = -D * 0.5 + (j / ROWS) * D
+                row.append(bm.verts.new((x, y, 0.0)))
+            grid.append(row)
+        for j in range(ROWS):
+            for i in range(COLS):
+                f = bm.faces.new([
+                    grid[j][i], grid[j][i + 1],
+                    grid[j + 1][i + 1], grid[j + 1][i],
+                ])
+                for loop in f.loops:
+                    lx, ly = loop.vert.co.x, loop.vert.co.y
+                    loop[uv_layer].uv = (
+                        (lx + W * 0.5) / W,
+                        (ly + D * 0.5) / D,
+                    )
+        bm.normal_update()
+        mesh = bpy.data.meshes.new("ground-mesh")
+        bm.to_mesh(mesh)
+        bm.free()
+        obj = bpy.data.objects.new("ground", mesh)
+        context.collection.objects.link(obj)
+        context.view_layer.objects.active = obj
+        obj.select_set(True)
 
         # 2. Generate the alpha mask. 4:3 aspect matches 8×6; 256×192 gives
         #    sharp face-block borders without bloating the .blend.
