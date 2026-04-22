@@ -3,7 +3,7 @@ import { button, useControls } from 'leva'
 import { usePlanet } from './world/store'
 import { runRotationSelfTest } from './world/selfTest'
 
-type PreviewMode = false | 'grid' | 'split' | 'cube'
+type PreviewMode = false | 'grid' | 'split' | 'cube' | 'rubik'
 
 export function Controls({
   dioramaPreview,
@@ -28,6 +28,7 @@ export function Controls({
     'View: Cube net': button(() => setDioramaPreview(dioramaPreview === 'grid' ? false : 'grid')),
     'View: Split': button(() => setDioramaPreview(dioramaPreview === 'split' ? false : 'split')),
     'View: Cube': button(() => setDioramaPreview(dioramaPreview === 'cube' ? false : 'cube')),
+    'View: Rubik (classic)': button(() => setDioramaPreview(dioramaPreview === 'rubik' ? false : 'rubik')),
     'View: Sphere (planet)': button(() => setDioramaPreview(false)),
     'Walk on planet': button(() => {
       // Must stay in sphere mode — WalkControls only mounts under <Canvas>'s
