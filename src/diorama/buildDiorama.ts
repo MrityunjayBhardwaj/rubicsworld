@@ -400,7 +400,7 @@ const TERRAIN_GREEN = '#9ec280'  // brighter base — multiplies with grass map
 // cache — one GPU upload shared between the per-tile flat terrain and the
 // global sphere terrain.
 let _grassTex: THREE.Texture | null = null
-function grassTexture(): THREE.Texture {
+export function grassTexture(): THREE.Texture {
   if (_grassTex) return _grassTex
   const tex = new THREE.TextureLoader().load('/textures/grass_diff_1k.jpg')
   tex.wrapS = THREE.RepeatWrapping

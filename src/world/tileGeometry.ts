@@ -5,6 +5,7 @@ import { N } from './tile'
 const SEG = 8       // subdivisions per tile edge (smoothness of curvature)
 const GAP = 0       // inset on each tile edge — 0 so tiles meet, no background showing through as "border lines"
 const RADIUS = 1
+const UV_REPEAT = 2 // grass texture repeats per tile when "Rubik: grass" is on
 
 function buildOne(face: FaceDef, u: number, v: number): BufferGeometry {
   const sMin = -1 + (2 * u) / N + GAP
@@ -16,6 +17,7 @@ function buildOne(face: FaceDef, u: number, v: number): BufferGeometry {
   const verts = cols * cols
   const positions = new Float32Array(verts * 3)
   const normals = new Float32Array(verts * 3)
+  const uvs = new Float32Array(verts * 2)
   const indices = new Uint16Array(SEG * SEG * 6)
 
   const p = new Vector3()
@@ -35,6 +37,11 @@ function buildOne(face: FaceDef, u: number, v: number): BufferGeometry {
       normals[off] = p.x
       normals[off + 1] = p.y
       normals[off + 2] = p.z
+      // UV: per-tile [0, UV_REPEAT] → tiles a tight grass pattern when a map
+      // is bound. Texture is RepeatWrapping so UV > 1 tiles correctly.
+      const uoff = (off / 3) * 2
+      uvs[uoff]     = (j / SEG) * UV_REPEAT
+      uvs[uoff + 1] = (i / SEG) * UV_REPEAT
     }
   }
 
@@ -53,6 +60,7 @@ function buildOne(face: FaceDef, u: number, v: number): BufferGeometry {
   const g = new BufferGeometry()
   g.setAttribute('position', new BufferAttribute(positions, 3))
   g.setAttribute('normal', new BufferAttribute(normals, 3))
+  g.setAttribute('uv', new BufferAttribute(uvs, 2))
   g.setIndex(new BufferAttribute(indices, 1))
   return g
 }

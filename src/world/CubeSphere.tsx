@@ -3,10 +3,12 @@ import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useSpring, animated, easings } from '@react-spring/three'
 import { Billboard, Text } from '@react-three/drei'
+import { useControls } from 'leva'
 import { buildAllTileGeometries, type TileMeshDef } from './tileGeometry'
 import { usePlanet, type AnimState, type DragState } from './store'
 import { tileInSlice, tileCentroid, type Axis } from './rotation'
 import type { Tile } from './tile'
+import { grassTexture } from '../diorama/buildDiorama'
 
 const _labelWp = new THREE.Vector3()
 const _tileDir = new THREE.Vector3()
@@ -54,10 +56,16 @@ function TileMesh({
   tile,
   geom,
   showLabel,
+  grassMap,
 }: {
   tile: Tile
   geom: TileMeshDef
   showLabel: boolean
+  /** When set, the tile material uses this texture as `map` and the face
+   *  colour switches to white so the texture renders untinted. Per-tile
+   *  UVs (tileGeometry.ts, UV_REPEAT=2) make the tile face a small grass
+   *  patch. Null → classic face-colour look. */
+  grassMap: THREE.Texture | null
 }) {
   const [hovered, setHovered] = useState(false)
   const q: [number, number, number, number] = [
@@ -82,7 +90,8 @@ function TileMesh({
         onPointerOut={() => setHovered(false)}
       >
         <animated.meshStandardMaterial
-          color={geom.color}
+          color={grassMap ? '#ffffff' : geom.color}
+          map={grassMap}
           roughness={0.7}
           metalness={0.05}
           emissive="#ffb56b"
@@ -106,15 +115,17 @@ function StaticPlanet({
   tiles,
   geoms,
   showLabels,
+  grassMap,
 }: {
   tiles: readonly Tile[]
   geoms: TileMeshDef[]
   showLabels: boolean
+  grassMap: THREE.Texture | null
 }) {
   return (
     <>
       {tiles.map(t => (
-        <TileMesh key={t.id} tile={t} geom={geoms[t.id]} showLabel={showLabels} />
+        <TileMesh key={t.id} tile={t} geom={geoms[t.id]} showLabel={showLabels} grassMap={grassMap} />
       ))}
     </>
   )
@@ -126,12 +137,14 @@ function AnimSlice({
   anim,
   onRest,
   showLabels,
+  grassMap,
 }: {
   tiles: readonly Tile[]
   geoms: TileMeshDef[]
   anim: AnimState
   onRest: () => void
   showLabels: boolean
+  grassMap: THREE.Texture | null
 }) {
   const axisTuple = AXIS_TUPLE[anim.axis]
   const { rot } = useSpring({
@@ -147,7 +160,7 @@ function AnimSlice({
       {tiles.map(t => {
         const g = geoms[t.id]
         if (!slicedIds.has(t.id))
-          return <TileMesh key={t.id} tile={t} geom={g} showLabel={showLabels} />
+          return <TileMesh key={t.id} tile={t} geom={g} showLabel={showLabels} grassMap={grassMap} />
         return (
           <animated.group
             key={t.id}
@@ -155,7 +168,7 @@ function AnimSlice({
             rotation-y={rot.to(r => axisTuple[1] * r)}
             rotation-z={rot.to(r => axisTuple[2] * r)}
           >
-            <TileMesh tile={t} geom={g} showLabel={showLabels} />
+            <TileMesh tile={t} geom={g} showLabel={showLabels} grassMap={grassMap} />
           </animated.group>
         )
       })}
@@ -168,11 +181,13 @@ function DragSlice({
   geoms,
   drag,
   showLabels,
+  grassMap,
 }: {
   tiles: readonly Tile[]
   geoms: TileMeshDef[]
   drag: DragState
   showLabels: boolean
+  grassMap: THREE.Texture | null
 }) {
   const axisTuple = AXIS_TUPLE[drag.axis]
   const r = drag.angle
@@ -184,10 +199,10 @@ function DragSlice({
       {tiles.map(t => {
         const g = geoms[t.id]
         if (!slicedIds.has(t.id))
-          return <TileMesh key={t.id} tile={t} geom={g} showLabel={showLabels} />
+          return <TileMesh key={t.id} tile={t} geom={g} showLabel={showLabels} grassMap={grassMap} />
         return (
           <group key={t.id} rotation={rot}>
-            <TileMesh tile={t} geom={g} showLabel={showLabels} />
+            <TileMesh tile={t} geom={g} showLabel={showLabels} grassMap={grassMap} />
           </group>
         )
       })}
@@ -203,6 +218,13 @@ export function CubeSphere() {
   const showLabels = usePlanet(s => s.showLabels)
   const finishAnim = usePlanet(s => s._finishAnim)
 
+  // Leva toggle for grass map. Live, reactive — the prop flows straight to
+  // every TileMesh's meshStandardMaterial `map`, which three.js rebinds on
+  // prop change without a full material swap.
+  const { grass } = useControls('Rubik (classic)', { grass: false }, { collapsed: true })
+  // Reuse the diorama's cached grass texture upload — same GPU slot.
+  const grassMap = useMemo(() => grass ? grassTexture() : null, [grass])
+
   return (
     <group>
       {anim ? (
@@ -213,11 +235,12 @@ export function CubeSphere() {
           anim={anim}
           onRest={finishAnim}
           showLabels={showLabels}
+          grassMap={grassMap}
         />
       ) : drag ? (
-        <DragSlice tiles={tiles} geoms={geoms} drag={drag} showLabels={showLabels} />
+        <DragSlice tiles={tiles} geoms={geoms} drag={drag} showLabels={showLabels} grassMap={grassMap} />
       ) : (
-        <StaticPlanet tiles={tiles} geoms={geoms} showLabels={showLabels} />
+        <StaticPlanet tiles={tiles} geoms={geoms} showLabels={showLabels} grassMap={grassMap} />
       )}
     </group>
   )
