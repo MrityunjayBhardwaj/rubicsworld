@@ -402,6 +402,103 @@ class RUBICS_OT_Import(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RUBICS_OT_InitScene(bpy.types.Operator):
+    """Create a fresh diorama scene from scratch — no existing glb required.
+
+    Drops a single 'ground' plane at origin, 8×6 (matches the cube-net
+    bounding box). The material carries a generated alpha mask so only
+    the 6 face-block rectangles render opaque; the four cross-corners
+    outside the net are transparent. Visually tells the author exactly
+    where they can place content.
+
+    The mask image is created in-memory (bpy.data.images.new + pixel
+    array write), then packed so it travels inside the .blend file. No
+    external PNG asset required. glTF export carries the embedded image
+    through to the three-js side as an alphaMode=BLEND material.
+    """
+    bl_idname = "rubics.init_scene"
+    bl_label = "Init Scene"
+    bl_description = "Create a fresh ground plane (8×6) with a cube-net alpha mask"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        # Refuse to clobber an existing ground / terrain — preserves ongoing
+        # authoring. User must delete first to reinit.
+        for name in ("ground", "terrain"):
+            if name in bpy.data.objects:
+                self.report({'ERROR'}, f"'{name}' already exists — delete it before Init")
+                return {'CANCELLED'}
+
+        # 1. Plane 8×6 at Z=0. primitive_plane_add sizes a unit plane; scale
+        #    then apply so vertex coords land in world units.
+        bpy.ops.mesh.primitive_plane_add(size=1, location=(0, 0, 0))
+        obj = context.active_object
+        obj.name = "ground"
+        obj.scale = (8.0, 6.0, 1.0)
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+        # 2. Generate the alpha mask. 4:3 aspect matches 8×6; 256×192 gives
+        #    sharp face-block borders without bloating the .blend.
+        W, H = 256, 192
+        img = bpy.data.images.new(
+            name="rubics-cube-net-mask",
+            width=W, height=H,
+            alpha=True,
+        )
+        pixels = [0.0] * (W * H * 4)  # RGBA, all transparent
+        # Paint the 6 face-block rectangles in white (opaque).
+        # Blender XY → image pixel mapping: X∈[-4,4]→u∈[0,W], Y∈[-3,3]→v∈[0,H].
+        # Blender image pixels are stored bottom-up; y low = pixel row 0.
+        for (_name, _face, x0, x1, y0, y1) in FACE_BLOCKS:
+            u0 = max(0, int((x0 + 4.0) / 8.0 * W))
+            u1 = min(W, int((x1 + 4.0) / 8.0 * W))
+            v0 = max(0, int((y0 + 3.0) / 6.0 * H))
+            v1 = min(H, int((y1 + 3.0) / 6.0 * H))
+            for py in range(v0, v1):
+                base = py * W * 4
+                for px in range(u0, u1):
+                    idx = base + px * 4
+                    pixels[idx]     = 1.0
+                    pixels[idx + 1] = 1.0
+                    pixels[idx + 2] = 1.0
+                    pixels[idx + 3] = 1.0
+        img.pixels[:] = pixels
+        img.pack()
+
+        # 3. Material. Principled BSDF base colour = TERRAIN_GREEN to match
+        #    the three-js ground. Alpha from the mask's alpha channel.
+        mat = bpy.data.materials.new("rubics-ground")
+        mat.use_nodes = True
+        mat.blend_method = 'BLEND'
+        nt = mat.node_tree
+        # Clear the default scatter of nodes and start clean.
+        for n in list(nt.nodes):
+            nt.nodes.remove(n)
+        out_node = nt.nodes.new("ShaderNodeOutputMaterial")
+        out_node.location = (400, 0)
+        bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+        bsdf.location = (100, 0)
+        bsdf.inputs["Base Color"].default_value = (0.62, 0.76, 0.50, 1.0)
+        bsdf.inputs["Roughness"].default_value = 0.9
+        if "Metallic" in bsdf.inputs:
+            bsdf.inputs["Metallic"].default_value = 0.0
+        tex = nt.nodes.new("ShaderNodeTexImage")
+        tex.location = (-300, 0)
+        tex.image = img
+        # Alpha is linear data — tag non-color so colour management doesn't
+        # gamma-shift the mask edges.
+        tex.image.colorspace_settings.name = 'Non-Color'
+        nt.links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
+        nt.links.new(bsdf.outputs["BSDF"], out_node.inputs["Surface"])
+
+        # 4. Assign material.
+        obj.data.materials.clear()
+        obj.data.materials.append(mat)
+
+        self.report({'INFO'}, "Initialized: 'ground' (8×6) with cube-net mask")
+        return {'FINISHED'}
+
+
 class RUBICS_OT_Export(bpy.types.Operator):
     bl_idname = "rubics.export_diorama"
     bl_label = "Export Diorama"
@@ -578,9 +675,10 @@ class RUBICS_PT_Panel(bpy.types.Panel):
 
         layout.separator()
         col = layout.column(align=True)
-        col.operator(RUBICS_OT_Import.bl_idname,   icon='IMPORT')
-        col.operator(RUBICS_OT_Export.bl_idname,   icon='EXPORT')
-        col.operator(RUBICS_OT_Validate.bl_idname, icon='CHECKMARK')
+        col.operator(RUBICS_OT_InitScene.bl_idname, icon='MESH_GRID')
+        col.operator(RUBICS_OT_Import.bl_idname,    icon='IMPORT')
+        col.operator(RUBICS_OT_Export.bl_idname,    icon='EXPORT')
+        col.operator(RUBICS_OT_Validate.bl_idname,  icon='CHECKMARK')
 
         layout.separator()
         box = layout.box()
@@ -619,6 +717,7 @@ class RUBICS_PT_Panel(bpy.types.Panel):
 
 CLASSES = [
     RubicsPrefs,
+    RUBICS_OT_InitScene,
     RUBICS_OT_Import,
     RUBICS_OT_Export,
     RUBICS_OT_Validate,
