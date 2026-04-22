@@ -1,4 +1,4 @@
-# New-session handoff prompt — Rubic's World (end of Day 11, PostFx Path 1 + Path 2 infra shipped)
+# New-session handoff prompt — Rubic's World (end of `feat/grass`: meadow + Blender round-trip)
 
 Copy the block below into the next session verbatim.
 
@@ -6,117 +6,106 @@ Copy the block below into the next session verbatim.
 
 We're continuing **Rubic's World** — my solo entry for levelsio's **Vibe Jam 2026**.
 
-**Deadline:** 1 May 2026, 13:37 UTC (~10 days out)
+**Deadline:** 1 May 2026, 13:37 UTC (~9 days out)
 **Live URL:** https://rubicsworld.vercel.app (auto-deploys on `git push origin main`)
 **Repo:** https://github.com/MrityunjayBhardwaj/rubicsworld
-**Local dev:** `npm run dev` → http://localhost:5173 (port drifts)
+**Local dev:** `npm run dev` → http://localhost:5173 (fixed port now that vite.config has a custom plugin)
 **Working dir:** `/Users/mrityunjaybhardwaj/Documents/projects/RubicsWorld`
+**Current branch:** `feat/grass` — 25 commits on top of main, not yet merged / PR'd.
 
 ## Canonical docs (read in this order)
 
 1. `PHASE_1.md` — 15-day plan, scope, stack, cut order, gates.
 2. `THESIS.md` — full game design.
-3. `BLENDER_PIPELINE.md` — glTF authoring pipeline for when we move diorama into a .glb file.
-4. Memory: `~/.claude/projects/-Users-mrityunjaybhardwaj-Documents-projects-RubicsWorld/memory/` — `project_architecture_day11.md` is the CURRENT architecture. Also read `project_postfx_strategy.md`, `feedback_library_ref_attachment.md`, `feedback_library_patch_package.md`.
-5. `.anvi/` catalogues in the repo — `hetvabhasa.md` P1–P8, `vyapti.md` PV1–PV5, `krama.md` PK1–PK2, `dharana.md` (three new boundaries logged in this session).
+3. `BLENDER_PIPELINE.md` — authoring contract for dioramas (face-block layout, subdivision rules, animation compatibility).
+4. `blender-plugin/README.md` — install the `rubics_world.py` addon, panel walkthrough, validator rules, live-mode docs.
+5. Memory: `~/.claude/projects/-Users-mrityunjaybhardwaj-Documents-projects-RubicsWorld/memory/` — `project_architecture_meadow.md` is the CURRENT architecture snapshot. Also read `feedback_blender_pipeline.md`, `project_postfx_strategy.md`, `feedback_library_ref_attachment.md`, `feedback_library_patch_package.md`.
+6. `.anvi/` catalogues — `hetvabhasa.md` P1–P13, `vyapti.md` PV1–PV9, `krama.md` PK1–PK4, `dharana.md`.
 
 ## Where we are
 
-All Day 6–11 work is merged to main. PRs shipped so far:
-- **PR #8** — Day 6–8 bundle (sphere pipeline, cross cube-net, diorama content, HDRI panel, PBR)
-- **PR #9** — Rotation affordance (keyboard input + yellow-line HUD + easy-mode hints)
-- **PR #10** — Walk mode (first-person + HDRI per-frame-push fix)
-- **PR #11** — Intro cinematic (solved-orbit → scramble → yield on hover)
-- **PR #13** — **Onboarding tutorial** (guided 3-move solve with directional arrow + Lottie hint + BFS re-solve)
-- **PR #15** — **PostFx Path 1 + Path 2 infra** (pmndrs stack + realism-effects SSGI/SSR/motion blur via patch-package; DoF cursor-follow; N8AO/SSAO dual exposure)
+**Main** still has Day 11 content (onboarding tutorial PR #13, PostFx Path 1 + realism-effects infra PR #15). **`feat/grass` branch adds the entire meadow system + Blender round-trip + HMR live mode + Blender addon on top** — not yet merged to main.
 
-Main is always deployable.
+### What ships on `feat/grass`
 
-### Day 11 work (shipped in PR #13 + PR #15)
+**Meadow (`src/diorama/buildGrass.ts`, `src/world/GrassPanel.tsx`):**
+- Grass + 4 flowers (pink/purple/yellow/red) as 5 separate InstancedMeshes sharing wind uniforms
+- Authored in flat cube-net space; rides cube-net → split → cube → sphere pipeline like every other prop
+- Wind: rigid Rodrigues rotation of each blade around its root (blade length strictly preserved — isometry); spatial-wave phase from `instanceMatrix[3] · worldWindDir` so the whole field moves as one coherent sheet
+- Density: 0–50 slider over a budget of ~230K max instances. Default 25 = 50% coverage.
+- Flower %: 0–100% slider trades grass for flowers without double-placing. Per-colour weights + per-colour colour pickers.
+- Per-bucket Fisher-Yates shuffle (PV7) so density thinning reads uniformly across all 6 face-blocks, not face-by-face
+- AABB exclusion walks named props (`pond`/`trees`/`road`/…) at per-mesh granularity with per-name margin overrides
 
-**Onboarding tutorial** (`src/world/TutorialOverlay.tsx`, `src/world/tutorialSolver.ts`):
-- First-visit gate on `localStorage.rubicsworld:tutorialSeen`
-- Deterministic 3-move scramble → `introPhase='tutorial'` → additive yellow arrow on demo tile pointing along rotation tangent + floating Lottie hand via drei `<Html>` + "Swipe the glowing tile — N of M" chrome
-- BFS re-solve (depth ≤ 5) on wrong moves; queue auto-rebuilt so hint re-points at shortest path
-- Skip: Esc / skip-button / walk-mode entry. Flag written on completion or skip.
-- Repeat visits run the original 18-move attract, untouched
-- Placeholder Lottie (`src/world/assets/swipe-hint.json`) — hand-authored pulsing dot, **swap before ship**
+**Painted mask workflow:**
+- `saveDensityMap` / `saveMask` / `saveCubenet` — download 3 PNGs (labelled overlay, clean B/W mask, top-down cube-net render)
+- `loadMask` — file picker reads painted mask, `rebuildWithMask(ImageData)` replaces AABB exclusion with pixel sampling
+- `clearMask` — drop back to AABB
+- `grassRefs.activeMask` persists across hot-reload swaps (PV8) so editing in Blender while a mask is loaded doesn't wipe it
 
-**PostFx Path 1** (`src/world/PostFx.tsx`):
-- Full chain: SMAA → N8AO → SSAO → DoF → Bloom → Noise → Vignette
-- All 50+ params exposed in a `PostFx` Leva folder (sub-folders per effect)
-- DoF follows cursor hit on planet, eases to planet center off-planet, via per-frame self-healing ref attach (see below — was a 3-root-cause bug hunt)
-- N8AO + SSAO are peers. N8AO is default-on but produces no visible AO on our scene (see Known issues below); SSAO is default-off and available as the working alternative
+**Blender glTF round-trip:**
+- `saveDioramaGlb` Leva button exports a clean flat cube-net `.glb` via GLTFExporter (on a skipMeadow throwaway so the 230K meadow matrices don't bloat the file)
+- `?glb=<path>` URL query activates the loader. `?glb=1` → `/diorama.glb`. Defaults to imperative build on any load failure (defensive zero-mesh guard catches stub glbs).
+- `loadGlbDiorama` → GLTFLoader + AnimationMixer (frame-delta capped at 100 ms for tab-focus stalls) + `dedupeMaterials` (collapse visually-identical materials — 150→33 on current scene, 3.5× fewer shader compiles)
+- Sphere-mode `patchMaterialForSphere` folds `instanceMatrix` into worldPos under `#ifdef USE_INSTANCING` (PV6) — required for any InstancedMesh to be visible in sphere mode
 
-**PostFx Path 2 infra** (`src/world/RealismFX.tsx` + `patches/realism-effects+1.1.2.patch`):
-- realism-effects SSGI + SSR + motion blur verified working on three 0.183
-- 5-round patch-package patch auto-applied via `postinstall: patch-package`:
-  1. `WebGLMultipleRenderTargets` → `WebGLRenderTarget({ count })` (removed r163)
-  2. `.texture[i] / .map / .push / .length / Array.isArray` → `.textures.*`
-  3. `copyFramebufferToTexture(pos, tex)` → `(tex, pos)` (r163 arg swap)
-  4. `OptimizedCineonToneMapping` → `CineonToneMapping` (GLSL rename r163)
-- Escape hatch: consumes `EffectComposerContext`, adds one EffectPass per realism effect (merging collides on `tonemapping_pars_fragment` chunk inclusion — hetvabhasa P7)
-- All realism effects default OFF — earn their keep when photoreal Blender diorama lands
-- `sceneGrade: 'stylized' | 'photoreal'` store flag plumbed for the switch
+**HMR hot reload (`vite.config.ts` + `src/diorama/TileGrid.tsx`):**
+- Custom Vite plugin `dioramaHotReload` watches `public/diorama.glb` via chokidar, emits custom `diorama:changed` WebSocket event with timestamp
+- TileGrid listens on `import.meta.hot.on`, refetches with `?t=<ts>` cache-bust, in-place scene swap via `swapInScene(...)` — Leva state survives
+- `grassRefs.reapplyControls?.()` runs post-swap so density / flower% / colours / wind / active mask all restore (PV8)
 
-**Renderer config** (`src/App.tsx`):
-- `gl={{ antialias: false, stencil: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.35 }}`
-- EffectComposer: `multisampling={0}`, `stencilBuffer`, `depthBuffer`
+**Blender addon (`blender-plugin/rubics_world.py`, single-file):**
+- Install: Edit → Preferences → Add-ons → Install → pick the file → tick checkbox → N-sidebar → "Rubic's World" tab
+- Preference: Project Path (repo root)
+- Ops: Import Diorama / Export Diorama / Validate Scene / Live Mode (toggle) / Add Face-Block Guides / Remove Guides
+- Guides are 3D wireframe cages at Z∈[0, MAX_HEIGHT=1.0] matching the uMaxHeight portal-region ceiling
+- Validator is permissive: ERROR only for meshes entirely outside the 8×6 domain; WARNING for PV1 subdivision + sub-terrain dip. Skips terrain/ground/sphere-terrain by name.
+- Live Mode: depsgraph_update_post + bpy.app.timers @ 1.5s debounce; two-layer gate (relevant-datablock filter + content fingerprint) so selection/viewport-orbit/driver-eval do NOT trigger exports (P13)
+- Blender-native Z-up (PV9); glTF `export_yup=True` bridges to three-js
+
+**Headless scripts (`scripts/`):**
+- `blender-make-sample.py` / `blender-roundtrip.py` / `blender-test-addon.py` — all verified passing
+
+### Live workflow (after `npm run dev`)
+
+1. In the browser, open **http://localhost:5173/?glb=1**
+2. Install the Blender addon (once), set Project Path, open your diorama
+3. Toggle **Live Mode** ON in the Blender panel
+4. Edit anything in Blender → auto-export in ≤1.5s → Vite fires `diorama:changed` → browser swaps scene in place. No page reload; every Leva knob, the active mask, camera, tutorial state all survive.
 
 ## 🔴 FIRST TASKS — pick one
 
-### Option A — Audio pass (still highest ROI)
-Howler is in deps, nothing wired. From Day 9 handoff:
-1. Ambient loop — low drone under planet
-2. Slice rotation clicks per axis (pitch-varied) on `rotateAnimated` commit
-3. Settle chime on `planet:settled` event
-4. Optional: walk-mode footstep clicks
+### Option A — Merge `feat/grass` to main
+25-commit branch, not yet PR'd. If the user is happy with the meadow + Blender pipeline, ship it. Run `anvi-ship` or manual PR.
 
-Plan as `src/world/Audio.tsx` subscribing to store events. Samples < 50 KB each.
+### Option B — Per-cell visibility culling (MEADOW_PERF_CULLING in `.anvi/todos.md`)
+After material dedup, sphere mode still runs all 153 glb meshes through 24 per-tile passes. Compute a 6-bit face-block mask per mesh at load time; toggle `mesh.visible` per pass based on whether the mesh overlaps the current tile's face. Expected ~6× draw-call reduction. No shader changes.
 
-### Option B — Swap the placeholder Lottie
-`src/world/assets/swipe-hint.json` is a hand-authored pulsing dot. Replace with a designed swipe-hand Lottie (LottieFiles asset or custom). Drop in same path; no code change.
+### Option C — Mesh merging by shared material (MEADOW_MESH_MERGE)
+After dedup, many meshes share a material. Merge into one BufferGeometry per shared-material group (non-skinned, non-animated only). 153 → ~33 meshes. ~5× fewer draws on top of culling.
 
-### Option C — Bundle split (getting more pressing)
-Bundle ~850 KB gzipped after Path 1 + realism-effects + lottie. Vite flags >500 KB. Before photoreal Blender diorama lands (will add more). Code-split drei/three/realism-effects/lottie into lazy chunks.
+### Option D — Audio pass
+Howler is in deps, still not wired. Earlier handoff options still stand: ambient loop, slice rotation clicks, settle chime, walk-mode footsteps.
 
-### Option D — Walk-mode polish (deferred from Day 9)
-Auto-enter walk on orbit zoom-past-minDistance, crosshair overlay, collision with diorama props, look-direction WASD orientation.
+### Option E — Bundle split (getting pressing)
+~850 KB gzipped pre-meadow. Meadow adds negligible; glb asset is public/diorama.glb so doesn't hit the JS bundle. Split drei/three/realism-effects/lottie into lazy chunks.
 
-### Option E — Photoreal Blender diorama
-Trigger for Path 2 activation. When this asset lands in repo: load alongside stylized test diorama; flip `sceneGrade='photoreal'`; enable realism-effects toggles; re-test N8AO (likely starts working on standard geometry).
+## Hard invariants (don't change without reading catalogues)
 
-## Other open items
+Adds to the Day 11 list (all Day 11 invariants still hold):
 
-1. **N8AO produces no visible AO on our planet** — sphere-projection vertex shader creates depth micro-discontinuities that defeat N8AO's neighbour-delta normal reconstruction. SSAO is the workaround (exposed in Leva). Likely resolves when photoreal Blender diorama arrives. See hetvabhasa P8, `.anvi/todos.md` N8AO_SPHERE_INCOMPAT.
-2. **Bundle size >500 KB** — tracked in `.anvi/todos.md` BUNDLE_SPLIT.
-3. **Headless Chromium FPS** tanks on full effect chain (SwiftShader). Tutorial test timeout bumped to 60 s. Real browsers unaffected.
-4. **Mobile/touch** — walk mode desktop-only. Post-jam flag.
-5. **Starlings pink-dot artifact** — cosmetic, low priority.
+- **PV6:** any `onBeforeCompile` that replaces `<project_vertex>` MUST fold `instanceMatrix` under `#ifdef USE_INSTANCING`. Canonical snippet in `TileGrid.tsx:patchMaterialForSphere`.
+- **PV7:** InstancedMesh with user-controlled `mesh.count` must Fisher-Yates shuffle instance matrices in lockstep with any per-instance attribute (`iHue`).
+- **PV8:** State that must survive scene rebuilds (mask, Leva panel values) lives in module-scope refs on `grassRefs` AND is re-applied via `grassRefs.reapplyControls?.()` post-swap.
+- **PV9:** Blender addon authors in Z-up; glTF `export_yup=True` bridges. Addon + three-js face-block tables use their respective axis conventions.
 
-## Hard invariants (don't change without asking)
+**New hetvabhasa patterns** (P9–P13): InstancedMesh invisible under vertex patch, `read_factory_settings` segfault, mesh.count order dependency, Blender glTF per-mesh material explosion, depsgraph handler false-positives.
 
-**From Day 8-9** (still live):
-- Sphere-mode uses global SphereGeometry terrain; `includeTerrain: mode !== 'sphere'`.
-- Idempotent `onBeforeCompile` patchers with `__*Patched` guard.
-- `uTileOriInv` is `Float32Array(96)`, not `Vector4[]`.
-- Slice uniforms + orientation array written BEFORE `gl.render` in `TileGrid.useFrame`.
-- Scene-shared state pushed every frame, not in store-dep useEffect (vyapti PV2).
-- Walk-mode `fwd` (tangent) + `pitch` (scalar) — don't merge.
-- OrbitControls unmounts during walk.
-- IntroCinematic uses store-state gate, not ref-guard (hetvabhasa P3).
-- Long geometry needs subdivision (vyapti PV1).
-
-**New in Day 11:**
-- **Tone mapping on renderer, NEVER in effect chain** (vyapti PV4). Effects expect linear input.
-- **Canvas+Composer config recipe** (vyapti PV5): `antialias: false` + `multisampling: 0` + `stencilBuffer` + `depthBuffer`. SMAA in effect chain replaces MSAA.
-- **Mutable-ref props on postprocessing wrappers need per-frame re-attach**, NOT useEffect (vyapti PV3). Canonical pattern in `feedback_library_ref_attachment.md`. Canonical instance: DoF target in PostFx.
-- **SSGI + SSR can't share an EffectPass** (hetvabhasa P7). Each lands in its own.
-- **realism-effects needs patch-package** on three 0.183 (hetvabhasa P5). Auto-applied via postinstall.
+**New krama:** PK3 glTF diorama load lifecycle; PK4 hot-reload swap lifecycle.
 
 ## Working style
 
-- Concise. 1–2 sentences end-of-turn.
+- Concise. 1–2 sentence end-of-turn.
 - Options-not-implementations before non-trivial work; wait for call.
 - Playwright for verification; screenshots to `/tmp/rubics-test/`.
 - Commits: gitmoji + `Problem:` / `Fix:` body, no `Co-Authored-By`.
@@ -125,9 +114,9 @@ Trigger for Path 2 activation. When this asset lands in repo: load alongside sty
 
 ## Start by
 
-1. Pull latest main (PRs #13 + #15 merged).
-2. Pick an option above (lean: A — audio has the highest atmospheric ROI per hour; or B — quick visual polish on the tutorial Lottie).
-3. New branch prefixed per convention (`feat/audio`, `feat/lottie-swap`, etc.).
+1. `git status` — should be clean on `feat/grass`.
+2. Pull latest — no changes expected but confirm.
+3. Pick an option above (lean: A — ship the branch; or B — per-cell culling for a measurable perf win before ship).
 
 ---
 
