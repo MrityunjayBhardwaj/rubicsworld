@@ -106,15 +106,23 @@ function storeTileCubeRender(tile: Tile, gap: number): CellRender {
   const r = currentFace.right
   const u = currentFace.up
 
+  // Face-boundary planes get a small positive constant (EDGE_OVERDRAW) so
+  // adjacent face passes overlap by a sub-pixel sliver at cube edges. With
+  // constant 0, the two passes meet mathematically but float precision in
+  // their per-cell transforms lands the same source vertex on slightly
+  // different sphere points each pass — neither covers the boundary
+  // pixel → hairline of sky shows through. A tiny positive constant turns
+  // the neither-side miss into an overdraw; cost is invisible, gap is gone.
+  const EDGE_OVERDRAW = 1e-3
   const clipPlanes = [
     new THREE.Plane(r.clone(), halfCell - rDot),
     new THREE.Plane(r.clone().negate(), halfCell + rDot),
     new THREE.Plane(u.clone(), halfCell - uDot),
     new THREE.Plane(u.clone().negate(), halfCell + uDot),
-    new THREE.Plane(n.clone().sub(r.clone()).normalize(), 0),
-    new THREE.Plane(n.clone().add(r.clone()).normalize(), 0),
-    new THREE.Plane(n.clone().sub(u.clone()).normalize(), 0),
-    new THREE.Plane(n.clone().add(u.clone()).normalize(), 0),
+    new THREE.Plane(n.clone().sub(r.clone()).normalize(), EDGE_OVERDRAW),
+    new THREE.Plane(n.clone().add(r.clone()).normalize(), EDGE_OVERDRAW),
+    new THREE.Plane(n.clone().sub(u.clone()).normalize(), EDGE_OVERDRAW),
+    new THREE.Plane(n.clone().add(u.clone()).normalize(), EDGE_OVERDRAW),
   ]
 
   return { position, quaternion: faceQuat, clipPlanes }
