@@ -477,13 +477,16 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   // XZ bbox overlaps the query cell. Barycentric check in the XZ plane
   // rejects cells that land outside any triangle (island-shaped grounds,
   // holes). One-time cost; zero per-frame cost.
-  type GroundSample = { y: number; normal: THREE.Vector3 }
+  type GroundSample = { y: number; normal: THREE.Vector3; density: number }
   const groundTris: {
     ax: number; ay: number; az: number
     bx: number; by: number; bz: number
     cx: number; cy: number; cz: number
     xMin: number; xMax: number; zMin: number; zMax: number
     nx: number; ny: number; nz: number
+    // Vertex-color R channel per corner (0..1). If the ground has no
+    // COLOR_0 attribute, all three default to 1 so sample.density === 1.
+    rA: number; rB: number; rC: number
   }[] = []
   {
     const gm = groundMesh as THREE.Mesh
@@ -496,6 +499,12 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       return emptyGrassResult()
     }
     const indexAttr = geom.index as THREE.BufferAttribute | null
+    // Optional vertex-color attribute painted in Blender (Vertex Paint mode).
+    // R channel = density in [0, 1]. Missing ⇒ density fixed at 1 (allow-all),
+    // preserving current behaviour for un-painted grounds. glTF / three.js
+    // standardises the name `color`; three.js's GLTFLoader auto-populates it
+    // from the glTF `COLOR_0` attribute.
+    const colorAttr = geom.attributes.color as THREE.BufferAttribute | undefined
     const world = gm.matrixWorld
     const vA = new THREE.Vector3()
     const vB = new THREE.Vector3()
@@ -516,6 +525,9 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       nrm.crossVectors(e1, e2)
       if (nrm.lengthSq() < 1e-20) continue  // degenerate tri
       nrm.normalize()
+      const rA = colorAttr ? colorAttr.getX(ia) : 1
+      const rB = colorAttr ? colorAttr.getX(ib) : 1
+      const rC = colorAttr ? colorAttr.getX(ic) : 1
       groundTris.push({
         ax: vA.x, ay: vA.y, az: vA.z,
         bx: vB.x, by: vB.y, bz: vB.z,
@@ -525,6 +537,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
         zMin: Math.min(vA.z, vB.z, vC.z),
         zMax: Math.max(vA.z, vB.z, vC.z),
         nx: nrm.x, ny: nrm.y, nz: nrm.z,
+        rA, rB, rC,
       })
     }
   }
@@ -578,7 +591,8 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       const eps = 1e-6
       if (u < -eps || v < -eps || w < -eps) continue
       const y = u * tri.ay + v * tri.by + w * tri.cy
-      return { y, normal: new THREE.Vector3(tri.nx, tri.ny, tri.nz) }
+      const density = u * tri.rA + v * tri.rB + w * tri.rC
+      return { y, normal: new THREE.Vector3(tri.nx, tri.ny, tri.nz), density }
     }
     return null
   }
@@ -672,6 +686,12 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     // meadow stays strictly surface-bound.
     const sample = sampleGroundAt(flatX, flatZ)
     if (!sample) { excluded++; continue }
+    // Vertex-color density gate. Composes WITH exclusions (both must allow).
+    // When the ground has no COLOR_0 attribute, sample.density === 1 and
+    // this is a no-op. When the user has painted the ground in Blender's
+    // Vertex Paint mode, the R channel acts as a per-candidate probability:
+    // white=always keep, black=always reject, grey=proportional.
+    if (sample.density < 1 && Math.random() > sample.density) { excluded++; continue }
     // Even 20% split across buckets.
     const bucketIdx = Math.min(4, Math.floor(Math.random() * 5))
     const bucket = BUCKETS[bucketIdx]
