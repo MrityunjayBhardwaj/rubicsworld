@@ -32,6 +32,7 @@ import os
 import time
 import array
 import hashlib
+from contextlib import contextmanager
 import bpy
 import mathutils
 from bpy.app.handlers import persistent
@@ -169,23 +170,88 @@ def _scene_fingerprint() -> str:
     return h.hexdigest()
 
 
+def _isolate_hide_set(context) -> set:
+    """Return the set of objects that should NOT make it into the export
+    when isolate mode is on: rubics-guide-* helpers (authoring aids) and
+    any mesh whose world XY AABB is entirely outside the 6 face-block
+    rectangles. Objects spanning the whole net (terrain / ground with AABB
+    reaching into every block) naturally pass the overlap test — no
+    special-casing required.
+    """
+    hidden = set()
+    blocks = [(x0, x1, y0, y1) for (_n, _f, x0, x1, y0, y1) in FACE_BLOCKS]
+    for obj in context.scene.objects:
+        if obj.name.startswith("rubics-guide-"):
+            hidden.add(obj)
+            continue
+        if obj.type != 'MESH':
+            continue
+        mw = obj.matrix_world
+        xs = []
+        ys = []
+        for corner in obj.bound_box:
+            wv = mw @ mathutils.Vector(corner)
+            xs.append(wv.x)
+            ys.append(wv.y)
+        if not xs:
+            continue
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        overlaps = False
+        for (bx0, bx1, by0, by1) in blocks:
+            if xmax >= bx0 and xmin <= bx1 and ymax >= by0 and ymin <= by1:
+                overlaps = True
+                break
+        if not overlaps:
+            hidden.add(obj)
+    return hidden
+
+
+@contextmanager
+def _with_isolate(context):
+    """Temporarily set hide_viewport=True on isolate-hidden objects so the
+    glTF exporter's `use_visible=True` filter skips them. Restores the
+    original flags on exit, even if the export raises. No-op when the
+    scene's rubics_isolate_export toggle is off.
+    """
+    scene = context.scene
+    if not getattr(scene, "rubics_isolate_export", False):
+        yield
+        return
+    to_hide = _isolate_hide_set(context)
+    orig = {obj: obj.hide_viewport for obj in to_hide}
+    try:
+        for obj in to_hide:
+            obj.hide_viewport = True
+        yield
+    finally:
+        for obj, was in orig.items():
+            # Object may have been deleted mid-export (unlikely, but defend).
+            try:
+                obj.hide_viewport = was
+            except ReferenceError:
+                pass
+
+
 def _do_export_current(path: str) -> tuple[bool, int]:
     """Run the glTF exporter with the pipeline flags. Returns (ok, size).
     Safe to call from a timer — doesn't touch the active operator's stack.
     """
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        bpy.ops.export_scene.gltf(
-            filepath=path,
-            export_format='GLB',
-            export_yup=True,
-            export_apply=True,
-            export_animations=True,
-            export_skins=True,
-            export_morph=True,
-            export_cameras=False,
-            export_lights=False,
-        )
+        with _with_isolate(bpy.context):
+            bpy.ops.export_scene.gltf(
+                filepath=path,
+                export_format='GLB',
+                export_yup=True,
+                export_apply=True,
+                export_animations=True,
+                export_skins=True,
+                export_morph=True,
+                export_cameras=False,
+                export_lights=False,
+                use_visible=True,
+            )
         size = os.path.getsize(path) if os.path.exists(path) else 0
         return True, size
     except Exception as e:
@@ -525,19 +591,25 @@ class RUBICS_OT_Export(bpy.types.Operator):
             self.report({'WARNING'}, m)
 
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        bpy.ops.export_scene.gltf(
-            filepath=path,
-            export_format='GLB',
-            export_yup=True,
-            export_apply=True,
-            export_animations=True,
-            export_skins=True,
-            export_morph=True,
-            export_cameras=False,
-            export_lights=False,
-        )
+        hidden = _isolate_hide_set(context) if context.scene.rubics_isolate_export else set()
+        with _with_isolate(context):
+            bpy.ops.export_scene.gltf(
+                filepath=path,
+                export_format='GLB',
+                export_yup=True,
+                export_apply=True,
+                export_animations=True,
+                export_skins=True,
+                export_morph=True,
+                export_cameras=False,
+                export_lights=False,
+                use_visible=True,
+            )
         size = os.path.getsize(path) if os.path.exists(path) else 0
-        self.report({'INFO'}, f"Exported {size} bytes → {path}")
+        if hidden:
+            self.report({'INFO'}, f"Exported {size} bytes → {path} (isolated: {len(hidden)} objects skipped)")
+        else:
+            self.report({'INFO'}, f"Exported {size} bytes → {path}")
         return {'FINISHED'}
 
 
@@ -679,6 +751,7 @@ class RUBICS_PT_Panel(bpy.types.Panel):
         col.operator(RUBICS_OT_Import.bl_idname,    icon='IMPORT')
         col.operator(RUBICS_OT_Export.bl_idname,    icon='EXPORT')
         col.operator(RUBICS_OT_Validate.bl_idname,  icon='CHECKMARK')
+        col.prop(context.scene, "rubics_isolate_export", text="Isolate: only export face-block content")
 
         layout.separator()
         box = layout.box()
@@ -731,6 +804,17 @@ CLASSES = [
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    # Scene-scoped so the toggle state persists per-.blend. Default ON per
+    # the workflow spec — typical export is "clean, only face-block content".
+    bpy.types.Scene.rubics_isolate_export = bpy.props.BoolProperty(
+        name="Isolate Export",
+        description=(
+            "Only export objects whose world XY bounding box overlaps at least "
+            "one face-block rectangle. Reference guides (rubics-guide-*) are "
+            "always skipped. Off → export every visible object."
+        ),
+        default=True,
+    )
 
 
 def unregister():
@@ -738,6 +822,10 @@ def unregister():
     # away — otherwise Blender holds references to dead operator classes and
     # crashes on the next depsgraph update.
     _live_stop()
+    try:
+        del bpy.types.Scene.rubics_isolate_export
+    except AttributeError:
+        pass
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
 
