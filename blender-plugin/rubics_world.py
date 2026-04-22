@@ -30,6 +30,7 @@ either side means changing both — the validator reads these from here.
 
 import os
 import time
+import array
 import hashlib
 import bpy
 import mathutils
@@ -139,6 +140,27 @@ def _scene_fingerprint() -> str:
         h.update(f"{obj.name}|{obj.type}|{row_bytes}|".encode())
         if obj.type == 'MESH' and obj.data is not None:
             h.update(f"v{len(obj.data.vertices)}p{len(obj.data.polygons)}|".encode())
+            # Hash vertex-color attribute bytes. Vertex Paint strokes mutate
+            # colours without changing vert/poly counts, so the coarse
+            # topology hash above is identical before/after a stroke. Without
+            # the colour bytes folded in, Live Mode would short-circuit and
+            # the grass mask painted on the ground never reaches three-js.
+            # Cost: 16 bytes/vert per colour layer (FLOAT_COLOR RGBA), which
+            # is negligible for a ground mesh of a few thousand verts.
+            for ca in getattr(obj.data, "color_attributes", []) or []:
+                h.update(f"CA|{ca.name}|{ca.domain}|{ca.data_type}|".encode())
+                try:
+                    buf = array.array('f', [0.0] * (len(ca.data) * 4))
+                    ca.data.foreach_get("color", buf)
+                    h.update(buf.tobytes())
+                except (AttributeError, TypeError, RuntimeError):
+                    # Some storage variants (e.g. BYTE_COLOR on older
+                    # Blender) may reject foreach_get("color", float[]).
+                    # Fall back to per-item access — slow but correct.
+                    for item in ca.data:
+                        c = getattr(item, "color", None)
+                        if c is not None:
+                            h.update(f"{c[0]:.4f},{c[1]:.4f},{c[2]:.4f},{c[3]:.4f}|".encode())
         for mod in getattr(obj, "modifiers", []) or []:
             h.update(f"{mod.type}:{mod.name}|".encode())
     for act in sorted(bpy.data.actions, key=lambda a: a.name):
