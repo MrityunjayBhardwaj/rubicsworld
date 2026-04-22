@@ -15,6 +15,7 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import type { DioramaScene } from './buildDiorama'
 import { buildGrass, grassRefs } from './buildGrass'
+import { weldCubeNetSeams } from './weldSeams'
 
 /** Collapse visually-identical materials onto a single shared instance.
  *  Fingerprint includes every property the sphere-projection onBeforeCompile
@@ -130,6 +131,24 @@ export async function loadGlbDiorama(
   dedupeMaterials(gltf.scene)
 
   root.add(gltf.scene)
+
+  // Cube-net seam weld (Phase A — intra-mesh, flat-space).
+  // Vertices near face-block boundary lines get snapped to exact seam
+  // coordinates so the deterministic sphere-projection shader produces
+  // identical output on both sides of the seam. Duplicate rings within
+  // the same mesh are then merged via mergeVertices — pure index
+  // compaction for exact-equal positions, all attributes (colour, uv,
+  // normal, ...) preserved from the first-seen vert. Runs AFTER dedupe
+  // so it sees the final material layout but BEFORE buildGrass, so the
+  // ground's vertex-colour density layer operates on the welded topology.
+  const weldStats = weldCubeNetSeams(root)
+  if (import.meta.env?.DEV) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[diorama] seam weld: ${weldStats.vertsSnapped} snapped in ${weldStats.meshesSnapped}/${weldStats.meshesVisited} meshes; ` +
+      `${weldStats.vertsMergedAway} merged in ${weldStats.meshesMerged} meshes`,
+    )
+  }
 
   // Animation mixer drives every clip the exporter baked in. Plays on loop;
   // individual actions can be gated via mixer.clipAction(clip).setLoop(...)
