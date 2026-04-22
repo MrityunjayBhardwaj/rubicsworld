@@ -3,7 +3,7 @@ import { FACES, type FaceDef } from './faces'
 import { N } from './tile'
 
 const SEG = 8       // subdivisions per tile edge (smoothness of curvature)
-const GAP = 0.04    // fraction of tile span used as inset on each edge
+const GAP = 0       // inset on each tile edge — 0 so tiles meet, no background showing through as "border lines"
 const RADIUS = 1
 
 function buildOne(face: FaceDef, u: number, v: number): BufferGeometry {
