@@ -438,6 +438,117 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     return emptyGrassResult()
   }
 
+  // Step 0b — build a CPU height/normal sampler from the ground geometry so
+  // each blade sits on the actual sculpted surface (not a flat plane at
+  // groundOffset). World-space triangles are binned into a coarse XZ grid
+  // once at build; per-candidate lookup is O(k) in the few triangles whose
+  // XZ bbox overlaps the query cell. Barycentric check in the XZ plane
+  // rejects cells that land outside any triangle (island-shaped grounds,
+  // holes). One-time cost; zero per-frame cost.
+  type GroundSample = { y: number; normal: THREE.Vector3 }
+  const groundTris: {
+    ax: number; ay: number; az: number
+    bx: number; by: number; bz: number
+    cx: number; cy: number; cz: number
+    xMin: number; xMax: number; zMin: number; zMax: number
+    nx: number; ny: number; nz: number
+  }[] = []
+  {
+    const gm = groundMesh as THREE.Mesh
+    const geom = gm.geometry
+    const posAttr = geom.attributes.position as THREE.BufferAttribute | undefined
+    if (!posAttr) {
+      // eslint-disable-next-line no-console
+      console.error('[grass] ground mesh has no position attribute — skipping grass.', gm.name)
+      return emptyGrassResult()
+    }
+    const indexAttr = geom.index as THREE.BufferAttribute | null
+    const world = gm.matrixWorld
+    const vA = new THREE.Vector3()
+    const vB = new THREE.Vector3()
+    const vC = new THREE.Vector3()
+    const e1 = new THREE.Vector3()
+    const e2 = new THREE.Vector3()
+    const nrm = new THREE.Vector3()
+    const triCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3
+    for (let t = 0; t < triCount; t++) {
+      const ia = indexAttr ? indexAttr.getX(t * 3)     : t * 3
+      const ib = indexAttr ? indexAttr.getX(t * 3 + 1) : t * 3 + 1
+      const ic = indexAttr ? indexAttr.getX(t * 3 + 2) : t * 3 + 2
+      vA.fromBufferAttribute(posAttr, ia).applyMatrix4(world)
+      vB.fromBufferAttribute(posAttr, ib).applyMatrix4(world)
+      vC.fromBufferAttribute(posAttr, ic).applyMatrix4(world)
+      e1.subVectors(vB, vA)
+      e2.subVectors(vC, vA)
+      nrm.crossVectors(e1, e2)
+      if (nrm.lengthSq() < 1e-20) continue  // degenerate tri
+      nrm.normalize()
+      groundTris.push({
+        ax: vA.x, ay: vA.y, az: vA.z,
+        bx: vB.x, by: vB.y, bz: vB.z,
+        cx: vC.x, cy: vC.y, cz: vC.z,
+        xMin: Math.min(vA.x, vB.x, vC.x),
+        xMax: Math.max(vA.x, vB.x, vC.x),
+        zMin: Math.min(vA.z, vB.z, vC.z),
+        zMax: Math.max(vA.z, vB.z, vC.z),
+        nx: nrm.x, ny: nrm.y, nz: nrm.z,
+      })
+    }
+  }
+  if (groundTris.length === 0) {
+    // eslint-disable-next-line no-console
+    console.error('[grass] ground mesh has no valid triangles — skipping grass.', (groundMesh as THREE.Mesh).name)
+    return emptyGrassResult()
+  }
+  // Grid sized so each cell holds a handful of tris on average. ~80×60 gives
+  // cell ≈ 0.1 world units on the 8×6 net, fine for terrain with thousands
+  // of tris. Scales with ground size because cellW/cellH are derived, not fixed.
+  const GRID_COLS = 80
+  const GRID_ROWS = 60
+  const gridCellW = (groundMax.x - groundMin.x) / GRID_COLS
+  const gridCellH = (groundMax.z - groundMin.z) / GRID_ROWS
+  const groundCells: number[][] = Array.from({ length: GRID_COLS * GRID_ROWS }, () => [])
+  for (let ti = 0; ti < groundTris.length; ti++) {
+    const tri = groundTris[ti]
+    const c0 = Math.max(0, Math.min(GRID_COLS - 1, Math.floor((tri.xMin - groundMin.x) / gridCellW)))
+    const c1 = Math.max(0, Math.min(GRID_COLS - 1, Math.floor((tri.xMax - groundMin.x) / gridCellW)))
+    const r0 = Math.max(0, Math.min(GRID_ROWS - 1, Math.floor((tri.zMin - groundMin.z) / gridCellH)))
+    const r1 = Math.max(0, Math.min(GRID_ROWS - 1, Math.floor((tri.zMax - groundMin.z) / gridCellH)))
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        groundCells[r * GRID_COLS + c].push(ti)
+      }
+    }
+  }
+  const sampleGroundAt = (x: number, z: number): GroundSample | null => {
+    const c = Math.floor((x - groundMin.x) / gridCellW)
+    const r = Math.floor((z - groundMin.z) / gridCellH)
+    if (c < 0 || c >= GRID_COLS || r < 0 || r >= GRID_ROWS) return null
+    const list = groundCells[r * GRID_COLS + c]
+    for (let i = 0; i < list.length; i++) {
+      const tri = groundTris[list[i]]
+      // Barycentric containment in the XZ plane.
+      const v0x = tri.bx - tri.ax, v0z = tri.bz - tri.az
+      const v1x = tri.cx - tri.ax, v1z = tri.cz - tri.az
+      const v2x = x - tri.ax,       v2z = z - tri.az
+      const d00 = v0x * v0x + v0z * v0z
+      const d01 = v0x * v1x + v0z * v1z
+      const d11 = v1x * v1x + v1z * v1z
+      const d20 = v2x * v0x + v2z * v0z
+      const d21 = v2x * v1x + v2z * v1z
+      const denom = d00 * d11 - d01 * d01
+      if (denom === 0) continue
+      const v = (d11 * d20 - d01 * d21) / denom
+      const w = (d00 * d21 - d01 * d20) / denom
+      const u = 1 - v - w
+      const eps = 1e-6
+      if (u < -eps || v < -eps || w < -eps) continue
+      const y = u * tri.ay + v * tri.by + w * tri.cy
+      return { y, normal: new THREE.Vector3(tri.nx, tri.ny, tri.nz) }
+    }
+    return null
+  }
+
   // Step 1 — exclusion rects (skipped if a painted mask is in use).
   type Rect = { xMin: number; xMax: number; zMin: number; zMax: number; owner: string }
   const exclusions: Rect[] = []
@@ -485,11 +596,12 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   type Per = {
     positions: THREE.Vector3[]
     positions2D: THREE.Vector2[]
+    normals: THREE.Vector3[]
     hues: number[]
     yaws: number[]
     scales: number[]
   }
-  const emptyPer = (): Per => ({ positions: [], positions2D: [], hues: [], yaws: [], scales: [] })
+  const emptyPer = (): Per => ({ positions: [], positions2D: [], normals: [], hues: [], yaws: [], scales: [] })
   const per: Record<Bucket, Per> = {
     grass:  emptyPer(),
     pink:   emptyPer(),
@@ -521,12 +633,18 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       }
       if (inside) { excluded++; continue }
     }
+    // Lift the candidate onto the actual ground surface. Miss ⇒ candidate
+    // sits over a hole/gap in the ground geometry; treat as excluded so the
+    // meadow stays strictly surface-bound.
+    const sample = sampleGroundAt(flatX, flatZ)
+    if (!sample) { excluded++; continue }
     // Even 20% split across buckets.
     const bucketIdx = Math.min(4, Math.floor(Math.random() * 5))
     const bucket = BUCKETS[bucketIdx]
     const bp = per[bucket]
-    bp.positions.push(new THREE.Vector3(flatX, groundOffset, flatZ))
+    bp.positions.push(new THREE.Vector3(flatX, sample.y + groundOffset, flatZ))
     bp.positions2D.push(new THREE.Vector2(flatX, flatZ))
+    bp.normals.push(sample.normal)
     bp.hues.push(Math.random())
     bp.yaws.push(Math.random() * Math.PI * 2)
     bp.scales.push(0.75 + Math.random() * 0.5)
@@ -569,13 +687,40 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     mesh.receiveShadow = false
     mesh.raycast = () => {}
 
+    // Blade frame: +Y aligned with the ground's world normal at the blade
+    // root, then yaw around that normal. On a flat ground normal=(0,1,0)
+    // this reduces to the old setFromAxisAngle(+Y, yaw) path; on a sculpted
+    // slope it tilts the blade so it grows OUT of the surface, not out of
+    // world-up. Wind bending stays consistent because the vertex shader
+    // derives the bend direction from `transpose(iRot) * worldWind` — any
+    // instance basis, tilted or not, maps world wind into the blade's local
+    // frame correctly.
     const _mat   = new THREE.Matrix4()
     const _q     = new THREE.Quaternion()
     const _scale = new THREE.Vector3()
-    const _axisY = new THREE.Vector3(0, 1, 0)
+    const _basis = new THREE.Matrix4()
+    const _up    = new THREE.Vector3()
+    const _ref   = new THREE.Vector3()
+    const _right0 = new THREE.Vector3()
+    const _fwd0   = new THREE.Vector3()
+    const _right  = new THREE.Vector3()
+    const _fwd    = new THREE.Vector3()
+    const WORLD_X = new THREE.Vector3(1, 0, 0)
+    const WORLD_Z = new THREE.Vector3(0, 0, 1)
     for (let i = 0; i < n; i++) {
       const src = perm[i]
-      _q.setFromAxisAngle(_axisY, bp.yaws[src])
+      _up.copy(bp.normals[src])
+      // Pick a reference axis that isn't parallel to the normal.
+      _ref.copy(Math.abs(_up.y) > 0.99 ? WORLD_X : WORLD_Z)
+      _right0.crossVectors(_ref, _up).normalize()
+      _fwd0.crossVectors(_up, _right0)  // already unit since both orthonormal
+      const yaw = bp.yaws[src]
+      const cy = Math.cos(yaw)
+      const sy = Math.sin(yaw)
+      _right.copy(_right0).multiplyScalar(cy).addScaledVector(_fwd0, sy)
+      _fwd.crossVectors(_up, _right)
+      _basis.makeBasis(_right, _up, _fwd)
+      _q.setFromRotationMatrix(_basis)
       const s = bp.scales[src]
       _scale.set(s, s, s)
       _mat.compose(bp.positions[src], _q, _scale)
