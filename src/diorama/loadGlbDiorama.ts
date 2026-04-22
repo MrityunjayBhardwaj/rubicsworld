@@ -150,6 +150,36 @@ export async function loadGlbDiorama(
     )
   }
 
+  // Recompute per-vertex averaged normals on the ground/terrain. Two
+  // reasons this closes visible face-to-face seams (e.g. A↔F) that the
+  // sphere-projection shader alone can't:
+  //   1. Blender exports flat-shaded or tight-auto-smooth normals for
+  //      heightmap terrains — each triangle has its own normal, producing
+  //      cross-seam lighting jumps where face A's last triangle row meets
+  //      face F's first row.
+  //   2. weldCubeNetSeams' mergeVertices step keeps the first-seen
+  //      vertex's normal per cluster; at seam duplicates, that normal
+  //      represents only one side's triangle, leaving a pinch on the other.
+  // computeVertexNormals averages adjacent-triangle normals per vertex,
+  // smoothing shading across triangles AND across face seams in one pass.
+  // Applied only to the ground (name starts with ground/terrain) — other
+  // meshes keep their authored normals on purpose (trees, buildings).
+  let ground: THREE.Mesh | null = null
+  root.traverse(o => {
+    if (ground) return
+    const m = o as THREE.Mesh
+    if (!m.isMesh) return
+    const nm = (m.name || '').toLowerCase()
+    if (nm.startsWith('ground') || nm.startsWith('terrain')) ground = m
+  })
+  if (ground) {
+    (ground as THREE.Mesh).geometry.computeVertexNormals()
+    if (import.meta.env?.DEV) {
+      // eslint-disable-next-line no-console
+      console.log(`[diorama] recomputed ground normals on "${(ground as THREE.Mesh).name}"`)
+    }
+  }
+
   // Animation mixer drives every clip the exporter baked in. Plays on loop;
   // individual actions can be gated via mixer.clipAction(clip).setLoop(...)
   // if that becomes needed.
