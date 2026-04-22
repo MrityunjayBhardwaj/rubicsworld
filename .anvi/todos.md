@@ -43,6 +43,20 @@ Own branch: `feat/bundle-split`.
 
 ---
 
+## MEADOW_PERF_CULLING — per-cell visibility culling for glb-loaded diorama
+**Captured:** 2026-04-21 · **Status:** proposed, not built
+
+After material dedup (150→33 on current scene), sphere mode still renders each of 153 meshes in all 24 per-tile passes and relies on clip planes to reject fragments. For a 153-mesh glb-loaded diorama this is ~3,700 draw calls/frame + full vertex pipeline on every mesh in every pass.
+
+**Approach:** at load time, compute each mesh's flat-space AABB → 6-bit face-block mask (bit i = overlaps face i). Each per-tile render sets `mesh.visible = (mask & currentFaceBit) !== 0` before `gl.render`. Skips draw call entirely for meshes that can't contribute to this tile. Expected ~6× draw-call reduction on typical single-block-per-mesh scenes.
+
+No shader changes. P5/P8 not applicable. Branch: `perf/per-cell-cull`.
+
+## MEADOW_MESH_MERGE — merge glb meshes sharing a material
+**Captured:** 2026-04-21 · **Status:** proposed, follow-up to dedup
+
+After dedupeMaterials runs, many meshes share material refs. Merging those into a single BufferGeometry per shared-material group collapses 153 meshes → ~33 (one per unique material). Per-pass draw calls drop 5×. Tricky for skinned / animated meshes — do per-group merge only when no animation clip targets objects in the group.
+
 ## LOTTIE_POLISH — swap placeholder swipe-hint for designed asset
 **Captured:** 2026-04-19 · **Status:** quick polish, pre-jam
 

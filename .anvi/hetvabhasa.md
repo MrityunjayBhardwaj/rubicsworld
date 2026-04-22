@@ -97,6 +97,45 @@ _(At every 10th entry: review, prune stale/non-generalizable entries.)_
 **The trap:** Trying to #ifdef-guard the chunk, or editing the merged shader. Root fix: **put each colliding effect in its own EffectPass** (add them imperatively via `composer.addPass`). Costs one draw call per effect; buys independent shader scope.
 **REF:** UNGROUNDED — canonical instance `src/world/RealismFX.tsx` (one EffectPass per realism-effect).
 
+## P9: InstancedMesh invisible in sphere mode — custom vertex patch omits `instanceMatrix`
+**Root cause:** `patchMaterialForSphere` replaces `#include <project_vertex>` with code that computes `vec4 worldPos = modelMatrix * vec4(transformed, 1.0)` — but for an InstancedMesh three.js normally multiplies `instanceMatrix` in the default chunk. Skipping it collapses EVERY instance onto the first instance's sphere-projected position, so thousands of blades render stacked on one dot and the field looks empty.
+**Detection signal:** Instanced geometry (grass, flowers) renders fine in cube-net / split / cube previews but is completely invisible on the sphere. Non-instanced props sharing the same patched material look correct.
+**The trap:** Checking frustum culling, clip planes, mesh counts, sphere-terrain depth ordering — all red herrings because the instance matrices ARE live and ARE correct. Root fix: **fold `instanceMatrix` into the patched vertex shader**. Three auto-declares `instanceMatrix` when USE_INSTANCING is defined; guard the branch:
+```glsl
+#ifdef USE_INSTANCING
+  vec4 _os = instanceMatrix * vec4(transformed, 1.0);
+#else
+  vec4 _os = vec4(transformed, 1.0);
+#endif
+vec4 worldPos = modelMatrix * _os;
+// also feed _os into vClipPosition for clipping
+```
+**REF:** UNGROUNDED — canonical instance `src/diorama/TileGrid.tsx:patchMaterialForSphere` (`#ifdef USE_INSTANCING` branch inside `<project_vertex>` override).
+
+## P10: Calling `bpy.ops.wm.read_factory_settings` from inside a Blender operator segfaults on return
+**Root cause:** `read_factory_settings` tears down the current scene graph, which invalidates the RNA PointerRNA the running operator is bound to. When `self.report(...)` or the implicit `return {'FINISHED'}` fires, Blender walks a dangling path and crashes in `RNA_property_collection_lookup_string_index`.
+**Detection signal:** Blender crashes (EXC_BAD_ACCESS) with a stack topped by `pyrna_struct_path_resolve` → `rna_operator_exec_cb` immediately after a Python operator that internally calls `wm.read_factory_settings`. The operator's work DOES complete; the segfault happens on exit.
+**The trap:** Wrapping the call in try/except or catching in the caller — neither sees the crash because it's inside the RNA teardown, not the Python layer. Root fix: **clear via the data API**, not the operator. `for obj in list(bpy.data.objects): bpy.data.objects.remove(obj, do_unlink=True)` does not touch the calling operator's stack.
+**REF:** UNGROUNDED — canonical instance `blender-plugin/rubics_world.py:RUBICS_OT_Import.execute`.
+
+## P11: InstancedMesh `mesh.count` scaling chops the TAIL, not a uniform subset
+**Root cause:** Three.js renders only the first `mesh.count` instances of an InstancedMesh. If the authoring order is grouped (e.g. all face-block E instances, then A, then B, ...), reducing count chops the end of the array — the last group disappears first, giving the illusion of face-by-face filling instead of uniform density thinning.
+**Detection signal:** A density slider looks like it fills "patchy, face by face" instead of smoothly thinning the whole field. At 100% density it looks even; at 50% one group is gone entirely.
+**The trap:** Debugging the sampler, re-computing face-block exclusions, tweaking the shader. The geometry IS correct — the render-order assumption is wrong. Root fix: **Fisher-Yates shuffle the instance array** (positions, yaws, scales, hues, plus any per-instance attribute) after sampling so any `mesh.count = N` subset is uniformly random across all source groups.
+**REF:** UNGROUNDED — canonical instance `src/diorama/buildGrass.ts` (per-bucket shuffle before `setMatrixAt`).
+
+## P12: glTF-loaded scenes explode material count → linear shader-compile cost on load
+**Root cause:** The Blender glTF exporter instantiates a fresh material per mesh by default, even when two meshes use visually-identical properties. A 150-mesh diorama commonly arrives with 100+ unique materials. Any per-material `onBeforeCompile` patch (sphere projection, fresnel) then compiles that many shaders, and every hot-reload swap repeats the cost.
+**Detection signal:** Scene takes seconds to appear after load; FPS recovers once it's up. Hot-reload swaps cause visible stalls. `scene.traverse` + Set of material.uuid reveals dozens more materials than visually distinct looks.
+**The trap:** Blaming the exporter, suggesting Blender-side fixes, tuning the shader. Root fix: **dedupe materials after load** — walk the loaded scene, hash each material by (colour, PBR scalars, texture uuids, side, alphaTest), and replace duplicates with the canonical instance. Patches applied via idempotent `userData` guards (our sphere patch uses `__spherePatched`) so sharing is safe.
+**REF:** UNGROUNDED — canonical instance `src/diorama/loadGlbDiorama.ts:dedupeMaterials`.
+
+## P13: Blender `depsgraph_update_post` fires on non-authoring events
+**Root cause:** The depsgraph handler fires on every re-evaluation: selection changes, viewport orbits, animation preview ticks, driver re-evals — not just geometry/transform mutations. Using it as a "scene changed" signal triggers constantly during normal interaction.
+**Detection signal:** An auto-export / auto-save handler writes the file dozens of times per minute even when the user is just navigating. Console shows exports on every viewport rotation.
+**The trap:** Adding debounce alone (still runs every tick on idle); adding an undo-post handler (still fires on selection). Root fix: **two-layer gate** — (1) filter `depsgraph.updates` by `is_updated_transform/geometry/shading` AND restrict to relevant datablock types (`Object`, `Mesh`, `Material`, `Action`, `Armature`); (2) compare a content fingerprint (blake2b over object transforms, mesh vert counts, modifier signatures, action ranges) before writing — skip if equal to the last exported fingerprint.
+**REF:** UNGROUNDED — canonical instance `blender-plugin/rubics_world.py:_live_depsgraph_handler` + `_scene_fingerprint`.
+
 ## P8: Depth-derived normal reconstruction breaks on custom vertex displacement
 **Root cause:** Occlusion passes like N8AO reconstruct surface normals by taking DEPTH DELTAS between neighbouring screen pixels and unprojecting. This assumes depth varies smoothly and linearly with screen position. A vertex shader that displaces geometry non-linearly (sphere projection, bezier height curve) produces valid-but-discontinuous depth at tile seams → normal reconstruction yields garbage → `finalAo = 1.0` (no occlusion) everywhere.
 **Detection signal:** N8AO enabled with aggressive params shows zero AO. AO-only debug mode renders pure white. DoF on the same scene works correctly (confirms depth IS populated). Extreme params (radius 30, screen-space mode) don't help.

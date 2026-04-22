@@ -143,6 +143,46 @@ useFrame(() => {
 **Implication:** Treat this as the default recipe for any R3F scene with realism-effects-adjacent ambitions. Deviate only with reason.
 **REF:** UNGROUNDED — canonical instance `src/App.tsx` (Canvas) + `src/world/PostFx.tsx` (EffectComposer).
 
+### PV6: InstancedMesh + material-level vertex patch must fold `instanceMatrix`
+**Statement:** Wherever a material's `onBeforeCompile` replaces `<project_vertex>`, the replacement MUST include `instanceMatrix` in worldPos (under `#ifdef USE_INSTANCING`), else all instances collapse to instance[0]'s location.
+**Causal status:** CAUSAL.
+**Scope:** `patchMaterialForSphere` + any future vertex-displacement patch used with InstancedMesh.
+**Breaks when:** Patch only runs against non-instanced geometry.
+**Confirmed by:** 2026-04-21 — grass InstancedMeshes invisible in sphere mode until the guard was added.
+**Implication:** Canonical snippet in `src/diorama/TileGrid.tsx:patchMaterialForSphere` — copy when writing new vertex patches.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/TileGrid.tsx` (project_vertex override with USE_INSTANCING branch).
+
+### PV7: Instance order must be shuffled when `mesh.count` is user-controlled
+**Statement:** Wherever the visible count of an InstancedMesh is driven by a user slider, instance matrices must be Fisher-Yates shuffled across authoring groups so `count = N` is a uniformly random subset.
+**Causal status:** STRUCTURAL — three renders `instances[0..count)`; unsorted group-order produces group-wise disappearance.
+**Scope:** Grass + 4 flower meshes; any future count-controlled instanced population.
+**Breaks when:** Count is always 100% OR order is visually meaningful.
+**Confirmed by:** 2026-04-21 — density slider at 10% showed grass only on first-sampled face blocks before shuffle.
+**Implication:** Shuffle in lockstep with every per-instance attribute (`iHue`).
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (per-bucket shuffle).
+
+### PV8: Rebuildable scene state lives in module-scope refs, not React state
+**Statement:** Wherever user state must survive a scene rebuild triggered outside React (hot reload, rebuildWithMask, mode switch), it lives in a module-scoped mutable ref that the build path reads, plus an explicit post-swap re-apply callback the rebuilder invokes.
+**Causal status:** CAUSAL — React doesn't re-fire useEffect on external three.js identity changes.
+**Scope:** `grassRefs.activeMask`, `grassRefs.reapplyControls`, every mesh/count slot on grassRefs.
+**Breaks when:** State is purely ephemeral (e.g. mouse position).
+**Confirmed by:** 2026-04-21 — hot-reload swap dropped painted mask + density back to defaults until mirrored into grassRefs and `reapplyControls()` called post-swap.
+**Implication:** When you add a Leva knob affecting a rebuildable object, store in grassRefs AND register in reapplyControls. Don't rely on useEffect deps.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts:grassRefs`.
+
+### PV9: Blender addon authors in Z-up; glTF export_yup=True bridges sides
+**Statement:** The Blender addon uses Blender-native Z-up (ground=XY, height=Z). glTF export flips to Y-up at the boundary. `buildDiorama.ts` face-block tables use three-js Y-up; the addon's tables use Blender Z-up.
+**Causal status:** STRUCTURAL — two frames bridged by the exporter's Y-Z swap.
+**Scope:** Blender addon files + the loadGlbDiorama path.
+**Breaks when:** Export flag changed to `export_yup=False` (would require three-js side changes).
+**Confirmed by:** 2026-04-21 — first guide-pass drew vertical rects because the validator used three-js axes.
+**Implication:** Every axis-aware line in the addon uses Blender conventions. README carries both tables for reference.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `blender-plugin/rubics_world.py` (FACE_BLOCKS y_min/y_max) vs `src/diorama/buildDiorama.ts` (z_min/z_max header).
+
 ### Entry Format (with mandatory REF)
 
 ```

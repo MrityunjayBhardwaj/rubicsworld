@@ -134,6 +134,43 @@ useControls('PostFx', {
 
 **REF:** UNGROUNDED — canonical instance `src/world/PostFx.tsx` (outer `useControls` has no 3rd arg).
 
+### PK3: glTF diorama load lifecycle
+**Lifecycle:**
+1. `loadGlbDiorama(url)` — async — `src/diorama/loadGlbDiorama.ts`
+2. `GLTFLoader.loadAsync` resolves — async
+3. Zero-mesh defensive guard — sync — bail to null if gltf has no isMesh descendants
+4. Traverse + `frustumCulled = false` — sync
+5. `dedupeMaterials(gltf.scene)` — sync — collapse identical MSM/MPM refs (~150→~33 on current scene)
+6. `AnimationMixer(gltf.scene)` + `.play()` every clip — sync
+7. `buildGrass(root, { maskImage: grassRefs.activeMask })` — sync — honours persisted mask
+8. `root.add(gltf.scene)` + each meadow mesh — sync; caller adds root to dScene
+9. (sphere only) `patchSceneForSphere(root, sphereUniformsRef.current)` — sync — idempotent via `__spherePatched`
+10. `grassRefs.reapplyControls?.()` — sync — Leva state restored to new meshes
+
+**Common violation:** Calling `buildGrass(root)` without the `maskImage` option after the user has loaded a painted mask. Fix: read `grassRefs.activeMask` on every rebuild path (loadGlbDiorama + rebuildWithMask both do).
+
+**Detection:** Pre/post swap `grassRefs.maxCount` — should stay equal when a mask is active (mask sampling yields same allowed count if scene geometry is unchanged).
+
+**REF:** UNGROUNDED — `src/diorama/loadGlbDiorama.ts` (path) + `src/diorama/TileGrid.tsx:swapInScene` (caller).
+
+### PK4: Hot-reload diorama swap lifecycle
+**Lifecycle:**
+1. Blender Live Mode writes `public/diorama.glb` — out of process — `blender-plugin/rubics_world.py:_live_tick`
+2. Vite chokidar watcher fires — sync on Node — `vite.config.ts:dioramaHotReload`
+3. `server.ws.send({ type: 'custom', event: 'diorama:changed', data: { ts } })` — sync
+4. Browser `import.meta.hot.on('diorama:changed', ...)` — async — `src/diorama/TileGrid.tsx`
+5. `swapInScene(`${glbPath}?t=${ts}`, 'none')` — async — `?t=` busts the browser glb cache
+6. PK3 steps 1–9 run
+7. Previous root removed from dScene; geometries + materials disposed — sync
+8. New root added; sphere patch re-applied — sync
+9. `grassRefs.reapplyControls?.()` — sync
+
+**Common violation:** Skipping step 9 — the new meshes come up at buildGrass's default 50% count / uniform defaults and the user sees their panel state "wiped".
+
+**Detection:** Snapshot `mesh.count` + any non-default uniform before the swap and assert equality after.
+
+**REF:** UNGROUNDED — `vite.config.ts:dioramaHotReload` (server side) + `src/diorama/TileGrid.tsx:swapInScene` (client side).
+
 ### Entry Format (with mandatory REF)
 
 ```
