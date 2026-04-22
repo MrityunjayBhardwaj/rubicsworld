@@ -89,7 +89,16 @@ function TileMesh({
         onPointerOver={() => setHovered(true)}
         onPointerOut={() => setHovered(false)}
       >
+        {/* Key on grassMap truthiness so the material REMOUNTS when the
+            toggle flips. Three defines USE_MAP at shader-compile time; adding
+            a `map` to an already-compiled material doesn't recompile unless
+            `needsUpdate = true` is set. R3F doesn't auto-flag that for map
+            adds/removes, so toggling grass after initial render otherwise
+            binds the texture to a USE_MAP-less shader — which silently
+            ignores it. Remount is cheap (three.js pooled material creation)
+            and sidesteps the needsUpdate dance entirely. */}
         <animated.meshStandardMaterial
+          key={grassMap ? 'grass' : 'plain'}
           color={grassMap ? '#ffffff' : geom.color}
           map={grassMap}
           roughness={0.7}
@@ -221,7 +230,7 @@ export function CubeSphere() {
   // Leva toggle for grass map. Live, reactive — the prop flows straight to
   // every TileMesh's meshStandardMaterial `map`, which three.js rebinds on
   // prop change without a full material swap.
-  const { grass } = useControls('Rubik (classic)', { grass: false }, { collapsed: true })
+  const { grass } = useControls('Rubik (classic)', { grass: false })
   // Reuse the diorama's cached grass texture upload — same GPU slot.
   const grassMap = useMemo(() => grass ? grassTexture() : null, [grass])
 
