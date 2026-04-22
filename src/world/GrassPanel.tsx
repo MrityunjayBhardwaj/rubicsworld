@@ -54,14 +54,14 @@ function renderMaskCanvas(w: number, h: number): HTMLCanvasElement | null {
   // Everything black by default (out-of-bounds = no grass).
   ctx.fillStyle = '#000'
   ctx.fillRect(0, 0, w, h)
-  // Allowed face blocks → white.
+  // Allowed ground rect(s) → white.
   ctx.fillStyle = '#fff'
   for (const b of data.blocks) {
     ctx.fillRect(
-      toPxX(b.cx - b.halfSize),
-      toPxY(b.cz - b.halfSize),
-      b.halfSize * 2 * scale,
-      b.halfSize * 2 * scale,
+      toPxX(b.cx - b.halfX),
+      toPxY(b.cz - b.halfZ),
+      b.halfX * 2 * scale,
+      b.halfZ * 2 * scale,
     )
   }
   // Prop exclusions → black.
@@ -344,17 +344,17 @@ function renderOverlayCanvas(w: number, h: number): HTMLCanvasElement | null {
   ctx.fillStyle = '#14281c'
   ctx.strokeStyle = '#3a6a45'
   for (const b of data.blocks) {
-    const x0 = toPxX(b.cx - b.halfSize)
-    const y0 = toPxY(b.cz - b.halfSize)
-    const ww = b.halfSize * 2 * scale
-    const hh = b.halfSize * 2 * scale
+    const x0 = toPxX(b.cx - b.halfX)
+    const y0 = toPxY(b.cz - b.halfZ)
+    const ww = b.halfX * 2 * scale
+    const hh = b.halfZ * 2 * scale
     ctx.fillRect(x0, y0, ww, hh)
     ctx.strokeRect(x0, y0, ww, hh)
     ctx.fillStyle = '#88c098'
     ctx.font = `${Math.max(11, Math.floor(scale * 0.06))}px system-ui`
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText(`F${b.face}`, toPxX(b.cx), toPxY(b.cz))
+    ctx.fillText(b.face < 0 ? 'ground' : `F${b.face}`, toPxX(b.cx), toPxY(b.cz))
     ctx.fillStyle = '#14281c'
   }
 
@@ -441,23 +441,23 @@ function DensityMapOverlay() {
       domW * scale, domH * scale,
     )
 
-    // Face-block rectangles (allowed domain)
+    // Ground rect(s) — the allowed emission domain, pulled from the
+    // ground/terrain mesh's XZ AABB (face === -1 for the single ground entry).
     ctx.fillStyle = '#14281c'
     ctx.strokeStyle = '#3a6a45'
     ctx.lineWidth = 1
     for (const b of data.blocks) {
-      const x0 = toPxX(b.cx - b.halfSize)
-      const y0 = toPxY(b.cz - b.halfSize)
-      const w  = b.halfSize * 2 * scale
-      const h  = b.halfSize * 2 * scale
+      const x0 = toPxX(b.cx - b.halfX)
+      const y0 = toPxY(b.cz - b.halfZ)
+      const w  = b.halfX * 2 * scale
+      const h  = b.halfZ * 2 * scale
       ctx.fillRect(x0, y0, w, h)
       ctx.strokeRect(x0, y0, w, h)
-      // face label (cube-face convention)
       ctx.fillStyle = '#88c098'
       ctx.font = '11px system-ui'
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
-      ctx.fillText(`F${b.face}`, toPxX(b.cx), toPxY(b.cz))
+      ctx.fillText(b.face < 0 ? 'ground' : `F${b.face}`, toPxX(b.cx), toPxY(b.cz))
       ctx.fillStyle = '#14281c'
     }
 
