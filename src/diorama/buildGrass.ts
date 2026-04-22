@@ -18,15 +18,11 @@
  */
 import * as THREE from 'three'
 
-// Face-block definitions mirroring `buildDiorama.ts` header geometry.
-const FACE_BLOCKS: readonly { face: 0 | 1 | 2 | 3 | 4 | 5; cx: number; cz: number }[] = [
-  { face: 4, cx: -1, cz:  0 }, // E (+Z)
-  { face: 0, cx:  1, cz:  0 }, // A (+X)
-  { face: 1, cx: -3, cz:  0 }, // B (-X)
-  { face: 5, cx:  3, cz:  0 }, // F (-Z)
-  { face: 2, cx: -1, cz:  2 }, // C (+Y)
-  { face: 3, cx: -1, cz: -2 }, // D (-Y)
-] as const
+// Ground discovery — grass emits from the AABB of the first mesh in the
+// diorama whose name starts with "ground" or "terrain" (case-insensitive,
+// so Blender-exported "terrain.001" matches). Authoritative source of the
+// meadow footprint; no hardcoded 8×6 fallback.
+const GROUND_NAME_PREFIXES = ['ground', 'terrain'] as const
 
 const DEFAULT_EXCLUDE = [
   'pond', 'stream', 'windmill', 'trees', 'hut', 'fence',
@@ -148,7 +144,7 @@ export const grassRefs: {
 export interface GrassDebugData {
   halfW: number
   halfH: number
-  blocks: { face: number; cx: number; cz: number; halfSize: number }[]
+  blocks: { face: number; cx: number; cz: number; halfX: number; halfZ: number }[]
   exclusions: { xMin: number; xMax: number; zMin: number; zMax: number; owner: string }[]
   flatPositions: Float32Array
   stats: { candidates: number; allowed: number; excluded: number }
@@ -351,6 +347,48 @@ function createFlowerMaterial(color: { value: THREE.Color }): THREE.MeshStandard
 
 // ── Main builder ───────────────────────────────────────────────────────────
 
+/** Returned by buildGrass when the diorama has no ground/terrain mesh.
+ *  Same shape as a real GrassResult so callers (loadGlbDiorama, buildDiorama,
+ *  TileGrid) never branch on presence — they always iterate `meshes` and
+ *  call `update`/`dispose`. Publishes empty refs so the Leva panel's
+ *  reapplyControls path is a no-op instead of throwing. */
+function emptyGrassResult(): GrassResult {
+  grassRefs.mesh = null
+  grassRefs.maxCount = 0
+  grassRefs.meadowMeshes = []
+  grassRefs.meadowMax = { grass: 0, pink: 0, purple: 0, yellow: 0, red: 0 }
+  grassDebug.data = null
+  const stubGeom = new THREE.BufferGeometry()
+  const stubMat = new THREE.MeshBasicMaterial()
+  const stub = (name: string) => {
+    const m = new THREE.InstancedMesh(stubGeom, stubMat, 0)
+    m.name = name
+    m.visible = false
+    return m
+  }
+  const grass = stub('grass')
+  const flowers: Record<FlowerKey, THREE.InstancedMesh> = {
+    pink:   stub('flower-pink'),
+    purple: stub('flower-purple'),
+    yellow: stub('flower-yellow'),
+    red:    stub('flower-red'),
+  }
+  return {
+    grass,
+    flowers,
+    meshes: [], // deliberately empty so callers don't add invisible stubs to the scene
+    uniforms: grassUniforms,
+    update: () => {},
+    dispose: () => { stubGeom.dispose(); stubMat.dispose() },
+    stats: {
+      candidates: 0,
+      allowed: 0,
+      excluded: 0,
+      perBucket: { grass: 0, pink: 0, purple: 0, yellow: 0, red: 0 },
+    },
+  }
+}
+
 export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): GrassResult {
   const {
     densityPerUnit2 = 20000,
@@ -368,8 +406,39 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   const MASK_HALF_W = 4
   const MASK_HALF_H = 3
 
-  // Step 1 — exclusion rects (skipped if a painted mask is in use).
+  // Step 0 — locate the ground. Grass emits from the XZ AABB of the first
+  // mesh whose name starts with "ground" or "terrain" (Blender exports add
+  // ".001" suffixes — startsWith handles both). No ground found ⇒ the
+  // diorama's author hasn't declared a meadow surface; log and skip.
   dioramaRoot.updateMatrixWorld(true)
+  let groundMesh: THREE.Mesh | null = null
+  dioramaRoot.traverse(obj => {
+    if (groundMesh) return
+    const m = obj as THREE.Mesh
+    if (!m.isMesh) return
+    const n = (m.name || '').toLowerCase()
+    if (GROUND_NAME_PREFIXES.some(p => n.startsWith(p))) groundMesh = m
+  })
+  if (!groundMesh) {
+    // eslint-disable-next-line no-console
+    console.error('[grass] no ground object is found — add a mesh named "ground" (or "terrain") to the diorama. Skipping grass.')
+    return emptyGrassResult()
+  }
+  const groundBox = new THREE.Box3().setFromObject(groundMesh)
+  const groundMin = groundBox.min
+  const groundMax = groundBox.max
+  const groundCx = (groundMin.x + groundMax.x) * 0.5
+  const groundCz = (groundMin.z + groundMax.z) * 0.5
+  const groundHalfX = (groundMax.x - groundMin.x) * 0.5
+  const groundHalfZ = (groundMax.z - groundMin.z) * 0.5
+  const groundArea = (groundMax.x - groundMin.x) * (groundMax.z - groundMin.z)
+  if (!isFinite(groundArea) || groundArea <= 0) {
+    // eslint-disable-next-line no-console
+    console.error('[grass] ground AABB is degenerate — skipping grass.', { name: (groundMesh as THREE.Mesh).name, groundMin, groundMax })
+    return emptyGrassResult()
+  }
+
+  // Step 1 — exclusion rects (skipped if a painted mask is in use).
   type Rect = { xMin: number; xMax: number; zMin: number; zMax: number; owner: string }
   const exclusions: Rect[] = []
   const _box = new THREE.Box3()
@@ -429,37 +498,39 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     red:    emptyPer(),
   }
 
-  const candidatesPerBlock = Math.max(1, Math.floor(densityPerUnit2 * 4))
-  const totalCandidates = candidatesPerBlock * 6
+  // Budget candidates by the ground's area so density reads as "per unit²"
+  // regardless of the authored ground size (an island-shaped ground with a
+  // smaller AABB gets proportionally fewer candidates than the full 8×6 net).
+  const totalCandidates = Math.max(1, Math.floor(densityPerUnit2 * groundArea))
   let excluded = 0
   const debugFlat: number[] = []
+  const groundWidth  = groundMax.x - groundMin.x
+  const groundDepth  = groundMax.z - groundMin.z
 
-  for (const block of FACE_BLOCKS) {
-    for (let i = 0; i < candidatesPerBlock; i++) {
-      const flatX = block.cx + (Math.random() * 2 - 1)
-      const flatZ = block.cz + (Math.random() * 2 - 1)
-      if (maskImage) {
-        if (!allowedByMask(flatX, flatZ)) { excluded++; continue }
-      } else {
-        let inside = false
-        for (const r of exclusions) {
-          if (flatX >= r.xMin && flatX <= r.xMax && flatZ >= r.zMin && flatZ <= r.zMax) {
-            inside = true; break
-          }
+  for (let i = 0; i < totalCandidates; i++) {
+    const flatX = groundMin.x + Math.random() * groundWidth
+    const flatZ = groundMin.z + Math.random() * groundDepth
+    if (maskImage) {
+      if (!allowedByMask(flatX, flatZ)) { excluded++; continue }
+    } else {
+      let inside = false
+      for (const r of exclusions) {
+        if (flatX >= r.xMin && flatX <= r.xMax && flatZ >= r.zMin && flatZ <= r.zMax) {
+          inside = true; break
         }
-        if (inside) { excluded++; continue }
       }
-      // Even 20% split across buckets.
-      const bucketIdx = Math.min(4, Math.floor(Math.random() * 5))
-      const bucket = BUCKETS[bucketIdx]
-      const bp = per[bucket]
-      bp.positions.push(new THREE.Vector3(flatX, groundOffset, flatZ))
-      bp.positions2D.push(new THREE.Vector2(flatX, flatZ))
-      bp.hues.push(Math.random())
-      bp.yaws.push(Math.random() * Math.PI * 2)
-      bp.scales.push(0.75 + Math.random() * 0.5)
-      debugFlat.push(flatX, flatZ)
+      if (inside) { excluded++; continue }
     }
+    // Even 20% split across buckets.
+    const bucketIdx = Math.min(4, Math.floor(Math.random() * 5))
+    const bucket = BUCKETS[bucketIdx]
+    const bp = per[bucket]
+    bp.positions.push(new THREE.Vector3(flatX, groundOffset, flatZ))
+    bp.positions2D.push(new THREE.Vector2(flatX, flatZ))
+    bp.hues.push(Math.random())
+    bp.yaws.push(Math.random() * Math.PI * 2)
+    bp.scales.push(0.75 + Math.random() * 0.5)
+    debugFlat.push(flatX, flatZ)
   }
 
   const allowedTotal =
@@ -541,12 +612,15 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   grassRefs.meadowMeshes = meshes
   grassRefs.meadowMax   = maxPerBucket
 
-  // Density-map debug data.
+  // Density-map debug data. `halfW/halfH = 4/3` stays pinned to the mask's
+  // flat-space frame (independent of ground size) so painted masks keep
+  // their coordinates; the single block entry describes the actual ground
+  // rect the panel draws as the allowed region.
   const flatArr = new Float32Array(debugFlat)
   grassDebug.data = {
     halfW: 4,
     halfH: 3,
-    blocks: FACE_BLOCKS.map(b => ({ face: b.face, cx: b.cx, cz: b.cz, halfSize: 1 })),
+    blocks: [{ face: -1, cx: groundCx, cz: groundCz, halfX: groundHalfX, halfZ: groundHalfZ }],
     exclusions: exclusions.map(e => ({ ...e })),
     flatPositions: flatArr,
     stats: { candidates: totalCandidates, allowed: allowedTotal, excluded },

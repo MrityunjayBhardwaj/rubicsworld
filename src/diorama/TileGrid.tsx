@@ -551,7 +551,13 @@ export function TileGrid({ mode = 'split', bezier }: {
     // terrain. Rendered once per frame (no clip planes), giving a single
     // continuous green base across all cube faces. Per-tile object passes
     // render on top with their own clip planes.
-    if (mode === 'sphere') {
+    //
+    // When `?glb=…` is active, the loaded glb carries its own ground/terrain
+    // mesh (the meadow's authoritative emission surface), so rendering the
+    // global sphere terrain would double-draw the same visual layer. Skip
+    // building it for glb mode — the glb's cube-net terrain projects onto
+    // the sphere via the same pipeline as every other prop.
+    if (mode === 'sphere' && !glbPath) {
       const terrainMesh = buildSphereTerrain()
       terrainMesh.frustumCulled = false
       const terrainScene = new THREE.Scene()
