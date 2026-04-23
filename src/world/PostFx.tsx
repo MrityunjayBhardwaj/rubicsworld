@@ -61,7 +61,8 @@ export function PostFx() {
     n8aoEnabled, n8aoRadius, n8aoScreenSpaceRadius, n8aoIntensity, n8aoFalloff,
     n8aoSamples, n8aoDenoiseSamples, n8aoDenoiseRadius, n8aoHalfRes,
     n8aoColor, n8aoRenderMode, n8aoQuality,
-    dofEnabled, dofFollowCursor, dofFocusRange, dofBokehScale, dofSmoothing, dofDebugTarget,
+    dofEnabled, dofFollowCursor, dofFocusRangeOnCursor, dofFocusRangeWholePlanet,
+    dofBokehScale, dofSmoothing, dofDebugTarget,
     bloomEnabled, bloomScrambled, bloomSolved, bloomThreshold, bloomSmoothing,
     noiseEnabled, noiseOpacity,
     vignetteEnabled, vignetteScrambled, vignetteSolved, vignetteOffset,
@@ -132,9 +133,12 @@ export function PostFx() {
     'Depth of Field': folder({
       dofEnabled: { value: true, label: 'on' },
       dofFollowCursor: { value: true, label: 'follow cursor (else planet)' },
-      // In postprocessing 6.x, `focalLength` is deprecated and aliases
-      // `focusRange` — the WIDTH of the sharp slab in world units.
-      dofFocusRange: { value: 2.5, min: 0.05, max: 10, step: 0.05, label: 'focus range (world)' },
+      // Two focus-slab widths in world units (postprocessing 6.x
+      // `worldFocusRange`). On-cursor: narrow so bokeh is visible on the
+      // rest of the planet. Whole-planet: ≥ planet diameter (~2m) so the
+      // entire body stays sharp when the cursor isn't on it.
+      dofFocusRangeOnCursor: { value: 0.5, min: 0.05, max: 5, step: 0.05, label: 'range on hover (m)' },
+      dofFocusRangeWholePlanet: { value: 3.0, min: 0.5, max: 10, step: 0.05, label: 'range full planet (m)' },
       dofBokehScale: { value: 1.0, min: 0, max: 8, step: 0.1, label: 'bokeh' },
       dofSmoothing: { value: 0.18, min: 0.01, max: 1, step: 0.01, label: 'follow speed' },
       dofDebugTarget: { value: false, label: 'debug: show target' },
@@ -228,6 +232,10 @@ export function PostFx() {
   const dofRef = useRef<DepthOfFieldEffect | null>(null)
   const dofTarget = useMemo(() => new THREE.Vector3(), [])
   const dofDesired = useMemo(() => new THREE.Vector3(), [])
+  // Eased focus-range value driven imperatively. Owning this in a ref (and
+  // NOT passing worldFocusRange as a prop) keeps it stable across the
+  // wrapper's re-instantiation cycles (P4) — same pattern as `target`.
+  const dofRangeRef = useRef(dofFocusRangeWholePlanet)
 
   // Dev hooks — attached once.
   useLayoutEffect(() => {
@@ -266,7 +274,13 @@ export function PostFx() {
     else dofDesired.set(0, 0, 0)
     // Frame-rate-independent ease: the same `dofSmoothing` feels the same
     // at 30 or 120 fps. Clamp to 1 so the max smoothing snaps instantly.
-    dofTarget.lerp(dofDesired, Math.min(1, dofSmoothing))
+    const ease = Math.min(1, dofSmoothing)
+    dofTarget.lerp(dofDesired, ease)
+    // Range eases between narrow (cursor on planet → bokeh visible) and
+    // wide (cursor off planet → entire planet sharp around the origin).
+    const targetRange = active ? dofFocusRangeOnCursor : dofFocusRangeWholePlanet
+    dofRangeRef.current = THREE.MathUtils.lerp(dofRangeRef.current, targetRange, ease)
+    dofRef.current.worldFocusRange = dofRangeRef.current
     if (debugMeshRef.current) debugMeshRef.current.position.copy(dofTarget)
   })
 
@@ -344,9 +358,11 @@ export function PostFx() {
         />
       ) : <></>}
       {dofEnabled ? (
+        // worldFocusRange intentionally NOT passed — managed imperatively
+        // each frame so the active vs. whole-planet ease survives the
+        // wrapper's prop-diff re-instantiation cycle (P4).
         <DepthOfField
           ref={dofRef}
-          worldFocusRange={dofFocusRange}
           bokehScale={dofBokehScale}
         />
       ) : <></>}
