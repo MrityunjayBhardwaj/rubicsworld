@@ -57,6 +57,25 @@ No shader changes. P5/P8 not applicable. Branch: `perf/per-cell-cull`.
 
 After dedupeMaterials runs, many meshes share material refs. Merging those into a single BufferGeometry per shared-material group collapses 153 meshes → ~33 (one per unique material). Per-pass draw calls drop 5×. Tricky for skinned / animated meshes — do per-group merge only when no animation clip targets objects in the group.
 
+## DOF_PERCEPTION — DoF cursor-follow works mechanically but reads as "broken" to the user
+**Captured:** 2026-04-23 · **Status:** OPEN — uniforms verified, visual not convincing
+
+**Finding:** After P22 (write to `cocMaterial.focusRange`, not effect prop) and P21 (sphere composite quad writes `gl_FragDepth`), the runtime GPU state is correct: `focusDistance` tracks the raycast hit, `focusRange` eases between on-cursor (1m) and whole-planet (20m), depth buffer is populated. Verified by direct uniform probe (`__dofEffect.cocMaterial.uniforms.focusRange.value`) in a fresh browser session.
+
+**But the user reports the effect still doesn't read as working** even at `bokehScale=4`. A deeper bokeh of 8 produces a dramatic, correct result (center-cursor tile sharp, surroundings heavy bokeh) — so the focus chain IS live. The gap is between "math is right" and "the user sees what they expected from the threejs DoF2 reference."
+
+**Possible root causes (not yet diagnosed):**
+- Default bokeh=4 is still visually subtle on our stylized low-poly scene (low-contrast edges don't show bokeh as dramatically as the high-contrast DoF2 example's debug geometry).
+- HMR / Leva-stored slider state cached old values across the default bumps; user may be seeing pre-fix numbers without realizing.
+- Sphere-projection displaces geometry non-linearly; CoC is per-pixel but the subjective "focus region" the user expects may span across tiles in a way the clipped-plane seams interrupt visually.
+- The `dofSmoothing` ease (0.18 default) might be making the focus-point slide too slow to feel responsive — user moves cursor, effect lags.
+
+**Next debug step (don't guess, observe):** ask the user to hard-refresh, enable `PostFx → DoF → debug: show target` (magenta sphere renders at the focus point). If the sphere tracks the cursor on the planet surface, the chain works — the fix is cosmetic (tighten default range, lower smoothing, raise bokeh). If the sphere doesn't move, the cursor→target pipeline has a deeper bug that our probe missed.
+
+**Cross-ref:** hetvabhasa P21, P22. Files: `src/world/PostFx.tsx` DoF useFrame block.
+
+---
+
 ## LOTTIE_POLISH — swap placeholder swipe-hint for designed asset
 **Captured:** 2026-04-19 · **Status:** quick polish, pre-jam
 

@@ -193,15 +193,15 @@ useFrame(() => {
 **Status:** IMPLEMENTED
 **REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (save/restoreRoot block) + `src/diorama/weldSeams.ts` (`try/finally` with prev* snapshots).
 
-### PV11: Grass emitter requires a ground/terrain-named mesh; absence is a hard error
-**Statement:** `buildGrass` sources its candidate sampling region from the first mesh whose name starts with `ground` or `terrain` (case-insensitive, so Blender's `terrain.001` matches). If no such mesh exists → `console.error` + `emptyGrassResult()`. No hardcoded fallback cube-net.
+### PV11: Grass emitter requires a ground/terrain-named mesh IN THE DIORAMA ROOT; presence ≠ visibility
+**Statement:** `buildGrass` sources its candidate sampling region from the first mesh (under the diorama root it was handed) whose name starts with `ground` or `terrain` (case-insensitive, so Blender's `terrain.001` matches). If no such mesh exists → `console.error` + `emptyGrassResult()`. No hardcoded fallback cube-net. **The mesh must be PRESENT in the root, but need not be VISIBLE** — `traverse()` visits invisible meshes (grass can still read geometry for AABB + triangles), while `WebGLRenderer` skips drawing them. Render-optimization toggles belong on `.visible`, never on root membership.
 **Causal status:** CAUSAL — the sampler needs an authoritative footprint; silent defaults would hide authoring bugs.
 **Scope:** `src/diorama/buildGrass.ts`, both imperative and glb load paths.
-**Breaks when:** A new diorama pipeline (procedural-only, no ground mesh) is introduced without a migration to a different emission source.
-**Confirmed by:** 2026-04-22 — ground-authored grass shipped in 8d2b9ca.
-**Implication:** Every diorama must expose a named ground/terrain. Blender addon's Init Scene and FACE_BLOCKS guides enforce this by construction; Blender validators warn if the ground is missing.
+**Breaks when:** An optimization path in TileGrid or buildDiorama *removes* the terrain mesh from the root to avoid double-draw (P23 — what happened in sphere mode with a separate global sphere-terrain). A new diorama pipeline that emits procedurally with no ground mesh also violates this; such pipelines need a different emission source.
+**Confirmed by:** 2026-04-22 — ground-authored grass shipped in 8d2b9ca. 2026-04-23 — presence-vs-visibility distinction established after sphere-mode regression (c00ef33 + P23).
+**Implication:** Every diorama must expose a named ground/terrain in the root passed to `buildGrass`. Blender addon's Init Scene and FACE_BLOCKS guides enforce this by construction. In sphere mode the imperative path keeps its flat `terrain` plane in the root and toggles `visible=false` so the global sphere-terrain is the one that actually renders.
 **Status:** IMPLEMENTED
-**REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (GROUND_NAME_PREFIXES, emptyGrassResult exit paths).
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (GROUND_NAME_PREFIXES, emptyGrassResult exit paths); `src/diorama/TileGrid.tsx:hideFlatTerrainInSphereMode`.
 
 ### PV12: Grass blades MUST adhere to the ground's sculpted surface (height + normal)
 **Statement:** Every blade's position is lifted onto the ground by triangle-grid raycast (XY AABB → bin by cell → barycentric check → interpolate Y + face normal). Candidates that miss every triangle (ground hole) are excluded. Per-blade orientation uses `(groundNormal, yaw)` so blades grow out of the surface on slopes.

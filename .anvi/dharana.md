@@ -79,13 +79,16 @@ HOW: Treat any `@react-three/postprocessing` wrapper prop that accepts a mutable
 - Mutable-ref prop works at mount, silently breaks on first slider drag (P4)
 - Shader chunk collision when merging effects in one EffectPass (P7)
 - Deprecated prop alias silently changes units between library major versions (P6)
+- Constructor-only option assigned at runtime creates a stray JS property that no uniform reads — self-state looks correct, GPU shader stays at default (P22)
 
 **Observation targets (THEIR side):**
 - `effect.target === ourVec3` identity check each frame
 - Inspect `EffectPass.effects` array for chunk-collision risk (look for duplicate `#include` references)
 - CHANGELOG of the library when upgrading postprocessing versions
+- For every per-frame imperative write on a postprocessing effect, grep the class body in `node_modules/postprocessing/build/index.js` for a real `get <name>` / `set <name>`. If only the constructor reads it, route the write through the inner material's uniform path instead (e.g. `effect.cocMaterial.focusRange`, not `effect.worldFocusRange`).
+- Probe `effect.<innerMaterial>.uniforms.<name>.value` to verify the uniform is actually changing — never trust the fact that `effect.<name>` reads back your set value, because plain JS properties are setter-free by default.
 
-**Fatality status:** APPROACHING (3 patterns already clustered — P4, P6, P7)
+**Fatality status:** FATAL (4 patterns clustered — P4, P6, P7, P22). This boundary should be a first-class reference doc with every known safe/unsafe write pattern enumerated.
 
 ### B3: Project three.js <-> stale library pinned to older three
 FILES: patches/realism-effects+1.1.2.patch, src/world/RealismFX.tsx, package.json, node_modules/realism-effects/dist/index.js
@@ -106,23 +109,28 @@ HOW: Use patch-package for targeted rewrites. Typical drift: `WebGLMultipleRende
 
 **Fatality status:** BELOW THRESHOLD (one pattern — P5 — but 5 distinct drift types in a single library)
 
-### B4: Depth buffer <-> depth-derived normal reconstruction (N8AO)
-FILES: src/world/PostFx.tsx, src/diorama/TileGrid.tsx, node_modules/n8ao/dist/N8AO.js
-ORIGIN: N8AO produced zero occlusion on our sphere-projected planet despite extreme params (PR #15, 2026-04-21). AO-only debug mode renders pure white → finalAo=1 everywhere → no occlusion detected. DoF reads same depth buffer correctly.
-WHY: Without tracking this boundary, the next AO-style effect we try on the planet (GTAO, HBAO, any neighbour-delta normal reconstruction) will fail the same way. Custom vertex displacement (sphere projection, bezier heights) breaks the smooth-depth assumption N8AO relies on.
-HOW: Prefer AO passes with EXPLICIT normal pass input (SSAO has one). Avoid depth-derived-normal techniques on displaced geometry. When photoreal Blender diorama (standard MVP geometry) lands, re-test N8AO — likely starts working.
-**REF:** UNGROUNDED — canonical diagnosis in `src/world/PostFx.tsx` (dual N8AO + SSAO exposure)
+### B4: Offscreen composite <-> depth-dependent post-effects (DoF, AO, SSGI)
+FILES: src/world/PostFx.tsx, src/diorama/TileGrid.tsx (sphereTarget FBO + composite quad), node_modules/n8ao/dist/N8AO.js, node_modules/postprocessing/build/index.js
+ORIGIN (expanded 2026-04-23): Two distinct silent failures have clustered here — N8AO produces zero occlusion on the sphere (P8, 2026-04-21); sphere-mode composite quad writes only color, leaving the main framebuffer's depth attachment at clear value → every depth-gated post effect silently loses its signal (P21, 2026-04-23). Third related pattern: render-path optimization that omits a mesh from the diorama root for "it's drawn elsewhere" reasons breaks introspection-based consumers that traverse the same tree (P23, 2026-04-23 — buildGrass lookup failure on imperative sphere mode).
+WHY: This boundary is where a private custom render path (24 per-tile renders to an offscreen FBO, then composite back) hands control back to a library pipeline (EffectComposer) that expects "a normal scene rendered to my inputBuffer." Every silent-failure mode here stems from ONE of the two sides making an assumption the other side doesn't honor — the library assumes depth is written, the custom path assumes "output color is enough"; the library assumes meshes in the scene graph correspond to what renders, the custom path omits meshes for perf. Without tracking this boundary as FATAL, each new depth-dependent effect and each new scene-graph consumer re-discovers the same class of bug.
+HOW:
+- Every offscreen-to-main composite MUST write both color AND depth. For the sphere composite quad: sample `sphereTarget.depthTexture` and assign to `gl_FragDepth`; set `depthWrite:true`, `depthTest:false` (we own the value). Check at review time: if a composite shader omits depth write, block the PR.
+- Every optimization that "removes a mesh from the tree because it's drawn elsewhere" MUST separate presence from visibility. Keep the mesh in the tree (introspecting consumers find it); toggle `.visible=false` (renderer skips draw). Rule of thumb: if you're about to write `if (condition) root.add(mesh)`, ask "does any non-renderer consumer traverse this root?" If yes, always add and use `.visible` instead.
+- AO passes on this boundary: prefer explicit-normal-pass effects (SSAO) over depth-derived normal reconstruction (N8AO) while sphere projection is active.
+**REF:** UNGROUNDED — canonical diagnosis in `src/world/PostFx.tsx` (dual N8AO + SSAO exposure); `src/diorama/TileGrid.tsx:500-527` (composite quad with gl_FragDepth write); `src/diorama/TileGrid.tsx:hideFlatTerrainInSphereMode` (presence-vs-visibility helper for buildGrass).
 
 **Silent-failure modes:**
-- AO-only debug renders pure white (finalAo=1 everywhere; P8)
-- DoF on same buffer works → proves depth IS populated → narrows root cause to normal reconstruction, not depth plumbing
+- N8AO AO-only debug renders pure white (finalAo=1 everywhere; P8) — depth-derived normal reconstruction fails on displaced geometry.
+- DoF / AO / SSGI see cleared far-plane depth everywhere the planet renders if the composite quad doesn't write `gl_FragDepth` (P21).
+- Render-path optimization removes a mesh from the root that a sibling consumer (buildGrass) traverses for name/bounds — lookup returns null, consumer emits its "gracefully handled" error, feature silently missing (P23).
 
 **Observation targets (THEIR side):**
-- N8AO compositor `renderMode=1` (AO-only) screenshot — should NOT be all white on a scene with geometry
-- DoF focusDistance computed from target → if nonzero, depth buffer is fine
-- Custom vertex shaders that call `transformed = ...` or replace `<project_vertex>` — suspect for AO incompat
+- N8AO compositor `renderMode=1` (AO-only) screenshot — should NOT be all white on a scene with geometry.
+- Toggle the composite quad's fragment shader to output depth as grayscale (`gl_FragColor = vec4(vec3(pow(depth, 512.0)), 1.0)`) — should render a proper depth gradient across the planet; black/empty means depth chain is broken.
+- For any render optimization, enumerate OTHER consumers of the same scene graph before deleting/omitting a mesh. Traverse-based consumers (`buildGrass`, raycast-target walkers, bounds-based camera framers) are the easy-to-miss siblings.
+- Probe `__dofEffect.cocMaterial.uniforms.depthBuffer.value` — should be a `DepthTexture` named `EffectComposer.StableDepth`. If null or empty, the composer didn't receive depth.
 
-**Fatality status:** BELOW THRESHOLD
+**Fatality status:** FATAL (3 patterns clustered — P8, P21, P23). Pattern shape is "custom render path makes an assumption the library side silently disagrees with."
 
 ## 2. Active Invariant Spans
 
