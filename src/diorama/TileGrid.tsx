@@ -32,6 +32,21 @@ function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
 }
 
+/** Hide the flat "terrain" plane in sphere mode.
+ *  Context: buildGrass (PV11) finds its sampling surface by traversing the
+ *  diorama root for a mesh whose name starts with "ground"/"terrain". In
+ *  sphere mode we render a separate global sphere-terrain mesh; the flat
+ *  plane would double-draw. Keep it present but invisible: traverse still
+ *  visits it (grass can build its AABB from the geometry), three.js skips
+ *  rendering invisible meshes. */
+function hideFlatTerrainInSphereMode(root: THREE.Object3D, mode: TileMode) {
+  if (mode !== 'sphere') return
+  root.traverse(obj => {
+    const m = obj as THREE.Mesh
+    if (m.isMesh && m.name === 'terrain') m.visible = false
+  })
+}
+
 export type TileMode = 'split' | 'cube' | 'sphere'
 
 // ── Cell definitions ─────────────────────────────────────────────────
@@ -540,12 +555,18 @@ export function TileGrid({ mode = 'split', bezier }: {
     const glbPath = glbParam === '1' ? '/diorama.glb' : glbParam
 
     // In sphere mode, terrain is rendered as a single global SphereGeometry
-    // mesh (see globalTerrainScene below) — omit it from the per-tile root
-    // to avoid double-drawing and so per-tile clip-plane rasterization gaps
-    // simply expose the continuous global sphere underneath.
+    // mesh (see globalTerrainScene below) — the flat "terrain" plane stays
+    // in the diorama root but is hidden to avoid double-drawing. We can't
+    // simply omit it: buildGrass (PV11) traverses the root looking for a
+    // mesh whose name starts with "ground"/"terrain" to sample spawn XZ
+    // bounds from. Without that plane present, imperative sphere mode
+    // fails the lookup and grass silently skips. Keep the plane in the
+    // root with visible=false — three.js skips render for invisible
+    // meshes, traverse still visits them.
     let diorama: DioramaScene = glbPath
       ? { root: new THREE.Group(), update: () => {} }
-      : buildDiorama({ includeTerrain: mode !== 'sphere' })
+      : buildDiorama({ includeTerrain: true })
+    if (!glbPath) hideFlatTerrainInSphereMode(diorama.root, mode)
     dioramaRef.current = diorama
 
     // Disable frustum culling — the sphere projection shader moves vertices
@@ -645,7 +666,11 @@ export function TileGrid({ mode = 'split', bezier }: {
         if (swapCancelled) return
         const next = loaded ?? (
           fallbackMode === 'imperative'
-            ? buildDiorama({ includeTerrain: mode !== 'sphere' })
+            ? (() => {
+                const d = buildDiorama({ includeTerrain: true })
+                hideFlatTerrainInSphereMode(d.root, mode)
+                return d
+              })()
             : null
         )
         if (!next) return  // keep current scene on failed reload
