@@ -488,7 +488,14 @@ export function TileGrid({ mode = 'split', bezier }: {
   // Offscreen target for the 24-pass sphere output. Post-fx runs on a
   // fullscreen quad sampling this texture, so bloom/vignette can coexist
   // with the custom render loop.
-  const sphereTarget = useFBO()
+  //
+  // `depthBuffer: true` here makes drei's useFBO attach a DepthTexture
+  // (see node_modules/@react-three/drei/core/Fbo.js:31). That depth
+  // texture is what the composite quad below samples to repopulate the
+  // main framebuffer's depth — without it, PostFx (DoF, N8AO, SSAO) sees
+  // the cleared far-plane depth everywhere the planet renders and can't
+  // build a correct per-pixel circle-of-confusion / AO.
+  const sphereTarget = useFBO({ depthBuffer: true })
 
   const quadMaterial = useMemo(() => new THREE.ShaderMaterial({
     vertexShader: `
@@ -498,16 +505,25 @@ export function TileGrid({ mode = 'split', bezier }: {
         gl_Position = vec4(position.xy, 0.0, 1.0);
       }
     `,
+    // Write both color AND depth. The depth attachment of sphereTarget is
+    // a DepthTexture (FloatType, window-space [0..1]) — sampling .r and
+    // assigning to gl_FragDepth is a 1:1 pass-through, giving PostFx the
+    // true per-pixel depth of the rendered planet surface.
     fragmentShader: `
       uniform sampler2D uMap;
+      uniform sampler2D uDepth;
       varying vec2 vUv;
       void main() {
         gl_FragColor = texture2D(uMap, vUv);
+        gl_FragDepth = texture2D(uDepth, vUv).r;
       }
     `,
-    uniforms: { uMap: { value: sphereTarget.texture } },
+    uniforms: {
+      uMap:   { value: sphereTarget.texture },
+      uDepth: { value: sphereTarget.depthTexture },
+    },
     depthTest: false,
-    depthWrite: false,
+    depthWrite: true,
   }), [sphereTarget])
 
   useEffect(() => {
