@@ -278,9 +278,14 @@ export function PostFx() {
     dofTarget.lerp(dofDesired, ease)
     // Range eases between narrow (cursor on planet → bokeh visible) and
     // wide (cursor off planet → entire planet sharp around the origin).
+    // IMPORTANT: `worldFocusRange` on DepthOfFieldEffect is a CONSTRUCTOR
+    // option only — assigning it per-frame on the effect instance is a
+    // silent no-op that creates a stray property. The live setter lives
+    // on `cocMaterial.focusRange` (postprocessing/build/index.js:5082),
+    // which writes the CoC shader's `focusRange` uniform directly.
     const targetRange = active ? dofFocusRangeOnCursor : dofFocusRangeWholePlanet
     dofRangeRef.current = THREE.MathUtils.lerp(dofRangeRef.current, targetRange, ease)
-    dofRef.current.worldFocusRange = dofRangeRef.current
+    dofRef.current.cocMaterial.focusRange = dofRangeRef.current
     if (debugMeshRef.current) debugMeshRef.current.position.copy(dofTarget)
   })
 
