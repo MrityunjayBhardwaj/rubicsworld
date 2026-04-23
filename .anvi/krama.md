@@ -171,6 +171,31 @@ useControls('PostFx', {
 
 **REF:** UNGROUNDED — `vite.config.ts:dioramaHotReload` (server side) + `src/diorama/TileGrid.tsx:swapInScene` (client side).
 
+### PK5: glb load post-processing pipeline (between GLTFLoader and TileGrid)
+**Lifecycle:** (runs inside `loadGlbDiorama` and is indirectly re-entered by `rebuildWithMask`)
+1. `GLTFLoader.parseAsync` resolves → `gltf.scene` — async — `src/diorama/loadGlbDiorama.ts`
+2. Zero-mesh guard: if `meshCount === 0`, return null → caller falls back — sync
+3. `gltf.scene.traverse(c => c.frustumCulled = false)` — sync, depends on [1]
+4. `dedupeMaterials(gltf.scene)` — sync, shares canonical materials by fingerprint
+5. `root.add(gltf.scene)` — sync
+6. `weldCubeNetSeams(root)` — sync, snaps near-seam verts + mergeVertices per mesh
+7. Find ground by name prefix (`ground`/`terrain`) + `geometry.computeVertexNormals()` — sync, depends on [6]
+8. `buildGrass(root, { maskImage: grassRefs.activeMask })` — sync, depends on [7]
+9. `for (const m of grass.meshes) root.add(m)` — sync
+10. Mixer creation (if `gltf.animations.length`) — sync
+11. Return `{ root, update }` to caller (TileGrid) — sync
+
+TileGrid then applies the sphere patch (step 12): `patchSceneForSphere(root, uniforms)` — MUST happen AFTER buildGrass so new grass materials get patched too.
+
+**Common violation:**
+- Running weld BEFORE dedupe — the weld sees per-mesh-private materials and can't take advantage of the dedupe's canonical pointers (unlikely to break visuals but wastes work).
+- Running `computeVertexNormals` BEFORE weld — weld's mergeVertices runs later and clobbers the freshly-computed normals back to first-seen, undoing the smoothing (step ordering 6-then-7 is load-bearing).
+- `buildGrass` before computeVertexNormals — the ground's vertex-colour density layer reads from the same attributes and expects smooth normals on the output meshes; not fatal but produces flat-shaded grass in diagnostic renders.
+
+**Detection:** Console logs appear in this order on load: `[diorama] material dedup:`, `[diorama] seam weld:`, `[diorama] recomputed ground normals on "…"`. Grass refs published on `window.__grass` after step 11. Any reordering surfaces as one of the above violation patterns.
+
+**REF:** UNGROUNDED — canonical instance `src/diorama/loadGlbDiorama.ts` (top-to-bottom of `loadGlbDiorama` + inline console logs).
+
 ### Entry Format (with mandatory REF)
 
 ```

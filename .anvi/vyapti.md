@@ -183,6 +183,46 @@ useFrame(() => {
 **Status:** IMPLEMENTED
 **REF:** UNGROUNDED — `blender-plugin/rubics_world.py` (FACE_BLOCKS y_min/y_max) vs `src/diorama/buildDiorama.ts` (z_min/z_max header).
 
+### PV10: Scene-graph helpers called post-mount must neutralise the diorama root transform
+**Statement:** Wherever a function called on an already-mounted diorama root reads `matrixWorld` (via `setFromObject`, `applyMatrix4`, `updateMatrixWorld` propagation), it must save/zero/restore the root's transform around the work. Initial-mount identity is not a stable invariant — TileGrid mutates `root.position/quaternion/matrix` every frame.
+**Causal status:** STRUCTURAL — the 24-pass rendering contract explicitly uses the root matrix as scratch space.
+**Scope:** `buildGrass`, `weldCubeNetSeams`, any future diorama-level helper.
+**Breaks when:** TileGrid's per-pass transform-write strategy changes to push into a child rather than the root (would invert the contract).
+**Confirmed by:** 2026-04-22 — rebuildWithMask returned ~400 candidates in a sliver near one face; fix landed in 9435936.
+**Implication:** Every such helper ships a save/restoreRoot pattern — do not assume identity. New helpers must follow suit.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (save/restoreRoot block) + `src/diorama/weldSeams.ts` (`try/finally` with prev* snapshots).
+
+### PV11: Grass emitter requires a ground/terrain-named mesh; absence is a hard error
+**Statement:** `buildGrass` sources its candidate sampling region from the first mesh whose name starts with `ground` or `terrain` (case-insensitive, so Blender's `terrain.001` matches). If no such mesh exists → `console.error` + `emptyGrassResult()`. No hardcoded fallback cube-net.
+**Causal status:** CAUSAL — the sampler needs an authoritative footprint; silent defaults would hide authoring bugs.
+**Scope:** `src/diorama/buildGrass.ts`, both imperative and glb load paths.
+**Breaks when:** A new diorama pipeline (procedural-only, no ground mesh) is introduced without a migration to a different emission source.
+**Confirmed by:** 2026-04-22 — ground-authored grass shipped in 8d2b9ca.
+**Implication:** Every diorama must expose a named ground/terrain. Blender addon's Init Scene and FACE_BLOCKS guides enforce this by construction; Blender validators warn if the ground is missing.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (GROUND_NAME_PREFIXES, emptyGrassResult exit paths).
+
+### PV12: Grass blades MUST adhere to the ground's sculpted surface (height + normal)
+**Statement:** Every blade's position is lifted onto the ground by triangle-grid raycast (XY AABB → bin by cell → barycentric check → interpolate Y + face normal). Candidates that miss every triangle (ground hole) are excluded. Per-blade orientation uses `(groundNormal, yaw)` so blades grow out of the surface on slopes.
+**Causal status:** CAUSAL — without this, sculpted terrain shows grass floating or sunken.
+**Scope:** `src/diorama/buildGrass.ts:sampleGroundAt` + per-bucket matrix composition in `buildBucketMesh`.
+**Breaks when:** The ground's world-space AABB is invalid (caught with `isFinite(groundArea) && groundArea > 0`), or all its triangles are degenerate.
+**Confirmed by:** 2026-04-22 — sculpted terrain followed by blades in ceebca7.
+**Implication:** Grid resolution is 80×60 over the ground's AABB; O(k) per candidate where k is tris in the query cell (~1–5 for reasonable tessellation). One-time cost at build; zero per-frame cost.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (groundTris array + sampleGroundAt closure).
+
+### PV13: Sphere-mode rendering needs gap=0 AND face-boundary EDGE_OVERDRAW epsilon
+**Statement:** Sphere cube-cell rendering must use `gap = 0` for the within-face clip planes (so halfCell reaches the face edges exactly) AND a small positive constant on the face-boundary planes (`(N±R)·p ≥ -EDGE_OVERDRAW`) so adjacent passes overlap by a sub-pixel sliver at cube edges. Either alone leaves a visible seam.
+**Causal status:** STRUCTURAL — two distinct failure classes (a within-face sky strip and a cross-face hairline), each with its own cause, each requiring its own remedy.
+**Scope:** `src/diorama/TileGrid.tsx:cubeCellRender` + the per-mode gap selection.
+**Breaks when:** A future mode brings back a global sphere-terrain backfill (which would mask the within-face gap and let the sphere-mode gap revert).
+**Confirmed by:** 2026-04-22 through 2026-04-23 — gap=0 in 257e58d, EDGE_OVERDRAW in 7ec4b34.
+**Implication:** `CUBE_GAP = 0.06` stays as a cube/split-preview feature; sphere gets its own zero. EDGE_OVERDRAW = 1e-3 is safe — invisible overdraw, no z-fighting (same shader output by construction).
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/TileGrid.tsx` (mode-specific gap on line 589; EDGE_OVERDRAW on cubeCellRender's face-boundary planes).
+
 ### Entry Format (with mandatory REF)
 
 ```
