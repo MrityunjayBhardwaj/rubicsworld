@@ -1,122 +1,97 @@
-# New-session handoff prompt — Rubic's World (end of `feat/grass`: meadow + Blender round-trip)
+# New-session handoff prompt — Rubic's World (end of Day 13: seam-weld + classic rubik view + Blender Init)
 
 Copy the block below into the next session verbatim.
 
 ---
 
-We're continuing **Rubic's World** — my solo entry for levelsio's **Vibe Jam 2026**.
+We're continuing **Rubic's World** — solo Vibe Jam 2026 entry.
 
-**Deadline:** 1 May 2026, 13:37 UTC (~9 days out)
+**Deadline:** 1 May 2026, 13:37 UTC (~8 days out)
 **Live URL:** https://rubicsworld.vercel.app (auto-deploys on `git push origin main`)
 **Repo:** https://github.com/MrityunjayBhardwaj/rubicsworld
-**Local dev:** `npm run dev` → http://localhost:5173 (fixed port now that vite.config has a custom plugin)
+**Local dev:** `npm run dev` → http://localhost:5173 (custom Vite plugin pins the port)
 **Working dir:** `/Users/mrityunjaybhardwaj/Documents/projects/RubicsWorld`
-**Current branch:** `feat/grass` — 25 commits on top of main, not yet merged / PR'd.
+**Current branch:** `feat/seam-investigation` — stacked on `feat/seam-weld` → `feat/grass-from-ground` → `feat/grass` → `main`. **None merged.** Merge stack is the top TODO.
 
-## Canonical docs (read in this order)
+## Canonical reads (in order)
 
-1. `PHASE_1.md` — 15-day plan, scope, stack, cut order, gates.
+1. `PHASE_1.md` — 15-day plan + stack + cut order.
 2. `THESIS.md` — full game design.
-3. `BLENDER_PIPELINE.md` — authoring contract for dioramas (face-block layout, subdivision rules, animation compatibility).
-4. `blender-plugin/README.md` — install the `rubics_world.py` addon, panel walkthrough, validator rules, live-mode docs.
-5. Memory: `~/.claude/projects/-Users-mrityunjaybhardwaj-Documents-projects-RubicsWorld/memory/` — `project_architecture_meadow.md` is the CURRENT architecture snapshot. Also read `feedback_blender_pipeline.md`, `project_postfx_strategy.md`, `feedback_library_ref_attachment.md`, `feedback_library_patch_package.md`.
-6. `.anvi/` catalogues — `hetvabhasa.md` P1–P13, `vyapti.md` PV1–PV9, `krama.md` PK1–PK4, `dharana.md`.
+3. `BLENDER_PIPELINE.md` — authoring contract (face-block layout, subdivision rules, animation compat).
+4. `blender-plugin/README.md` — addon install, panel walkthrough.
+5. Memory: `~/.claude/projects/-Users-mrityunjaybhardwaj-Documents-projects-RubicsWorld/memory/` — **`project_architecture_day13.md` is the CURRENT snapshot** (meadow.md is SUPERSEDED). Also read `feedback_blender_pipeline.md`, `feedback_shader_patches.md`.
+6. `.anvi/` catalogues — `hetvabhasa.md` P1-P20, `vyapti.md` PV1-PV13, `krama.md` PK1-PK5, `dharana.md`.
 
 ## Where we are
 
-**Main** still has Day 11 content (onboarding tutorial PR #13, PostFx Path 1 + realism-effects infra PR #15). **`feat/grass` branch adds the entire meadow system + Blender round-trip + HMR live mode + Blender addon on top** — not yet merged to main.
+**Four unmerged branches stacked.** `main` still has only Day 11 content (onboarding tutorial + PostFx infra). Everything below rides on top.
 
-### What ships on `feat/grass`
+### `feat/grass` — meadow + Blender round-trip + Live Mode + addon
+Grass/flower InstancedMeshes (5 buckets), glb round-trip with HMR swap, material dedup (150→33), painted-PNG mask workflow, addon with guides + validate + Live Mode + two-layer dirty gate.
 
-**Meadow (`src/diorama/buildGrass.ts`, `src/world/GrassPanel.tsx`):**
-- Grass + 4 flowers (pink/purple/yellow/red) as 5 separate InstancedMeshes sharing wind uniforms
-- Authored in flat cube-net space; rides cube-net → split → cube → sphere pipeline like every other prop
-- Wind: rigid Rodrigues rotation of each blade around its root (blade length strictly preserved — isometry); spatial-wave phase from `instanceMatrix[3] · worldWindDir` so the whole field moves as one coherent sheet
-- Density: 0–50 slider over a budget of ~230K max instances. Default 25 = 50% coverage.
-- Flower %: 0–100% slider trades grass for flowers without double-placing. Per-colour weights + per-colour colour pickers.
-- Per-bucket Fisher-Yates shuffle (PV7) so density thinning reads uniformly across all 6 face-blocks, not face-by-face
-- AABB exclusion walks named props (`pond`/`trees`/`road`/…) at per-mesh granularity with per-name margin overrides
+### `feat/grass-from-ground` — grass authoring from the ground
+- `buildGrass` finds a mesh named `ground`/`terrain` (PV11), samples its XZ AABB. No fallback; missing ground = console.error + bail.
+- `sampleGroundAt` raycasts the ground's triangle grid → blades adhere to sculpted surface and grow along the normal (PV12).
+- **Vertex-color density** — Blender Vertex Paint (COLOR_0) → glTF → three → R channel barycentric-interp = per-candidate spawn probability. Composes with AABB exclusions.
+- Blender addon's fingerprint now hashes color-attribute bytes (P19 fix) so paint strokes actually fire Live Mode.
+- **Root-transform neutralisation** (P14/PV10) — buildGrass saves/zeros/restores `root.position/quat/matrix` because TileGrid overwrites them every frame. Before this fix, the Leva "load mask" button produced ~400 candidates in a sliver (computed in cube-space, not root-local).
+- Global `sphere-terrain` backfill skipped when `?glb=` is active (otherwise two grounds double-draw).
 
-**Painted mask workflow:**
-- `saveDensityMap` / `saveMask` / `saveCubenet` — download 3 PNGs (labelled overlay, clean B/W mask, top-down cube-net render)
-- `loadMask` — file picker reads painted mask, `rebuildWithMask(ImageData)` replaces AABB exclusion with pixel sampling
-- `clearMask` — drop back to AABB
-- `grassRefs.activeMask` persists across hot-reload swaps (PV8) so editing in Blender while a mask is loaded doesn't wipe it
+### `feat/seam-weld` — Phase A + sphere seam fixes + classic rubik view
+- `src/diorama/weldSeams.ts`: snap cube-net boundary verts to exact integers, `mergeVertices` per mesh. Skips InstancedMesh + SkinnedMesh. Saves/restores root (PV10).
+- Post-weld `computeVertexNormals()` on the ground (P18) — fixes weld-induced normal pinches and flat-shaded Blender exports.
+- **sphere-mode gap = 0** (P16) — within-face clip planes reach face edges exactly; cube/split previews keep their gaps.
+- **EDGE_OVERDRAW = 1e-3** on face-boundary planes (P17) — sub-pixel overdraw at cube edges closes hairline sky leaks from float-precision cross-transform drift. Both fixes are needed (PV13).
 
-**Blender glTF round-trip:**
-- `saveDioramaGlb` Leva button exports a clean flat cube-net `.glb` via GLTFExporter (on a skipMeadow throwaway so the 230K meadow matrices don't bloat the file)
-- `?glb=<path>` URL query activates the loader. `?glb=1` → `/diorama.glb`. Defaults to imperative build on any load failure (defensive zero-mesh guard catches stub glbs).
-- `loadGlbDiorama` → GLTFLoader + AnimationMixer (frame-delta capped at 100 ms for tab-focus stalls) + `dedupeMaterials` (collapse visually-identical materials — 150→33 on current scene, 3.5× fewer shader compiles)
-- Sphere-mode `patchMaterialForSphere` folds `instanceMatrix` into worldPos under `#ifdef USE_INSTANCING` (PV6) — required for any InstancedMesh to be visible in sphere mode
-
-**HMR hot reload (`vite.config.ts` + `src/diorama/TileGrid.tsx`):**
-- Custom Vite plugin `dioramaHotReload` watches `public/diorama.glb` via chokidar, emits custom `diorama:changed` WebSocket event with timestamp
-- TileGrid listens on `import.meta.hot.on`, refetches with `?t=<ts>` cache-bust, in-place scene swap via `swapInScene(...)` — Leva state survives
-- `grassRefs.reapplyControls?.()` runs post-swap so density / flower% / colours / wind / active mask all restore (PV8)
-
-**Blender addon (`blender-plugin/rubics_world.py`, single-file):**
-- Install: Edit → Preferences → Add-ons → Install → pick the file → tick checkbox → N-sidebar → "Rubic's World" tab
-- Preference: Project Path (repo root)
-- Ops: Import Diorama / Export Diorama / Validate Scene / Live Mode (toggle) / Add Face-Block Guides / Remove Guides
-- Guides are 3D wireframe cages at Z∈[0, MAX_HEIGHT=1.0] matching the uMaxHeight portal-region ceiling
-- Validator is permissive: ERROR only for meshes entirely outside the 8×6 domain; WARNING for PV1 subdivision + sub-terrain dip. Skips terrain/ground/sphere-terrain by name.
-- Live Mode: depsgraph_update_post + bpy.app.timers @ 1.5s debounce; two-layer gate (relevant-datablock filter + content fingerprint) so selection/viewport-orbit/driver-eval do NOT trigger exports (P13)
-- Blender-native Z-up (PV9); glTF `export_yup=True` bridges to three-js
-
-**Headless scripts (`scripts/`):**
-- `blender-make-sample.py` / `blender-roundtrip.py` / `blender-test-addon.py` — all verified passing
-
-### Live workflow (after `npm run dev`)
-
-1. In the browser, open **http://localhost:5173/?glb=1**
-2. Install the Blender addon (once), set Project Path, open your diorama
-3. Toggle **Live Mode** ON in the Blender panel
-4. Edit anything in Blender → auto-export in ≤1.5s → Vite fires `diorama:changed` → browser swaps scene in place. No page reload; every Leva knob, the active mask, camera, tutorial state all survive.
+### `feat/seam-investigation` — classic rubik view + Blender Init + isolate export + hairline fix
+- **Classic rubik view** — `src/world/CubeSphere.tsx` (unused since Day 6) re-exposed as fourth preview mode. Own camera profile (`[3.2, 2.2, 3.2]`, fov 45). No HDRI / PostFx / tutorial chrome. GAP=0 in `tileGeometry.ts` removes the dark borders between tiles (canvas background was showing through). UVs added (UV_REPEAT=2).
+- **Rubik grass texture toggle** — Leva `Rubik (classic)` folder → `grass` checkbox. Reuses `grassTexture()` upload. **Material KEYS on the toggle** (P15) — toggling a `map` prop post-compile on a live material is silently ignored without a remount.
+- **Blender Init Scene** — bmesh-constructed 48×36 grid (P20 — `primitive_plane_add`'s 2-triangle default doesn't survive sphere projection), generated 256×192 cube-net alpha mask packed into the .blend, `blend_method='CLIP'`. `rubics-ground` material, base color TERRAIN_GREEN.
+- **Isolate export** — scene-scoped `rubics_isolate_export` BoolProperty (default ON). When on, export skips `rubics-guide-*` helpers AND meshes whose world XY AABB is entirely outside any face block. Ground passes naturally. Implemented via `_with_isolate` context manager + `use_visible=True` on glTF export. Both manual Export and Live Mode use the wrap.
 
 ## 🔴 FIRST TASKS — pick one
 
-### Option A — Merge `feat/grass` to main
-25-commit branch, not yet PR'd. If the user is happy with the meadow + Blender pipeline, ship it. Run `anvi-ship` or manual PR.
+### Option A — Ship the stack
+Four branches = one coherent bundle of meadow + grass-from-ground + seam-weld + rubik-view work. Open ONE PR `feat/seam-investigation` → `main`. Deadline pressure favours one review pass.
 
-### Option B — Per-cell visibility culling (MEADOW_PERF_CULLING in `.anvi/todos.md`)
-After material dedup, sphere mode still runs all 153 glb meshes through 24 per-tile passes. Compute a 6-bit face-block mask per mesh at load time; toggle `mesh.visible` per pass based on whether the mesh overlaps the current tile's face. Expected ~6× draw-call reduction. No shader changes.
+### Option B — Audio pass
+Howler still unwired. Biggest jam-video uplift per unit effort. Ambient wind loop, slice-rotation click, settle chime, walk-mode footsteps. ~1 day.
 
-### Option C — Mesh merging by shared material (MEADOW_MESH_MERGE)
-After dedup, many meshes share a material. Merge into one BufferGeometry per shared-material group (non-skinned, non-animated only). 153 → ~33 meshes. ~5× fewer draws on top of culling.
+### Option C — Per-cell visibility culling
+`.anvi/todos.md` MEADOW_PERF_CULLING. Compute a 6-bit face-block mask per mesh at load; toggle `mesh.visible` per pass. Expected ~6× draw reduction.
 
-### Option D — Audio pass
-Howler is in deps, still not wired. Earlier handoff options still stand: ambient loop, slice rotation clicks, settle chime, walk-mode footsteps.
+### Option D — Bundle split
+~850 KB gzipped. Matters if jam judges hit fresh. Split drei/three/realism-effects/lottie into lazy chunks.
 
-### Option E — Bundle split (getting pressing)
-~850 KB gzipped pre-meadow. Meadow adds negligible; glb asset is public/diorama.glb so doesn't hit the JS bundle. Split drei/three/realism-effects/lottie into lazy chunks.
+My lean: **A → B**. Clear the branch stack, then audio for the demo.
 
 ## Hard invariants (don't change without reading catalogues)
 
-Adds to the Day 11 list (all Day 11 invariants still hold):
+PV1, PV6, PV7, PV8, PV9 still hold. New this milestone:
 
-- **PV6:** any `onBeforeCompile` that replaces `<project_vertex>` MUST fold `instanceMatrix` under `#ifdef USE_INSTANCING`. Canonical snippet in `TileGrid.tsx:patchMaterialForSphere`.
-- **PV7:** InstancedMesh with user-controlled `mesh.count` must Fisher-Yates shuffle instance matrices in lockstep with any per-instance attribute (`iHue`).
-- **PV8:** State that must survive scene rebuilds (mask, Leva panel values) lives in module-scope refs on `grassRefs` AND is re-applied via `grassRefs.reapplyControls?.()` post-swap.
-- **PV9:** Blender addon authors in Z-up; glTF `export_yup=True` bridges. Addon + three-js face-block tables use their respective axis conventions.
+- **PV10** — any scene-graph helper called post-mount must save/zero/restore the diorama root's transform. `buildGrass` and `weldCubeNetSeams` already do this.
+- **PV11** — grass requires a named ground/terrain; no fallback cube-net.
+- **PV12** — blades adhere to ground surface (height + normal) via `sampleGroundAt`.
+- **PV13** — sphere mode uses `gap=0` within-face AND `EDGE_OVERDRAW` on face-boundary planes; either alone leaves a seam.
 
-**New hetvabhasa patterns** (P9–P13): InstancedMesh invisible under vertex patch, `read_factory_settings` segfault, mesh.count order dependency, Blender glTF per-mesh material explosion, depsgraph handler false-positives.
+New hetvabhasa entries: **P14** (root transform contamination), **P15** (USE_MAP compile-time define), **P16** (sphere-mode clip gap), **P17** (hairline edge gap from float precision), **P18** (mergeVertices normal pinch), **P19** (fingerprint topology-only misses vertex paint), **P20** (primitive_plane_add chords through sphere).
 
-**New krama:** PK3 glTF diorama load lifecycle; PK4 hot-reload swap lifecycle.
+New krama: **PK5** — glb load post-processing pipeline (dedupe → weld → ground normals → buildGrass → sphere patch, in that order; re-ordering is load-bearing).
 
 ## Working style
 
 - Concise. 1–2 sentence end-of-turn.
-- Options-not-implementations before non-trivial work; wait for call.
+- Options-not-implementations before non-trivial work.
 - Playwright for verification; screenshots to `/tmp/rubics-test/`.
-- Commits: gitmoji + `Problem:` / `Fix:` body, no `Co-Authored-By`.
-- Always-deployable main. Ship branches in sequence.
-- Catalogues and memory in sync — when a new pattern emerges, log it before moving on.
+- Commits: gitmoji + `Problem:` / `Fix:` body. No `Co-Authored-By`.
+- Always-deployable main. Ship in sequence.
+- Catalogues + memory stay in sync; new pattern → catalogue entry before moving on.
 
 ## Start by
 
-1. `git status` — should be clean on `feat/grass`.
-2. Pull latest — no changes expected but confirm.
-3. Pick an option above (lean: A — ship the branch; or B — per-cell culling for a measurable perf win before ship).
+1. `git status` — should be clean on `feat/seam-investigation`.
+2. `git log --oneline main..HEAD` — confirm the stack (~30+ commits).
+3. Pick an option above. Lean: **A** (open the PR).
 
 ---
 
