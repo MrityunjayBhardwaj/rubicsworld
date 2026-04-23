@@ -134,12 +134,16 @@ export function PostFx() {
       dofEnabled: { value: true, label: 'on' },
       dofFollowCursor: { value: true, label: 'follow cursor (else planet)' },
       // Two focus-slab widths in world units (postprocessing 6.x
-      // `worldFocusRange`). On-cursor: narrow so bokeh is visible on the
-      // rest of the planet. Whole-planet: ≥ planet diameter (~2m) so the
-      // entire body stays sharp when the cursor isn't on it.
-      dofFocusRangeOnCursor: { value: 0.5, min: 0.05, max: 5, step: 0.05, label: 'range on hover (m)' },
-      dofFocusRangeWholePlanet: { value: 3.0, min: 0.5, max: 10, step: 0.05, label: 'range full planet (m)' },
-      dofBokehScale: { value: 1.0, min: 0, max: 8, step: 0.1, label: 'bokeh' },
+      // `cocMaterial.focusRange` — the WIDTH of zero-CoC depth around
+      // the focus point). CoC ≈ |depth - focusDistance| / focusRange,
+      // then * bokehScale for blur radius. To keep the whole planet
+      // sharp off-cursor with the camera at ~4m and the body spanning
+      // 2m of depth, range MUST be ≫ planet half-depth — otherwise
+      // edge CoC × bokehScale shows visible blur even off-cursor.
+      // 20m gives max CoC ~0.05 at planet edges → ~0.4px at bokeh=8.
+      dofFocusRangeOnCursor: { value: 1.0, min: 0.05, max: 5, step: 0.05, label: 'range on hover (m)' },
+      dofFocusRangeWholePlanet: { value: 20.0, min: 1, max: 30, step: 0.5, label: 'range full planet (m)' },
+      dofBokehScale: { value: 4.0, min: 0, max: 8, step: 0.1, label: 'bokeh' },
       dofSmoothing: { value: 0.18, min: 0.01, max: 1, step: 0.01, label: 'follow speed' },
       dofDebugTarget: { value: false, label: 'debug: show target' },
     }, { collapsed: true }),
