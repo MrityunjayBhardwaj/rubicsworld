@@ -111,7 +111,7 @@ HOW: Use patch-package for targeted rewrites. Typical drift: `WebGLMultipleRende
 
 ### B4: Offscreen composite <-> depth-dependent post-effects (DoF, AO, SSGI)
 FILES: src/world/PostFx.tsx, src/diorama/TileGrid.tsx (sphereTarget FBO + composite quad), node_modules/n8ao/dist/N8AO.js, node_modules/postprocessing/build/index.js
-ORIGIN (expanded 2026-04-23): Two distinct silent failures have clustered here — N8AO produces zero occlusion on the sphere (P8, 2026-04-21); sphere-mode composite quad writes only color, leaving the main framebuffer's depth attachment at clear value → every depth-gated post effect silently loses its signal (P21, 2026-04-23). Third related pattern: render-path optimization that omits a mesh from the diorama root for "it's drawn elsewhere" reasons breaks introspection-based consumers that traverse the same tree (P23, 2026-04-23 — buildGrass lookup failure on imperative sphere mode).
+ORIGIN (expanded 2026-04-24): FOUR distinct silent failures now clustered here — N8AO produces zero occlusion on the sphere (P8, 2026-04-21); sphere-mode composite quad writes only color, leaving the main framebuffer's depth attachment at clear value → every depth-gated post effect silently loses its signal (P21, 2026-04-23); render-path optimization that omits a mesh from the diorama root for "it's drawn elsewhere" reasons breaks introspection-based consumers that traverse the same tree (P23, 2026-04-23 — buildGrass lookup failure on imperative sphere mode); and even WITH the composite's `gl_FragDepth` write applied (P21's fix), the depth doesn't reach postprocessing's CoC-sampled DepthTexture — DoF sees far-plane, only `bokehScale` visibly changes the output (P24, 2026-04-24 — required `effect.setDepthTexture(sphereTarget.depthTexture)` force-bind per frame, bypassing EffectComposer's depth wiring entirely).
 WHY: This boundary is where a private custom render path (24 per-tile renders to an offscreen FBO, then composite back) hands control back to a library pipeline (EffectComposer) that expects "a normal scene rendered to my inputBuffer." Every silent-failure mode here stems from ONE of the two sides making an assumption the other side doesn't honor — the library assumes depth is written, the custom path assumes "output color is enough"; the library assumes meshes in the scene graph correspond to what renders, the custom path omits meshes for perf. Without tracking this boundary as FATAL, each new depth-dependent effect and each new scene-graph consumer re-discovers the same class of bug.
 HOW:
 - Every offscreen-to-main composite MUST write both color AND depth. For the sphere composite quad: sample `sphereTarget.depthTexture` and assign to `gl_FragDepth`; set `depthWrite:true`, `depthTest:false` (we own the value). Check at review time: if a composite shader omits depth write, block the PR.
@@ -123,6 +123,7 @@ HOW:
 - N8AO AO-only debug renders pure white (finalAo=1 everywhere; P8) — depth-derived normal reconstruction fails on displaced geometry.
 - DoF / AO / SSGI see cleared far-plane depth everywhere the planet renders if the composite quad doesn't write `gl_FragDepth` (P21).
 - Render-path optimization removes a mesh from the root that a sibling consumer (buildGrass) traverses for name/bounds — lookup returns null, consumer emits its "gracefully handled" error, feature silently missing (P23).
+- `gl_FragDepth` from the composite quad writes to the RT's depth attachment, but postprocessing's DoF CoC pass reads from a DepthTexture that the composer manages separately — the write doesn't land in the sampled texture. DoF uniforms (focusDistance, focusRange) appear correct via probe but have zero visual effect; only `bokehScale` changes the output (P24). Fix: bypass composer depth wiring via `effect.setDepthTexture(sphereTarget.depthTexture)` per frame.
 
 **Observation targets (THEIR side):**
 - N8AO compositor `renderMode=1` (AO-only) screenshot — should NOT be all white on a scene with geometry.
@@ -130,7 +131,7 @@ HOW:
 - For any render optimization, enumerate OTHER consumers of the same scene graph before deleting/omitting a mesh. Traverse-based consumers (`buildGrass`, raycast-target walkers, bounds-based camera framers) are the easy-to-miss siblings.
 - Probe `__dofEffect.cocMaterial.uniforms.depthBuffer.value` — should be a `DepthTexture` named `EffectComposer.StableDepth`. If null or empty, the composer didn't receive depth.
 
-**Fatality status:** FATAL (3 patterns clustered — P8, P21, P23). Pattern shape is "custom render path makes an assumption the library side silently disagrees with."
+**Fatality status:** FATAL (4 patterns clustered — P8, P21, P23, P24). Pattern shape is "custom render path makes an assumption the library side silently disagrees with." **Strongest smell at this boundary**: uniforms probe as correct but the GPU output behaves as if they're at defaults — the "my state says X, GPU sees Y" gap. Default next step at this boundary = force-bind depth/color textures directly to effect materials, skipping composer-managed plumbing.
 
 ## 2. Active Invariant Spans
 
