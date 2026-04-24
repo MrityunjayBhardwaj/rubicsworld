@@ -18,16 +18,6 @@ import type { DepthOfFieldEffect } from 'postprocessing'
  * pattern or in the composite-depth integration.
  */
 
-function DofRefProbe({
-  onRef,
-}: {
-  onRef: (e: DepthOfFieldEffect | null) => void
-}) {
-  const dofRef = useRef<DepthOfFieldEffect | null>(null)
-  useEffect(() => { onRef(dofRef.current) }, [onRef])
-  return null
-}
-
 export function DOFTest() {
   const { focusDistance, focusRange, bokehScale, showBloom } = useControls('DoF', {
     focusDistance: { value: 8, min: 0.1, max: 30, step: 0.1, label: 'focusDistance (m)' },
