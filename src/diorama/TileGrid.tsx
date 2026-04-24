@@ -512,6 +512,15 @@ export function TileGrid({ mode = 'split', bezier }: {
   // build a correct per-pixel circle-of-confusion / AO.
   const sphereTarget = useFBO({ depthBuffer: true })
 
+  // Publish sphereTarget.depthTexture so PostFx's DoF can sample planet
+  // depth directly. The composite-quad gl_FragDepth write into EffectComposer's
+  // RT depth doesn't reach DoF's CoC pass (symptom: "only bokeh works").
+  // Sphere mode only; null otherwise so PostFx falls through to its default.
+  useEffect(() => {
+    hudUniforms.uSphereDepth.value = mode === 'sphere' ? sphereTarget.depthTexture : null
+    return () => { hudUniforms.uSphereDepth.value = null }
+  }, [mode, sphereTarget])
+
   const quadMaterial = useMemo(() => new THREE.ShaderMaterial({
     vertexShader: `
       varying vec2 vUv;

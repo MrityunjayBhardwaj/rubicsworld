@@ -2,320 +2,344 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import type { DepthOfFieldEffect } from 'postprocessing'
+import { ToneMappingMode, Effect } from 'postprocessing'
 import {
-  EffectComposer,
-  Bloom,
-  DepthOfField,
-  N8AO,
+  EffectComposer, DepthOfField, Bloom, ToneMapping, Vignette, ChromaticAberration,
   Noise,
-  SMAA,
-  SSAO,
-  Vignette,
 } from '@react-three/postprocessing'
-import { BlendFunction } from 'postprocessing'
 import { folder, useControls } from 'leva'
-import { usePlanet } from './store'
-import { RealismFX } from './RealismFX'
 import { hudUniforms } from '../diorama/buildDiorama'
-
-function lerp(a: number, b: number, t: number) {
-  return a + (b - a) * t
-}
-
-function smoothstep(t: number) {
-  return t * t * (3 - 2 * t)
-}
-
-const WARM_DURATION_MS = 2000
+import { PLANET_SPHERE } from './Interaction'
 
 /**
- * Path-1 effect stack (pmndrs ecosystem only, zero new deps):
+ * DoF-ONLY debug build (branch: debug/dof-only).
  *
- *   render → SMAA → N8AO → DoF → Bloom → Noise → Vignette → screen
+ * Everything else — exposure, SMAA, N8AO, SSAO, Bloom, Noise, Vignette,
+ * RealismFX (SSGI/SSR/MotionBlur) — is stripped. Only DoF in the chain.
  *
- * Every param is exposed via Leva under the 'PostFx' folder — individual
- * per-effect enable toggles (for A/B), live tuning on sliders. Bloom and
- * vignette expose both endpoints of their warmth ramp (scrambled → solved).
- * The renderer's toneMappingExposure is also controlled from here so the
- * ACES compression can be dialled against the HDRI in real time.
- *
- * Architecture notes (required for Path-2 readiness — see
- * project_postfx_strategy.md):
- *   • multisampling={0} on EffectComposer — SSGI later needs full MSAA control
- *   • ACES ToneMapping lives on the RENDERER (App.tsx Canvas gl prop), NOT
- *     in the effect chain, so passes read linear color
- *   • <Canvas antialias={false}> — SMAA in chain replaces MSAA edges
- *   • usePlanet.sceneGrade flag is plumbed but unused at Path 1. Path 2
- *     will gate realism-effects (SSGI / TRAA / motion blur) behind
- *     sceneGrade === 'photoreal'
+ * If DoF STILL doesn't respond to focusDistance / focusRange with
+ * everything else gone, the sphere composite pipeline (TileGrid's
+ * gl_FragDepth rewrite into EffectComposer's RT) is corrupting DoF's
+ * depth-texture input — the "only bokeh works" symptom is consistent
+ * with CoC saturated at 1.0 everywhere (depth buffer stuck at far plane).
  */
-export function PostFx() {
-  const solved = usePlanet(s => s.solved)
-  const [warmth, setWarmth] = useState(solved ? 1 : 0)
-  const fromRef = useRef(warmth)
-  const { gl } = useThree()
+/** Patch a CircleOfConfusionMaterial so its output CoC is
+ *    magnitude = max(depthCoC, screenMask)
+ *  and the near/far channel pair is blended toward (0, 1) by the same
+ *  screenMask. screenMask = smoothstep(uSharpRadius, uBlurRadius, |vUv - uCursorUv|).
+ *
+ *  Two patches, one purpose. The magnitude override kills the focus RING
+ *  (sharp pixels at the depth-focus circle of a convex surface). The
+ *  near/far override kills the residual SEAM at that same circle where
+ *  `step(signedDistance, 0.0)` flips sign — downstream DoF blurs near and
+ *  far fields with different kernels, so a flip at CoC=1 shows as a
+ *  "distorting" band even when magnitudes match. Locking the classification
+ *  toward far-only as screenMask saturates removes the flip.
+ *
+ *  Idempotent — the __cocPatched guard prevents duplicate uniform
+ *  declarations when the wrapper re-instantiates the effect.
+ */
+/** Combined saturation + brightness + contrast effect with bilateral clamps
+ *  and gamma-style contrast.
+ *
+ *  Replaces postprocessing's `HueSaturationEffect` + `BrightnessContrastEffect`.
+ *  Both libs' shaders use only an upper `min(color, 1.0)` clamp; the lower
+ *  end can go NEGATIVE on HDR float framebuffers. HueSat pushes channels
+ *  below zero when saturating; BC's midgray-pivoted contrast then stretches
+ *  them further negative and/or crushes dark pixels to exactly zero. The
+ *  negatives propagate through Vignette (× scalar), CA (sample + mix), and
+ *  final display clamp → solid-black pixels in regions that should be dark
+ *  tinted.
+ *
+ *  This effect fixes both with:
+ *    1. Luminance-mix saturation (no per-channel extrapolation against
+ *       an RGB-average).
+ *    2. Gamma-style contrast (`pow(c, gamma)`), which is monotone on [0,1],
+ *       never produces negatives, and doesn't crush shadows to zero.
+ *    3. `clamp(c, 0, 1)` at each stage + final, so even if upstream
+ *       Bloom/ToneMap hands us out-of-range values, we can't pollute the
+ *       downstream buffer.
+ *
+ *  Contrast mapping: `gamma = (contrast >= 0 ? 1 + contrast : 1 / (1 - contrast))`
+ *  → contrast=0 → gamma=1 (identity). contrast=0.5 → gamma=1.5 (darker shadows,
+ *  preserved highlights, no shadow crush). contrast=-0.5 → gamma≈0.667 (lifted
+ *  shadows).
+ */
+const SAFE_GRADE_FRAG = `
+uniform float saturation;
+uniform float brightness;
+uniform float contrast;
+void mainImage(const in vec4 inputColor, const in vec2 uv, out vec4 outputColor) {
+  vec3 c = max(inputColor.rgb, 0.0);
+  float gray = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  c = clamp(mix(vec3(gray), c, 1.0 + saturation), 0.0, 1.0);
+  c = clamp(c + vec3(brightness), 0.0, 1.0);
+  float gamma = contrast >= 0.0 ? (1.0 + contrast) : (1.0 / (1.0 - contrast));
+  c = pow(c, vec3(gamma));
+  outputColor = vec4(clamp(c, 0.0, 1.0), inputColor.a);
+}
+`
+class SafeColorGradeEffect extends Effect {
+  constructor(saturation = 0, brightness = 0, contrast = 0) {
+    super('SafeColorGradeEffect', SAFE_GRADE_FRAG, {
+      uniforms: new Map<string, THREE.Uniform>([
+        ['saturation', new THREE.Uniform(saturation)],
+        ['brightness', new THREE.Uniform(brightness)],
+        ['contrast',   new THREE.Uniform(contrast)],
+      ]),
+    })
+  }
+  get saturation(): number { return (this.uniforms.get('saturation') as THREE.Uniform).value as number }
+  set saturation(v: number) { (this.uniforms.get('saturation') as THREE.Uniform).value = v }
+  get brightness(): number { return (this.uniforms.get('brightness') as THREE.Uniform).value as number }
+  set brightness(v: number) { (this.uniforms.get('brightness') as THREE.Uniform).value = v }
+  get contrast(): number { return (this.uniforms.get('contrast') as THREE.Uniform).value as number }
+  set contrast(v: number) { (this.uniforms.get('contrast') as THREE.Uniform).value = v }
+}
 
+function patchCocMaterial(mat: THREE.ShaderMaterial): void {
+  const ud = mat.userData as { __cocPatched?: boolean }
+  if (ud.__cocPatched) return
+  ud.__cocPatched = true
+
+  mat.uniforms.uCursorUv    = { value: new THREE.Vector2(0.5, 0.5) }
+  mat.uniforms.uSharpRadius = { value: 0.08 }
+  mat.uniforms.uBlurRadius  = { value: 0.30 }
+  mat.uniforms.uAspect      = { value: 1 }
+
+  let frag = mat.fragmentShader
+  frag = frag.replace(
+    'void main()',
+    'uniform vec2 uCursorUv; uniform float uSharpRadius; uniform float uBlurRadius; uniform float uAspect; void main()'
+  )
+  frag = frag.replace(
+    'float magnitude=smoothstep(0.0,focusRange,abs(signedDistance));',
+    'float _dd=smoothstep(0.0,focusRange,abs(signedDistance));' +
+    'vec2 _du=vec2((vUv.x-uCursorUv.x)*uAspect, vUv.y-uCursorUv.y);' +
+    'float _sm=smoothstep(uSharpRadius, uBlurRadius, length(_du));' +
+    'float magnitude=max(_dd, _sm);'
+  )
+  frag = frag.replace(
+    'gl_FragColor.rg=magnitude*vec2(step(signedDistance,0.0),step(0.0,signedDistance));',
+    'float _nf=mix(step(signedDistance,0.0), 0.0, _sm);' +
+    'float _ff=mix(step(0.0,signedDistance), 1.0, _sm);' +
+    'gl_FragColor.rg=magnitude*vec2(_nf,_ff);'
+  )
+  mat.fragmentShader = frag
+  mat.needsUpdate = true
+}
+
+export function PostFx() {
+  const { camera, gl, size } = useThree()
   const {
-    exposure,
-    smaaEnabled,
-    n8aoEnabled, n8aoRadius, n8aoScreenSpaceRadius, n8aoIntensity, n8aoFalloff,
-    n8aoSamples, n8aoDenoiseSamples, n8aoDenoiseRadius, n8aoHalfRes,
-    n8aoColor, n8aoRenderMode, n8aoQuality,
     dofEnabled, dofFollowCursor, dofFocusRangeOnCursor, dofFocusRangeWholePlanet,
-    dofBokehScale, dofSmoothing, dofDebugTarget,
-    bloomEnabled, bloomScrambled, bloomSolved, bloomThreshold, bloomSmoothing,
+    dofBokehScale, dofSmoothing, dofDebugTarget, dofFocusSurfaceRadius,
+    dofScreenSharpRadius, dofScreenBlurRadius, dofResolutionScale,
+    dofDebugFixedDistance, dofDebugFixedValue,
+    toneExposure,
+    bloomEnabled, bloomIntensity, bloomThreshold, bloomSmoothing,
+    vignetteEnabled, vignetteOffset, vignetteDarkness,
+    caEnabled, caOffsetX, caOffsetY, caRadialMask, caRadialOffset,
+    gradeEnabled, gradeSaturation, gradeContrast, gradeBrightness,
     noiseEnabled, noiseOpacity,
-    vignetteEnabled, vignetteScrambled, vignetteSolved, vignetteOffset,
-    ssgiEnabled, ssgiDistance, ssgiThickness, ssgiAutoThickness, ssgiMaxRoughness,
-    ssgiBlend, ssgiImportanceSampling, ssgiDirectLightMultiplier, ssgiEnvBlur,
-    ssgiSteps, ssgiRefineSteps, ssgiSpp, ssgiResolutionScale, ssgiMissedRays,
-    ssgiDenoiseIterations, ssgiDenoiseKernel, ssgiDenoiseDiffuse, ssgiDenoiseSpecular,
-    ssgiDepthPhi, ssgiNormalPhi, ssgiRoughnessPhi,
-    ssrEnabled,
-    motionBlurEnabled, motionBlurIntensity, motionBlurJitter, motionBlurSamples,
-    ssaoEnabled, ssaoSamples, ssaoRings, ssaoRadius, ssaoIntensity,
-    ssaoLuminanceInfluence, ssaoBias, ssaoFade, ssaoColor,
-    ssaoWorldDistanceThreshold, ssaoWorldDistanceFalloff,
-    ssaoWorldProximityThreshold, ssaoWorldProximityFalloff,
-    ssaoResolutionScale,
   } = useControls('PostFx', {
-    exposure: { value: 1.35, min: 0.3, max: 3, step: 0.05, label: 'Exposure (ACES)' },
-    SMAA: folder({
-      smaaEnabled: { value: true, label: 'on' },
-    }, { collapsed: true }),
-    N8AO: folder({
-      n8aoEnabled: { value: true, label: 'on' },
-      // aoRadius is in WORLD units (unless screenSpaceRadius is on). Our
-      // planet is 2m diameter with props sticking out up to ~0.3m — a 0.5m
-      // occlusion kernel gives visible grounding around their bases.
-      n8aoRadius: { value: 0.5, min: 0.01, max: 5, step: 0.01, label: 'radius (world)' },
-      n8aoScreenSpaceRadius: { value: false, label: 'radius in screen px' },
-      n8aoIntensity: { value: 3, min: 0, max: 16, step: 0.1, label: 'intensity' },
-      n8aoFalloff: { value: 1, min: 0, max: 3, step: 0.05, label: 'distance falloff' },
-      n8aoSamples: { value: 16, min: 4, max: 64, step: 1, label: 'ao samples' },
-      n8aoDenoiseSamples: { value: 4, min: 1, max: 16, step: 1, label: 'denoise samples' },
-      n8aoDenoiseRadius: { value: 12, min: 1, max: 32, step: 1, label: 'denoise radius' },
-      n8aoHalfRes: { value: false, label: 'half-res (faster, softer)' },
-      n8aoColor: { value: '#000000', label: 'AO colour' },
-      n8aoRenderMode: {
-        value: 'Combined',
-        options: ['Combined', 'AO', 'No AO', 'Split', 'Split AO'],
-        label: 'render mode',
-      },
-      n8aoQuality: {
-        value: 'medium',
-        options: ['performance', 'low', 'medium', 'high', 'ultra'],
-        label: 'quality preset',
-      },
-    }, { collapsed: true }),
-    // SSAO — pmndrs' classic hemispherical-sample SSAO. Works on our scene
-    // where N8AO's depth-derived normal reconstruction doesn't (sphere
-    // projection vertex shader defeats the neighbour-delta trick). Toggle
-    // on alongside or instead of N8AO.
-    SSAO: folder({
-      ssaoEnabled: { value: false, label: 'on' },
-      ssaoSamples: { value: 30, min: 1, max: 64, step: 1, label: 'samples' },
-      ssaoRings: { value: 4, min: 1, max: 16, step: 1, label: 'rings' },
-      ssaoRadius: { value: 0.1, min: 0.001, max: 2, step: 0.001, label: 'radius' },
-      ssaoIntensity: { value: 30, min: 0, max: 100, step: 0.5, label: 'intensity' },
-      ssaoLuminanceInfluence: { value: 0.6, min: 0, max: 1, step: 0.01, label: 'lum influence' },
-      ssaoBias: { value: 0.025, min: 0, max: 0.5, step: 0.001, label: 'bias' },
-      ssaoFade: { value: 0.01, min: 0, max: 0.5, step: 0.001, label: 'fade' },
-      ssaoColor: { value: '#000000', label: 'AO colour' },
-      ssaoResolutionScale: { value: 1, min: 0.25, max: 1, step: 0.05, label: 'res scale' },
-      'SSAO — world distance': folder({
-        ssaoWorldDistanceThreshold: { value: 1, min: 0, max: 10, step: 0.05, label: 'dist threshold' },
-        ssaoWorldDistanceFalloff: { value: 0.1, min: 0, max: 5, step: 0.05, label: 'dist falloff' },
-        ssaoWorldProximityThreshold: { value: 0.4, min: 0, max: 5, step: 0.01, label: 'prox threshold' },
-        ssaoWorldProximityFalloff: { value: 0.1, min: 0, max: 5, step: 0.01, label: 'prox falloff' },
-      }, { collapsed: true }),
-    }, { collapsed: true }),
     'Depth of Field': folder({
       dofEnabled: { value: true, label: 'on' },
       dofFollowCursor: { value: true, label: 'follow cursor (else planet)' },
-      // Two focus-slab widths in world units (postprocessing 6.x
-      // `cocMaterial.focusRange` — the WIDTH of zero-CoC depth around
-      // the focus point). CoC ≈ |depth - focusDistance| / focusRange,
-      // then * bokehScale for blur radius. To keep the whole planet
-      // sharp off-cursor with the camera at ~4m and the body spanning
-      // 2m of depth, range MUST be ≫ planet half-depth — otherwise
-      // edge CoC × bokehScale shows visible blur even off-cursor.
-      // 20m gives max CoC ~0.05 at planet edges → ~0.4px at bokeh=8.
-      dofFocusRangeOnCursor: { value: 1.0, min: 0.05, max: 5, step: 0.05, label: 'range on hover (m)' },
-      dofFocusRangeWholePlanet: { value: 20.0, min: 1, max: 30, step: 0.5, label: 'range full planet (m)' },
-      dofBokehScale: { value: 4.0, min: 0, max: 8, step: 0.1, label: 'bokeh' },
+      dofFocusRangeOnCursor: { value: 1.0, min: 0.05, max: 25, step: 0.05, label: 'range on hover (m)' },
+      dofFocusRangeWholePlanet: { value: 20.0, min: 1, max: 150, step: 0.5, label: 'range full planet (m)' },
+      dofBokehScale: { value: 4.0, min: 0, max: 40, step: 0.1, label: 'bokeh' },
       dofSmoothing: { value: 0.18, min: 0.01, max: 1, step: 0.01, label: 'follow speed' },
+      dofFocusSurfaceRadius: { value: 1.05, min: 1.0, max: 1.30, step: 0.005, label: 'focus surface R' },
+      // Bokeh render-target downscale. This is the library's real cost knob
+      // for DoF (tap counts are hardcoded at 64+16). 0.5 default ≈ 4× cheaper
+      // than 1.0 full-res. Pushed via `resolution.scale` runtime setter so
+      // the effect isn't reinstantiated on every slider tick.
+      dofResolutionScale: { value: 0.5, min: 0.25, max: 1.0, step: 0.05, label: 'bokeh res scale' },
+      // Screen-space aperture. CoC shader is patched to
+      //   magnitude = max(depthCoC, smoothstep(sharpR, blurR, screenDist))
+      // so a tack-sharp *circle* appears around the projected dofTarget, and
+      // the depth-focus ring beyond the circle becomes invisible (CoC=1).
+      // Radii are in UV-height units: 0.1 ≈ 10% of the shorter screen axis.
+      dofScreenSharpRadius: { value: 0.08, min: 0.0, max: 1.0, step: 0.005, label: 'screen sharp R' },
+      dofScreenBlurRadius:  { value: 0.30, min: 0.01, max: 1.5, step: 0.01, label: 'screen blur R' },
       dofDebugTarget: { value: false, label: 'debug: show target' },
+      dofDebugFixedDistance: { value: false, label: 'debug: fixed distance' },
+      dofDebugFixedValue: { value: 3.5, min: 0.1, max: 30, step: 0.05, label: 'debug: distance value' },
+    }, { collapsed: false }),
+    // Renderer-level exposure. ACES lives in the ToneMapping effect below;
+    // gl.toneMappingExposure flows into three.js's built-in ACES function
+    // via the standard toneMappingExposure uniform even though
+    // gl.toneMapping is forced to NoToneMapping by the composer wrapper.
+    'Tone Mapping': folder({
+      toneExposure: { value: 1.0, min: 0.1, max: 3.0, step: 0.01, label: 'exposure' },
     }, { collapsed: true }),
-    Bloom: folder({
+    'Bloom': folder({
       bloomEnabled: { value: true, label: 'on' },
-      bloomScrambled: { value: 0.35, min: 0, max: 3, step: 0.05, label: 'intensity (unsolved)' },
-      bloomSolved: { value: 0.95, min: 0, max: 3, step: 0.05, label: 'intensity (solved)' },
-      bloomThreshold: { value: 0.55, min: 0, max: 1, step: 0.01, label: 'lum threshold' },
-      bloomSmoothing: { value: 0.4, min: 0, max: 1, step: 0.01, label: 'lum smooth' },
+      bloomIntensity: { value: 0.6, min: 0, max: 4, step: 0.05, label: 'intensity' },
+      bloomThreshold: { value: 0.9, min: 0, max: 1.5, step: 0.01, label: 'luminance threshold' },
+      bloomSmoothing: { value: 0.2, min: 0, max: 1, step: 0.01, label: 'smoothing' },
     }, { collapsed: true }),
-    Noise: folder({
-      noiseEnabled: { value: true, label: 'on' },
-      noiseOpacity: { value: 0.08, min: 0, max: 1, step: 0.01, label: 'opacity' },
-    }, { collapsed: true }),
-    Vignette: folder({
+    'Vignette': folder({
       vignetteEnabled: { value: true, label: 'on' },
-      vignetteScrambled: { value: 0.45, min: 0, max: 1.5, step: 0.01, label: 'darkness (unsolved)' },
-      vignetteSolved: { value: 0.62, min: 0, max: 1.5, step: 0.01, label: 'darkness (solved)' },
-      vignetteOffset: { value: 0.3, min: 0, max: 1, step: 0.01, label: 'offset' },
+      vignetteOffset: { value: 0.5, min: 0, max: 1, step: 0.01, label: 'offset' },
+      vignetteDarkness: { value: 1.0, min: 0, max: 2, step: 0.01, label: 'darkness' },
     }, { collapsed: true }),
-    // Path 2 — realism-effects (SSGI / SSR / motion blur). Default OFF
-    // because the current stylized diorama has near-zero PBR surfaces; SSGI
-    // on low-poly vertex-coloured meshes reads as noise. Flip to 'on' when
-    // the photoreal Blender diorama is loaded.
-    // Realism-effects (SSGI + SSR + motion blur). Defaults OFF — visual
-    // impact is subtle on the stylized test diorama; SSR needs reflective
-    // PBR materials to shine. Will earn its keep on the photoreal Blender
-    // diorama. Param groupings mirror realism-effects' SSGIEffect constructor.
-    SSGI: folder({
-      ssgiEnabled: { value: false, label: 'on' },
-      'SSGI — rays': folder({
-        ssgiDistance: { value: 10, min: 0.1, max: 100, step: 0.5, label: 'ray distance' },
-        ssgiThickness: { value: 10, min: 0.1, max: 100, step: 0.5, label: 'thickness' },
-        ssgiAutoThickness: { value: false, label: 'auto thickness' },
-        ssgiMaxRoughness: { value: 1, min: 0, max: 1, step: 0.01, label: 'max roughness' },
-        ssgiSteps: { value: 20, min: 1, max: 128, step: 1, label: 'march steps' },
-        ssgiRefineSteps: { value: 5, min: 0, max: 32, step: 1, label: 'refine steps' },
-        ssgiSpp: { value: 1, min: 1, max: 8, step: 1, label: 'samples/pixel' },
-        ssgiMissedRays: { value: false, label: 'sample missed (env)' },
-      }, { collapsed: true }),
-      'SSGI — temporal': folder({
-        ssgiBlend: { value: 0.9, min: 0, max: 1, step: 0.01, label: 'temporal blend' },
-        ssgiImportanceSampling: { value: true, label: 'importance sampling' },
-        ssgiDirectLightMultiplier: { value: 1, min: 0, max: 8, step: 0.05, label: 'direct light ×' },
-        ssgiEnvBlur: { value: 0.5, min: 0, max: 1, step: 0.01, label: 'env blur' },
-      }, { collapsed: true }),
-      'SSGI — denoise': folder({
-        ssgiDenoiseIterations: { value: 1, min: 0, max: 8, step: 1, label: 'iterations' },
-        ssgiDenoiseKernel: { value: 2, min: 1, max: 6, step: 1, label: 'kernel' },
-        ssgiDenoiseDiffuse: { value: 10, min: 0, max: 50, step: 0.5, label: 'diffuse weight' },
-        ssgiDenoiseSpecular: { value: 10, min: 0, max: 50, step: 0.5, label: 'specular weight' },
-        ssgiDepthPhi: { value: 2, min: 0, max: 50, step: 0.1, label: 'depth φ' },
-        ssgiNormalPhi: { value: 50, min: 0, max: 100, step: 1, label: 'normal φ' },
-        ssgiRoughnessPhi: { value: 1, min: 0, max: 10, step: 0.05, label: 'roughness φ' },
-      }, { collapsed: true }),
-      'SSGI — perf': folder({
-        ssgiResolutionScale: { value: 1, min: 0.25, max: 1, step: 0.05, label: 'res scale' },
-      }, { collapsed: true }),
+    'Chromatic Aberration': folder({
+      caEnabled: { value: true, label: 'on' },
+      caOffsetX: { value: 0.0015, min: 0, max: 0.01, step: 0.0001, label: 'offset x' },
+      caOffsetY: { value: 0.0015, min: 0, max: 0.01, step: 0.0001, label: 'offset y' },
+      // Built-in vignette-style mask on the CA effect itself:
+      //   d = max(distance(uv, center)*2 - modulationOffset, 0)
+      // → zero CA inside a centered disc of radius `radialOffset`, ramping
+      //   to full CA at the corners. Does not require a separate mask pass.
+      caRadialMask: { value: true, label: 'edges only (radial mask)' },
+      caRadialOffset: { value: 0.35, min: 0, max: 1, step: 0.01, label: 'mask inner radius' },
     }, { collapsed: true }),
-    SSR: folder({
-      // SSREffect extends SSGIEffect — all SSGI options apply.
-      ssrEnabled: { value: false, label: 'on (inherits all SSGI params above)' },
-    }, { collapsed: true }),
-    'Motion Blur': folder({
-      motionBlurEnabled: { value: false, label: 'on' },
-      motionBlurIntensity: { value: 1, min: 0, max: 4, step: 0.05, label: 'intensity' },
-      motionBlurJitter: { value: 1, min: 0, max: 4, step: 0.05, label: 'jitter' },
-      motionBlurSamples: { value: 16, min: 4, max: 64, step: 1, label: 'samples' },
+    // Tiny-world / miniature grade. HueSaturation + BrightnessContrast sit
+    // after tone mapping (LDR) so the grade operates on display-ready values.
+    'Color Grade': folder({
+      gradeEnabled: { value: true, label: 'on' },
+      gradeSaturation: { value: 0.25, min: -1, max: 1, step: 0.01, label: 'saturation' },
+      gradeContrast:   { value: 0.15, min: -1, max: 1, step: 0.01, label: 'contrast' },
+      gradeBrightness: { value: 0.0,  min: -1, max: 1, step: 0.01, label: 'brightness' },
+    }, { collapsed: false }),
+    'Grain': folder({
+      noiseEnabled: { value: true, label: 'on' },
+      noiseOpacity: { value: 0.035, min: 0, max: 0.3, step: 0.005, label: 'opacity' },
     }, { collapsed: true }),
   })
 
-  // Live-tune the renderer's tone-mapping exposure. ACES compresses highlights,
-  // so this is the knob to keep bright zones from feeling dim.
+  // Cursor raycast sphere radius — sync from Leva.
   useEffect(() => {
-    gl.toneMappingExposure = exposure
-  }, [gl, exposure])
+    PLANET_SPHERE.radius = dofFocusSurfaceRadius
+  }, [dofFocusSurfaceRadius])
 
-  // DoF target — world-space point the effect focuses on.
-  //   • cursor off planet → ease toward planet origin (whole planet sharp)
-  //   • cursor on planet  → ease toward the raycast hit (uHudCursor)
-  // Interaction.tsx publishes hudUniforms.uHudCursor + uHudCursorActive on
-  // every pointermove raycast; TutorialHint publishes them when the tutorial
-  // is up. Either signal drives the focus naturally.
-  //
-  // We attach the target VECTOR3 IMPERATIVELY via a ref (useLayoutEffect)
-  // rather than the <DepthOfField target={vec3}> prop. The React wrapper
-  // conditionally replaces the Vector3 on each prop-diff which breaks
-  // the in-place-mutation pattern this useFrame relies on. Direct .target
-  // assignment on the effect instance is stable across re-renders.
+  // Drive the DoF bokeh-buffer resolution at runtime. `resolution.scale` has
+  // a real setter (dispatches 'change' → setSize); we deliberately DO NOT
+  // pass `resolutionScale` as a wrapper prop because @react-three/postprocessing
+  // useMemos the effect on its full prop list — a slider-changed prop would
+  // reinstantiate the effect every tick (P4: ref props lost, cocMaterial
+  // re-patched via lastPatchedMat each time).
+  useEffect(() => {
+    const e = dofRef.current
+    if (!e) return
+    e.resolution.scale = dofResolutionScale
+  }, [dofResolutionScale])
+
+  // Tone-mapping exposure. `@react-three/postprocessing` forces
+  // gl.toneMapping = NoToneMapping on mount so ACES runs via the
+  // ToneMapping effect instead of the renderer. But it does NOT touch
+  // gl.toneMappingExposure, and three.js's built-in ACESFilmicToneMapping
+  // function (which postprocessing's ACES mode compiles to via
+  // `#define toneMapping(texel) ACESFilmicToneMapping(texel)`) reads the
+  // standard `toneMappingExposure` uniform — still wired to the renderer
+  // property. So writing gl.toneMappingExposure is the correct handle.
+  useEffect(() => {
+    gl.toneMappingExposure = toneExposure
+  }, [gl, toneExposure])
+
+  // CA offset as a Vector2 — postprocessing's effect constructor expects one.
+  const caOffset = useMemo(() => new THREE.Vector2(caOffsetX, caOffsetY), [caOffsetX, caOffsetY])
+
+  // Combined saturation + brightness + contrast — one instance, uniform driven.
+  const gradeEffect = useMemo(
+    () => new SafeColorGradeEffect(gradeSaturation, gradeBrightness, gradeContrast),
+    [],
+  )
+  useEffect(() => {
+    gradeEffect.saturation = gradeSaturation
+    gradeEffect.brightness = gradeBrightness
+    gradeEffect.contrast   = gradeContrast
+  }, [gradeEffect, gradeSaturation, gradeBrightness, gradeContrast])
+  useEffect(() => () => gradeEffect.dispose(), [gradeEffect])
+
   const dofRef = useRef<DepthOfFieldEffect | null>(null)
   const dofTarget = useMemo(() => new THREE.Vector3(), [])
   const dofDesired = useMemo(() => new THREE.Vector3(), [])
-  // Eased focus-range value driven imperatively. Owning this in a ref (and
-  // NOT passing worldFocusRange as a prop) keeps it stable across the
-  // wrapper's re-instantiation cycles (P4) — same pattern as `target`.
-  const dofRangeRef = useRef(dofFocusRangeWholePlanet)
+  const [cursorActive, setCursorActive] = useState(false)
+  const activeRange = cursorActive ? dofFocusRangeOnCursor : dofFocusRangeWholePlanet
+  const debugMeshRef = useRef<THREE.Mesh | null>(null)
 
-  // Dev hooks — attached once.
+  const lastPatchedMat = useRef<THREE.ShaderMaterial | null>(null)
+  const tmpNdc = useMemo(() => new THREE.Vector3(), [])
+
+  // Force-wire DoF's depth source to sphereTarget.depthTexture each frame.
+  // This overrides whatever EffectComposer wired (empty/far-plane) with the
+  // actual populated planet depth from TileGrid's offscreen FBO. Both
+  // sphereTarget.depthTexture and EffectComposer's RT use the same camera
+  // near/far, so the CoC shader's viewPosition reconstruction is valid.
+  //
+  // Also patches cocMaterial on each (re-)instantiation so the CoC output
+  // gets a screen-space aperture mask (sharp circle around the projected
+  // dofTarget), and writes its uniforms each frame.
+  useFrame(() => {
+    const e = dofRef.current
+    if (!e) return
+    const depth = hudUniforms.uSphereDepth.value
+    if (depth) e.setDepthTexture(depth)
+
+    // Patch on first observation and every time the wrapper re-instantiates
+    // the effect (new cocMaterial ref).
+    const mat = e.cocMaterial as THREE.ShaderMaterial
+    if (mat && lastPatchedMat.current !== mat) {
+      patchCocMaterial(mat)
+      lastPatchedMat.current = mat
+    }
+
+    // Project dofTarget world → NDC → UV. Using the eased target (not the
+    // raw cursor) keeps the aperture smooth. Off-planet: target is the
+    // front pole → aperture centers on the visible center of the planet.
+    if (mat?.userData && (mat.userData as { __cocPatched?: boolean }).__cocPatched) {
+      tmpNdc.copy(dofTarget).project(camera)
+      const u = mat.uniforms
+      ;(u.uCursorUv.value as THREE.Vector2).set(tmpNdc.x * 0.5 + 0.5, tmpNdc.y * 0.5 + 0.5)
+      u.uSharpRadius.value = dofScreenSharpRadius
+      u.uBlurRadius.value = dofScreenBlurRadius
+      // Aspect keeps the mask a true screen-space circle, not UV-stretched.
+      u.uAspect.value = size.width / size.height
+    }
+  })
+
   useLayoutEffect(() => {
     if (import.meta.env.DEV) {
       ;(window as unknown as Record<string, unknown>).__dofTarget = dofTarget
     }
   }, [dofTarget])
 
-  // Debug sphere position ref — drives a <mesh> whose position tracks dofTarget.
-  const debugMeshRef = useRef<THREE.Mesh | null>(null)
-  // Dev hook for N8AO pass introspection.
-  const n8aoRef = useRef<unknown>(null)
-  useLayoutEffect(() => {
-    if (import.meta.env.DEV) {
-      ;(window as unknown as Record<string, unknown>).__n8ao = n8aoRef.current
-    }
-  })
-
   useFrame(() => {
     if (!dofEnabled || !dofRef.current) return
 
-    // @react-three/postprocessing's DoF wrapper re-instantiates its internal
-    // effect whenever any config prop changes (worldFocusRange slider,
-    // bokehScale, ...). The new instance's .target is reset to a placeholder
-    // Vector3. Re-attach every frame if the ref has swapped out — cheap
-    // identity check, keeps our lerp target wired to the live effect.
-    if (dofRef.current.target !== dofTarget) {
+    // Attach target unless we're in fixed-distance debug mode.
+    const wantTarget = !dofDebugFixedDistance
+    if (wantTarget && dofRef.current.target !== dofTarget) {
       dofRef.current.target = dofTarget
-      if (import.meta.env.DEV) {
-        ;(window as unknown as Record<string, unknown>).__dofEffect = dofRef.current
-      }
+    } else if (!wantTarget && dofRef.current.target !== null) {
+      dofRef.current.target = null
+    }
+    if (import.meta.env.DEV) {
+      ;(window as unknown as Record<string, unknown>).__dofEffect = dofRef.current
     }
 
     const active = hudUniforms.uHudCursorActive.value > 0 && dofFollowCursor
-    if (active) dofDesired.copy(hudUniforms.uHudCursor.value)
-    else dofDesired.set(0, 0, 0)
-    // Frame-rate-independent ease: the same `dofSmoothing` feels the same
-    // at 30 or 120 fps. Clamp to 1 so the max smoothing snaps instantly.
+    if (active !== cursorActive) setCursorActive(active)
+    if (active) {
+      dofDesired.copy(hudUniforms.uHudCursor.value)
+    } else {
+      // Off-planet: aim at the FRONT POLE (closest point of the planet to
+      // the camera), NOT the origin. camera→origin passes through the back
+      // of the planet; focusing at origin-depth puts the focal plane at the
+      // planet's silhouette ring (equator as camera sees it) and defocuses
+      // the visible center. Front pole = origin + normalize(camera) * R,
+      // which gives focus depth = cameraDistance − R → the closest visible
+      // surface. Combined with the wide rangeWholePlanet (~20m), the whole
+      // planet falls inside the focus slab.
+      dofDesired.copy(camera.position).normalize().multiplyScalar(dofFocusSurfaceRadius)
+    }
     const ease = Math.min(1, dofSmoothing)
     dofTarget.lerp(dofDesired, ease)
-    // Range eases between narrow (cursor on planet → bokeh visible) and
-    // wide (cursor off planet → entire planet sharp around the origin).
-    // IMPORTANT: `worldFocusRange` on DepthOfFieldEffect is a CONSTRUCTOR
-    // option only — assigning it per-frame on the effect instance is a
-    // silent no-op that creates a stray property. The live setter lives
-    // on `cocMaterial.focusRange` (postprocessing/build/index.js:5082),
-    // which writes the CoC shader's `focusRange` uniform directly.
-    const targetRange = active ? dofFocusRangeOnCursor : dofFocusRangeWholePlanet
-    dofRangeRef.current = THREE.MathUtils.lerp(dofRangeRef.current, targetRange, ease)
-    dofRef.current.cocMaterial.focusRange = dofRangeRef.current
     if (debugMeshRef.current) debugMeshRef.current.position.copy(dofTarget)
   })
-
-  useEffect(() => {
-    const start = performance.now()
-    fromRef.current = warmth
-    const to = solved ? 1 : 0
-    let raf = 0
-    const tick = () => {
-      const t = Math.min(1, (performance.now() - start) / WARM_DURATION_MS)
-      setWarmth(lerp(fromRef.current, to, smoothstep(t)))
-      if (t < 1) raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-    // intentional: only re-trigger on solved flip; warmth read once at start
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [solved])
-
-  const bloomIntensity = lerp(bloomScrambled, bloomSolved, warmth)
-  const vignetteDarkness = lerp(vignetteScrambled, vignetteSolved, warmth)
-
-  // enableNormalPass is needed by SSGI's G-buffer reads and by SSAO for
-  // proper hemispherical sampling. Turning it on when none of those are
-  // active is a minor waste (~one extra render pass).
-  const needNormalPass = ssgiEnabled || ssrEnabled || ssaoEnabled
 
   return (
     <>
@@ -325,99 +349,41 @@ export function PostFx() {
           <meshBasicMaterial color="#ff00ff" depthTest={false} depthWrite={false} />
         </mesh>
       ) : null}
-    <EffectComposer multisampling={0} enableNormalPass={needNormalPass} stencilBuffer depthBuffer>
-      {smaaEnabled ? <SMAA /> : <></>}
-      {n8aoEnabled ? (
-        <N8AO
-          ref={n8aoRef}
-          aoRadius={n8aoRadius}
-          screenSpaceRadius={n8aoScreenSpaceRadius}
-          intensity={n8aoIntensity}
-          distanceFalloff={n8aoFalloff}
-          aoSamples={n8aoSamples}
-          denoiseSamples={n8aoDenoiseSamples}
-          denoiseRadius={n8aoDenoiseRadius}
-          halfRes={n8aoHalfRes}
-          color={n8aoColor}
-          renderMode={
-            n8aoRenderMode === 'AO' ? 1
-              : n8aoRenderMode === 'No AO' ? 2
-              : n8aoRenderMode === 'Split' ? 3
-              : n8aoRenderMode === 'Split AO' ? 4
-              : 0 /* Combined */
-          }
-          quality={n8aoQuality as 'performance' | 'low' | 'medium' | 'high' | 'ultra'}
-        />
-      ) : <></>}
-      {ssaoEnabled ? (
-        <SSAO
-          samples={ssaoSamples}
-          rings={ssaoRings}
-          radius={ssaoRadius}
-          intensity={ssaoIntensity}
-          luminanceInfluence={ssaoLuminanceInfluence}
-          bias={ssaoBias}
-          fade={ssaoFade}
-          color={ssaoColor}
-          resolutionScale={ssaoResolutionScale}
-          worldDistanceThreshold={ssaoWorldDistanceThreshold}
-          worldDistanceFalloff={ssaoWorldDistanceFalloff}
-          worldProximityThreshold={ssaoWorldProximityThreshold}
-          worldProximityFalloff={ssaoWorldProximityFalloff}
-        />
-      ) : <></>}
-      {dofEnabled ? (
-        // worldFocusRange intentionally NOT passed — managed imperatively
-        // each frame so the active vs. whole-planet ease survives the
-        // wrapper's prop-diff re-instantiation cycle (P4).
-        <DepthOfField
-          ref={dofRef}
-          bokehScale={dofBokehScale}
-        />
-      ) : <></>}
-      {bloomEnabled ? (
-        <Bloom
-          intensity={bloomIntensity}
-          luminanceThreshold={bloomThreshold}
-          luminanceSmoothing={bloomSmoothing}
-          mipmapBlur
-        />
-      ) : <></>}
-      {noiseEnabled ? (
-        <Noise premultiply blendFunction={BlendFunction.SOFT_LIGHT} opacity={noiseOpacity} />
-      ) : <></>}
-      {vignetteEnabled ? (
-        <Vignette darkness={vignetteDarkness} offset={vignetteOffset} eskil={false} />
-      ) : <></>}
-      <RealismFX
-        ssgi={ssgiEnabled}
-        ssr={ssrEnabled}
-        motionBlur={motionBlurEnabled}
-        ssgiDistance={ssgiDistance}
-        ssgiThickness={ssgiThickness}
-        ssgiAutoThickness={ssgiAutoThickness}
-        ssgiMaxRoughness={ssgiMaxRoughness}
-        ssgiBlend={ssgiBlend}
-        ssgiDenoiseIterations={ssgiDenoiseIterations}
-        ssgiDenoiseKernel={ssgiDenoiseKernel}
-        ssgiDenoiseDiffuse={ssgiDenoiseDiffuse}
-        ssgiDenoiseSpecular={ssgiDenoiseSpecular}
-        ssgiDepthPhi={ssgiDepthPhi}
-        ssgiNormalPhi={ssgiNormalPhi}
-        ssgiRoughnessPhi={ssgiRoughnessPhi}
-        ssgiEnvBlur={ssgiEnvBlur}
-        ssgiImportanceSampling={ssgiImportanceSampling}
-        ssgiDirectLightMultiplier={ssgiDirectLightMultiplier}
-        ssgiSteps={ssgiSteps}
-        ssgiRefineSteps={ssgiRefineSteps}
-        ssgiSpp={ssgiSpp}
-        ssgiResolutionScale={ssgiResolutionScale}
-        ssgiMissedRays={ssgiMissedRays}
-        motionBlurIntensity={motionBlurIntensity}
-        motionBlurJitter={motionBlurJitter}
-        motionBlurSamples={motionBlurSamples}
-      />
-    </EffectComposer>
+      <EffectComposer multisampling={0}>
+        {dofEnabled ? (
+          <DepthOfField
+            ref={dofRef}
+            bokehScale={dofBokehScale}
+            focusRange={activeRange}
+            {...(dofDebugFixedDistance ? { focusDistance: dofDebugFixedValue } : {})}
+          />
+        ) : <></>}
+        {bloomEnabled ? (
+          <Bloom
+            intensity={bloomIntensity}
+            luminanceThreshold={bloomThreshold}
+            luminanceSmoothing={bloomSmoothing}
+            mipmapBlur
+          />
+        ) : <></>}
+        <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
+        {gradeEnabled ? (
+          <primitive object={gradeEffect} />
+        ) : <></>}
+        {vignetteEnabled ? (
+          <Vignette offset={vignetteOffset} darkness={vignetteDarkness} />
+        ) : <></>}
+        {caEnabled ? (
+          <ChromaticAberration
+            offset={caOffset}
+            radialModulation={caRadialMask}
+            modulationOffset={caRadialOffset}
+          />
+        ) : <></>}
+        {noiseEnabled ? (
+          <Noise opacity={noiseOpacity} premultiply />
+        ) : <></>}
+      </EffectComposer>
     </>
   )
 }

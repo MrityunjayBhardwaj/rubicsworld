@@ -94,6 +94,11 @@ export const hudUniforms = {
   uHudHoverRadius:   { value: 0.35 },
   uHudTileEdgeMask:  { value: _hudEdgeMaskFlat },
   uHudEasyMode:      { value: 0.0 },   // 0 = monochrome dots, 1 = green/red
+  // TileGrid publishes sphereTarget.depthTexture here in sphere mode so
+  // PostFx's DoF can sample planet depth DIRECTLY — bypassing the
+  // composite-quad's gl_FragDepth rewrite into EffectComposer's RT depth
+  // (which appears not to land, producing the "only bokeh works" symptom).
+  uSphereDepth:      { value: null as THREE.Texture | null },
 }
 
 /** Compose-safe fragment-shader patch that scales the indirect-specular
