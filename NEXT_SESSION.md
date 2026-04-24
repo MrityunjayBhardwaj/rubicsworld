@@ -1,112 +1,102 @@
-# New-session handoff prompt — Rubic's World (end of Day 9, intro cinematic merging)
+# New-session handoff prompt — Rubic's World (Day 15 end: DoF perception SOLVED on branch debug/dof-only; integration + merge still open)
 
 Copy the block below into the next session verbatim.
 
 ---
 
-We're continuing **Rubic's World** — my solo entry for levelsio's **Vibe Jam 2026**.
+We're continuing **Rubic's World** — solo Vibe Jam 2026 entry.
 
-**Deadline:** 1 May 2026, 13:37 UTC (~9 days out)
+**Deadline:** 1 May 2026, 13:37 UTC (~7 days out)
 **Live URL:** https://rubicsworld.vercel.app (auto-deploys on `git push origin main`)
 **Repo:** https://github.com/MrityunjayBhardwaj/rubicsworld
-**Local dev:** `npm run dev` → http://localhost:5176 (port drifts)
+**Local dev:** `npm run dev` → http://localhost:5173 (custom Vite plugin pins the port)
 **Working dir:** `/Users/mrityunjaybhardwaj/Documents/projects/RubicsWorld`
+**Current branch:** `debug/dof-only` — stacked on `feat/seam-investigation` → `feat/seam-weld` → `feat/grass-from-ground` → `feat/grass` → `main`. **None merged.** Now FIVE unmerged branches.
 
-## Canonical docs (read in this order)
+## Canonical reads (in order)
 
-1. `PHASE_1.md` — 15-day plan, scope, stack, cut order, gates.
+1. `PHASE_1.md` — 15-day plan + stack + cut order.
 2. `THESIS.md` — full game design.
-3. `BLENDER_PIPELINE.md` — glTF authoring pipeline when we move diorama into a .glb file.
-4. Memory: `~/.claude/projects/-Users-mrityunjaybhardwaj-Documents-projects-RubicsWorld/memory/` — `project_architecture_day9.md` is the CURRENT architecture. Also read `feedback_shader_patches.md`, `feedback_per_frame_scene_push.md`, and `feedback_strict_mode_guard.md` — three hard-earned rules.
-5. `.anvi/` catalogues in the repo — `hetvabhasa.md` has P1 (geometry subdivision), P2 (per-frame scene push), P3 (Strict Mode guard). `vyapti.md` has PV1–PV2.
+3. `BLENDER_PIPELINE.md` — authoring contract (face-block layout, subdivision rules, animation compat).
+4. `blender-plugin/README.md` — addon install, panel walkthrough.
+5. Memory: `~/.claude/projects/-Users-mrityunjaybhardwaj-Documents-projects-RubicsWorld/memory/` — **`project_architecture_day15.md` is the CURRENT snapshot** (day14.md is SUPERSEDED). Also read `feedback_dof_integration.md` (three simultaneous rules for DoF), `feedback_blender_pipeline.md`, `feedback_shader_patches.md`, `feedback_library_ref_attachment.md`.
+6. `.anvi/` catalogues — `hetvabhasa.md` P1–P25, `vyapti.md` PV1–PV13, `krama.md` PK1–PK5, `dharana.md` (B2 FATAL @ 4 patterns, **B4 FATAL @ 4 patterns**).
 
 ## Where we are
 
-All Day 6–9 work is either merged to main or in review. PRs shipped today:
-- PR #8 — Day 6–8 bundle (sphere pipeline, cross cube-net, diorama content, HDRI panel, PBR)
-- PR #9 — Rotation affordance (keyboard input + yellow-line HUD + easy-mode hints)
-- PR #10 — Walk mode (first-person + HDRI per-frame-push fix)
-- PR #11 — **Intro cinematic** (open at time of writing — solved orbit → scramble → yield on hover)
+**Five unmerged branches stacked.** `main` still has only Day 11 content. Everything below rides on top.
 
-Current main is always deployable.
+### `feat/grass` — meadow + Blender round-trip + Live Mode + addon
+### `feat/grass-from-ground` — grass authoring from the ground
+### `feat/seam-weld` — Phase A + sphere seam fixes + classic rubik view
+### `feat/seam-investigation` — classic rubik view + Blender Init + Day-14 DoF/grass work
+### `feat/debug/dof-only` (current) — DoF PERCEPTION SOLVED (Day 15)
 
-### Day 9 work (all shipped or in PR)
+**Day 15 — DoF finally works perceptually.** Required three fixes, all applied on this branch:
 
-- **Keyboard rotation hybrid** — hover a tile + Q/W/E/A/S/D. Face-local axes; same `rotateAnimated` pipeline as drag.
-- **Yellow line HUD** on terrain. Thin lines at cube face-boundary edges (cosmetic — within-cubie seams). Thick lines at face-internal seams (the three slice-shear great circles). Corner-fade suppresses 3-face-junction speckle. Global attract-opacity covers the planet at t=0, fades to cursor-reactive after first commit.
-- **Easy-mode correctness colors** — Leva toggle. Lines tint green (both tiles at home) or red (misplaced). Driven by `uHudTileEdgeMask[24]` computed each frame via static `NEIGHBOR_IDX`.
-- **Walk mode** (`WalkControls.tsx`) — click "Walk on planet". First-person camera on surface, mouse-look + WASD. `fwdRef` is tangent-plane, `pitchRef` is a separate scalar (clamped ±86°) so drift-correction doesn't wipe pitch. No pointer-lock → HDRI/Leva panels remain interactive while walking. Tab/Esc exits, camera pulls back to radius 4.
-- **HDRI scene-property push moved to `useFrame`** — fixes silent revert whenever drei `<Environment>` or `<OrbitControls makeDefault>` writes scene defaults during sibling mount. See `feedback_per_frame_scene_push.md`.
-- **Intro cinematic** (`IntroCinematic.tsx`) — on every page load: 2.8 s solved-planet hold with auto-orbit → animated scramble (18 moves) → continued auto-orbit of the scrambled state → first hover/drag/key/walk hands off control. Store now starts with `buildSolvedTiles()` + empty history; intro drives the first scramble.
+1. **P24 — force-bind depth, bypass EffectComposer.** Day-14's P21 `gl_FragDepth` write from the composite quad wasn't reaching postprocessing's CoC-sampled DepthTexture. Symptom: DoF uniforms probed correct, but only `bokehScale` changed the output. Fix: `useFrame(() => effect.setDepthTexture(sphereTarget.depthTexture))`. Publish `sphereTarget.depthTexture` through `hudUniforms.uSphereDepth` so PostFx can read it from outside TileGrid.
 
-## 🔴 FIRST TASK — once PR #11 is merged
+2. **P25 fix — screen-space aperture mask.** Depth-based DoF on a convex planet focuses at scalar depth, which on a sphere corresponds to an intersection-of-spheres CIRCLE, not a point. Result: hovering the cursor produced a focus RING, not a focus spot. Fix: patch `cocMaterial.fragmentShader` via string-replace — `magnitude = max(depthCoC, smoothstep(sharpR, blurR, length((vUv - cursorUv) * vec2(aspect, 1))))`. Uniforms written per frame from projected `dofTarget`; idempotent (`mat.userData.__cocPatched`); re-applied on wrapper re-instantiation via `lastPatchedMat` ref.
 
-Pick one:
+3. **Front-pole off-cursor target.** When cursor is off planet, target was at origin → focus depth = cameraDistance → focal plane intersected planet at the silhouette rim → visible center blurred. Fix: target = `normalize(camera.position) * planetRadius` (front pole). Focus depth = cameraDistance − R → closest visible surface. With rangeWholePlanet=20m ≫ planet depth variation ≈ 2m, whole planet reads sharp.
 
-### Option A — Audio pass (recommended)
-Howler is in deps, nothing wired. Big atmospheric return per hour:
-1. **Ambient loop** — soft low drone or nature-ish bed under the planet. Volume low, loops seamlessly.
-2. **Slice rotation clicks** — short hollow-wood click on each `rotateAnimated` start or commit. Pitch-vary per axis so the ear learns which axis rotated.
-3. **Settle chime** — single tone on `planet:settled` event (already dispatched from `store.ts::applyRotation` when solving). Warmth cue layered with the PostFx bloom ramp.
-4. Optional: footstep click in walk mode every ~N units of travel.
+Infra added this day:
+- `src/DOFtest.tsx` — minimal-scene DoF diagnostic route, proved the prop-path works in isolation (narrowed failure to composite/depth chain). Served at `http://localhost:5173/DOFtest/` via pathname gating in `src/main.tsx`.
+- `PLANET_SPHERE` exported from `Interaction.tsx`, radius default 1.05, live-tunable via `focus surface R` Leva slider. Raycast sphere sits at grass canopy — DoF target lands on visible surface.
+- **PostFx was STRIPPED** of every effect except DoF to isolate the diagnosis. SMAA, N8AO, SSAO, Bloom, Noise, Vignette, RealismFX — all gone. This branch ships with DoF only.
 
-Plan it as a `src/world/Audio.tsx` component that subscribes to store events. Keep all samples under 50 KB so they don't blow the bundle further.
+## 🔴 FIRST TASKS — pick one
 
-### Option B — Walk-mode polish
-1. **Auto-enter walk on orbit zoom-past-minDistance** — per original spec. Watch camera distance; when it dollies to the `minDistance` boundary, flip `cameraMode = 'walk'`.
-2. **Crosshair** — tiny HTML overlay at screen centre while walking. Helps aim when interacting with things.
-3. **Collision with diorama objects** — basic radial push-back from hut/windmill/trees/well/bridge. Reuse the `FLOCK_OBSTACLES` list in `buildDiorama.ts`.
-4. **Orient WASD by look-direction** — currently walks along tangent forward; could feel more natural if walk-direction follows the pitched look instead (on ground, same thing; on slopes, different).
+### Option A — Re-integrate stripped effects, then ship
+Day 15's DoF-only PostFx was a diagnostic step. Before merging, reinstate SMAA/N8AO/SSAO/Bloom/Noise/Vignette/RealismFX alongside the Day-15 fixes. Verify DoF still works with the full chain. Then merge `debug/dof-only` → `feat/seam-investigation` → `main` as one big stack. ~2-3 hours.
 
-### Option C — Bundle size
-1.75 MB → 556 KB gzipped. Vite flags >500 KB. Easy wins: code-split drei's Environment helpers, lazy-load PostFx, chunk three.js. Own phase; non-blocking.
+### Option B — Ship the stack as-is (risky)
+Merge `debug/dof-only` straight to main with DoF only. Other effects disappear from the live build. Simplest aesthetic, less to go wrong, but loses Bloom warmth, AO grounding, SMAA edges, etc. Only viable if we decide the simpler look is what we want for the jam.
 
-### Option D — Per-tile biomes
-The HUD's hard-mode correctness signal requires visually-distinct content per face (desert/ice/forest etc.). Big content pass. Probably post-jam.
+### Option C — DoF tuning pass
+Defaults on the branch are conservative (`screen sharp R = 0.08`, `screen blur R = 0.30`, `bokeh = 4`). For a photo-style shallow focus: `sharp ~0.15`, `blur ~0.40`, `bokeh ~6`. Tune to taste, set new defaults, commit. ~30 min. Can do in parallel with A or B.
 
-## Other open items
+### Option D — Audio pass
+Howler still unwired. Ambient wind, slice-rotation click, settle chime, walk-mode footsteps. ~1 day.
 
-1. **Bundle > 500 KB warning** — see Option C.
-2. **Mobile/touch** — walk mode is desktop-only. Phone tap-and-drag to rotate works (pointer events), but no walk fallback. Flag for post-jam if judges complain.
-3. **Starlings occasionally appear as pink dots near HDRI sunset** — their white base material + warm HDRI. Cosmetic, low priority.
-4. **3-face corner speckle in HUD** — `cornerFade` smoothstep already mitigates, but not fully eliminated at extreme zoom. Polish-phase fix.
-5. **Intro replay on reload** — currently plays every time. If that feels stale after a few playthroughs, gate on localStorage (`introSeen`).
-6. **OrbitControls `autoRotate` keeps going after intro ends** (actually it doesn't — `SphereCamera` gates `autoRotate={introPhase !== 'done'}`). No action needed, just a verified invariant.
+### Option E — Per-cell visibility culling
+`.anvi/todos.md` MEADOW_PERF_CULLING. ~6× draw-call reduction on glb scenes.
 
-## Hard invariants (don't change without asking)
+### Option F — Bundle split
+~850 KB gzipped. Split drei/three/realism-effects/lottie into lazy chunks.
 
-**From Day 8** (still live):
-- `includeTerrain: mode !== 'sphere'` — sphere mode uses the global SphereGeometry terrain; per-tile terrain reintroduces seams.
-- Idempotent `onBeforeCompile` patchers — shared materials break silently without the `__*Patched` guard.
-- `uTileOriInv` is `Float32Array(96)`, not `Vector4[]`.
-- Slice uniforms + orientation array written BEFORE `gl.render(terrainScene, camera)` in `TileGrid.useFrame`.
-- `v = (dot(P, fUp) > 0) ? 0 : 1` — inverted v convention in `computeTileIdx`.
-- Sphere shader normal fix: `mat3(viewMatrix) * sphereNormal`, NOT `normalMatrix`.
-- Cross cube-net layout — rectangular 2×3 can't fold cleanly.
-- Road subdivided to 64 widthSegments — unsubdivided long boxes chord through the sphere.
-- Drag-direction picks axis, ring-hidden-by-default, 6.5° commit threshold, 2×2 topology.
+My lean: **A first** (re-integrate so we don't ship a gutted PostFx to the jam build) → **C** (tune the aperture defaults) → **D** (audio). The jam deadline is ~7 days out; spending 2-3 hours on A to preserve the full visual stack is worth it.
 
-**New in Day 9:**
-- **Scene-shared state pushes every frame**, not in store-dep useEffect. See `HDRIEnvironment.useFrame` and vyapti PV2.
-- **Walk-mode forward is decomposed into tangent `fwd` + scalar `pitch`.** Don't merge them; drift correction on fwd would wipe pitch.
-- **OrbitControls unmounts during walk** — `SphereCamera` returns `null` when `cameraMode === 'walk'`. They can't coexist.
-- **IntroCinematic uses store-state gate, not ref-guard.** Strict Mode double-invoke + `startedRef` silently no-ops timed sequences. See hetvabhasa P3 / `feedback_strict_mode_guard.md`.
-- **Initial tiles are SOLVED** — intro drives the first scramble. Changing this requires an intro rewrite.
+## Hard invariants (don't change without reading catalogues)
+
+PV1, PV6, PV7, PV8, PV9, PV10, PV12, PV13 still hold. PV11 (updated Day 14) still holds.
+
+**NEW invariant candidates (not yet codified in vyapti.md):**
+- **DoF depth source must be force-bound.** When an offscreen custom render path feeds EffectComposer, the composer's depth chain is unreliable. Call `effect.setDepthTexture(sourceDepth)` per frame, bypassing composer-managed depth wiring. Canonical in `src/world/PostFx.tsx`.
+- **DoF target off-cursor = front pole, not origin.** `normalize(camera.position) * planetRadius`.
+
+New hetvabhasa entries this day: **P24** (composite gl_FragDepth → EffectComposer depth chain broken; force-bind via setDepthTexture), **P25** (depth-based DoF on convex surface produces focus ring; fix with screen-space aperture patch).
+
+Dharana boundary status:
+- **B2** (R3F ↔ postprocessing EffectComposer) — FATAL, 4 patterns clustered (P4, P6, P7, P22).
+- **B4** (offscreen composite ↔ depth-dependent post-effects) — FATAL, **4 patterns** clustered (P8, P21, P23, P24). The "strongest smell" at B4 is now "uniforms probe correct but GPU output behaves as if they're at defaults" — default response = force-bind textures directly to effect materials.
 
 ## Working style
 
-- Concise. 1–2 sentences end-of-turn.
-- Brainstorm → option matrix → pick before non-trivial work.
-- Playwright for anything non-trivial to verify; screenshots to `/tmp/rubics-test/`.
-- Commits: gitmoji + `Problem:` / `Fix:` body, no `Co-Authored-By`.
-- Always-deployable main. Ship branches in sequence, not stacked.
+- Concise. 1–2 sentence end-of-turn.
+- **Observation over inference.** Runtime probes BEFORE claiming a fix works. For DoF specifically, "uniform probe correct" is NOT proof of "effect works" — check the visual response to focusRange/focusDistance sliders independently. If only bokeh changes output, depth chain is broken regardless of what uniform probes say.
+- Options-not-implementations before non-trivial work.
+- Playwright for verification; screenshots to `/tmp/rubics-test/`. CDP `Page.captureScreenshot` bypasses Playwright's font-load wait when the page has a live WebGL canvas. Headless Playwright on SwiftShader is too slow for our scene — verify in the real browser.
+- Commits: gitmoji + `Problem:` / `Fix:` body. No `Co-Authored-By`.
+- Always-deployable main. Ship in sequence.
+- Catalogues + memory stay in sync; new pattern → catalogue entry before moving on.
 
 ## Start by
 
-1. Confirm PR #11 is merged and main is synced.
-2. Pick Option A (audio) or B (walk polish) based on how the last playthrough felt.
-3. For A: new branch `feat/audio`, new component `src/world/Audio.tsx` subscribing to store / planet events.
-4. For B: new branch `feat/walk-polish`, extend `WalkControls.tsx` + a new `useCameraDistanceWatcher` in `App.tsx`.
+1. `git status` — should be clean on `debug/dof-only` (or have uncommitted Day-15 work ready to commit).
+2. `git log --oneline main..HEAD` — confirm the stack (~40+ commits).
+3. Verify DoF still works in http://localhost:5173 — hover on planet, sharp circle around cursor, no ring, no uniform blur. Off planet, whole planet mostly sharp.
+4. Pick an option above. Lean: **A** (re-integrate stripped effects) first.
 
 ---
 

@@ -19,6 +19,7 @@
  */
 
 import * as THREE from 'three'
+import { buildGrass } from './buildGrass'
 
 export const BASE_W = 8
 export const BASE_H = 6
@@ -93,6 +94,11 @@ export const hudUniforms = {
   uHudHoverRadius:   { value: 0.35 },
   uHudTileEdgeMask:  { value: _hudEdgeMaskFlat },
   uHudEasyMode:      { value: 0.0 },   // 0 = monochrome dots, 1 = green/red
+  // TileGrid publishes sphereTarget.depthTexture here in sphere mode so
+  // PostFx's DoF can sample planet depth DIRECTLY — bypassing the
+  // composite-quad's gl_FragDepth rewrite into EffectComposer's RT depth
+  // (which appears not to land, producing the "only bokeh works" symptom).
+  uSphereDepth:      { value: null as THREE.Texture | null },
 }
 
 /** Compose-safe fragment-shader patch that scales the indirect-specular
@@ -399,7 +405,7 @@ const TERRAIN_GREEN = '#9ec280'  // brighter base — multiplies with grass map
 // cache — one GPU upload shared between the per-tile flat terrain and the
 // global sphere terrain.
 let _grassTex: THREE.Texture | null = null
-function grassTexture(): THREE.Texture {
+export function grassTexture(): THREE.Texture {
   if (_grassTex) return _grassTex
   const tex = new THREE.TextureLoader().load('/textures/grass_diff_1k.jpg')
   tex.wrapS = THREE.RepeatWrapping
@@ -1258,6 +1264,11 @@ export interface BuildDioramaOpts {
    *  in sphere mode where a separate global SphereGeometry terrain renders
    *  once per frame (avoids per-tile clip-plane seams entirely). */
   includeTerrain?: boolean
+  /** Skip building the grass + flower InstancedMeshes. Used by the
+   *  saveDiorama flow — exporting the meadow would serialise hundreds of
+   *  thousands of blade instance matrices into the glb and lose the
+   *  shader-driven wind anyway. Meadow is rebuilt in-code on load. */
+  skipMeadow?: boolean
 }
 
 /** Single global terrain mesh — a real sphere, not a sphere-projected plane.
@@ -1287,7 +1298,7 @@ export function buildSphereTerrain(): THREE.Mesh {
 }
 
 export function buildDiorama(opts: BuildDioramaOpts = {}): DioramaScene {
-  const { includeTerrain = true } = opts
+  const { includeTerrain = true, skipMeadow = false } = opts
   const root = new THREE.Group()
   root.name = 'diorama'
 
@@ -1325,6 +1336,24 @@ export function buildDiorama(opts: BuildDioramaOpts = {}): DioramaScene {
   root.add(car.group)
   root.add(birds.group)
 
+  // Fresnel toggle hook: every MSM in the diorama gets a uFresnelScale
+  // uniform bound to the shared `fresnelUniform`. Runtime code flips the
+  // uniform's value to turn the specular IBL rim on/off. Applied BEFORE the
+  // grass is attached so grass material (which has its own onBeforeCompile
+  // chain) is not touched by the Fresnel patch — grass is matte, doesn't
+  // read specular, and keeping its shader chain clean avoids chunk-merge
+  // collisions (hetvabhasa P7).
+  applyFresnelPatchToScene(root)
+
+  // Meadow runs LAST: all other props must be in `root` so their flat-space
+  // AABBs are available for exclusion sampling. Authored in flat cube-net
+  // coordinates, grass + flowers then ride the same per-cell → sphere
+  // projection pipeline as every other prop. skipMeadow = true cuts the
+  // grass meshes entirely — used by saveDiorama so the exported glb stays
+  // lean and the meadow rebuilds from code on load.
+  const grass = skipMeadow ? null : buildGrass(root)
+  if (grass) for (const m of grass.meshes) root.add(m)
+
   const update = (t: number) => {
     pond.update(t)
     stream.update(t)
@@ -1333,12 +1362,8 @@ export function buildDiorama(opts: BuildDioramaOpts = {}): DioramaScene {
     smoke.update(t)
     car.update(t)
     birds.update(t)
+    grass?.update(t)
   }
-
-  // Fresnel toggle hook: every MSM in the diorama gets a uFresnelScale
-  // uniform bound to the shared `fresnelUniform`. Runtime code flips the
-  // uniform's value to turn the specular IBL rim on/off.
-  applyFresnelPatchToScene(root)
 
   return { root, update }
 }

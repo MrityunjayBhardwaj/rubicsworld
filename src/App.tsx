@@ -12,6 +12,8 @@ import { PostFx } from './world/PostFx'
 import { TileLabels, TileLabelsLegend } from './world/TileLabels'
 import { HDRIEnvironment } from './world/HDRIEnvironment'
 import { HDRIPanel } from './world/HDRIPanel'
+import { GrassPanel } from './world/GrassPanel'
+import { CubeSphere } from './world/CubeSphere'
 import { TileGrid } from './diorama/TileGrid'
 import { DioramaGrid } from './diorama/DioramaGrid'
 import { BezierCurveEditor } from './diorama/BezierCurveEditor'
@@ -74,11 +76,16 @@ function DevSceneExpose() {
 }
 
 export default function App() {
-  const [preview, setPreview] = useState<false | 'grid' | 'split' | 'cube'>(false)
+  const [preview, setPreview] = useState<false | 'grid' | 'split' | 'cube' | 'rubik'>(false)
   const [bezier, setBezier] = useState({ cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 })
   const onBezierChange = useCallback((cx1: number, cy1: number, cx2: number, cy2: number) => {
     setBezier({ cx1, cy1, cx2, cy2 })
   }, [])
+  // 'rubik' is a classic top-down-perspective view of the cube-sphere (the
+  // first-version planet, no diorama, no HDRI chrome). It gets its own
+  // camera profile — not the orthographic-ish top-down of grid/split/cube.
+  const isTopDownPreview = preview === 'grid' || preview === 'split' || preview === 'cube'
+  const isRubik = preview === 'rubik'
 
   return (
     <>
@@ -86,15 +93,16 @@ export default function App() {
       <Cursor />
       <TileLabelsLegend />
       <HDRIPanel />
+      {!preview && <GrassPanel />}
       {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <TutorialChrome />
       <Canvas
         camera={{
-          position: preview ? [0, 22, 0.1] : [2.4, 1.6, 2.8],
-          fov: preview ? 50 : 45,
+          position: isTopDownPreview ? [0, 22, 0.1] : isRubik ? [3.2, 2.2, 3.2] : [2.4, 1.6, 2.8],
+          fov: isTopDownPreview ? 50 : 45,
           near: 0.01,
         }}
-        shadows={!!preview}
+        shadows={isTopDownPreview}
         // antialias disabled: SMAA runs in the PostFx effect chain instead, so
         // the effect composer sees crisp edges and so Path 2 (realism-effects
         // SSGI/TRAA) can later take full control of MSAA. toneMapping moved
@@ -115,6 +123,18 @@ export default function App() {
             <TileGrid mode={preview} />
             <gridHelper args={[8, 16, '#333', '#222']} position={[0, -0.02, 0]} />
             <TileLabels mode={preview} />
+          </>
+        ) : preview === 'rubik' ? (
+          <>
+            {/* Classic first-version planet: per-tile cube-sphere geometry from
+                buildAllTileGeometries, no diorama projection, no HDRI. Uses the
+                same usePlanet store + Interaction pipeline so slice rotation /
+                scramble / solve all work the same as the main sphere view. */}
+            <ambientLight intensity={0.45} />
+            <directionalLight position={[4, 6, 3]} intensity={1.1} />
+            <CubeSphere />
+            <Ring />
+            <Interaction />
           </>
         ) : (
           <>

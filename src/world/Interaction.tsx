@@ -25,7 +25,11 @@ import { hudUniforms } from '../diorama/buildDiorama'
 // - pointerup: endDrag (commit to nearest ±π/2 or snap back).
 
 const ORIGIN = new THREE.Vector3(0, 0, 0)
-const PLANET_SPHERE = new THREE.Sphere(ORIGIN, 1)
+// Invisible reference sphere the cursor raycast hits. Radius starts above 1
+// so the hit lands on the grass canopy (the visible surface) rather than on
+// bare ground underneath. DoF focus target rides this hit → focus lands on
+// what the user actually sees. PostFx mutates `.radius` via a Leva slider.
+export const PLANET_SPHERE = new THREE.Sphere(ORIGIN, 1.05)
 const RING_RADIUS_PAD = 1.42
 
 const AXIS_VECS: { key: Axis; vec: THREE.Vector3 }[] = [
@@ -137,6 +141,13 @@ export function Interaction() {
 
   const pending = useRef<PendingDrag | null>(null)
   const onPlanetRef = useRef(false)
+  // True from the moment a left-button pointerdown MISSES the planet until
+  // the matching pointerup. While true, the "no drag in progress" hover
+  // block is short-circuited: we do NOT publish uHudCursor / uHudCursorActive
+  // so DoF can't switch to the on-cursor focus route mid-orbit. Without this,
+  // starting an orbit drag off-planet and sweeping the cursor over the planet
+  // flips DoF into hover mode on every crossing, which is disorienting.
+  const offPlanetDragRef = useRef(false)
 
   useEffect(() => {
     const canvas = gl.domElement
@@ -226,6 +237,19 @@ export function Interaction() {
         return
       }
 
+      // Off-planet orbit drag in progress — freeze hover state off.
+      // DoF reads uHudCursorActive; keeping it 0 pins DoF to its whole-planet
+      // route for the duration of the drag regardless of where the cursor sweeps.
+      if (offPlanetDragRef.current) {
+        if (onPlanetRef.current) {
+          setOnPlanet(false)
+          onPlanetRef.current = false
+        }
+        setHoveredTile(null)
+        hudUniforms.uHudCursorActive.value = 0
+        return
+      }
+
       // No drag in progress — update onPlanet for orbit gating
       const tgt = e.target as HTMLElement | null
       if (tgt && typeof tgt.closest === 'function' && tgt.closest('[id^="leva"]')) {
@@ -273,7 +297,12 @@ export function Interaction() {
       const cy = e.clientY - rect.top
       const hitPoint = new THREE.Vector3()
       const hit = raycastHit(cx, cy, hitPoint)
-      if (!hit) return // let OrbitControls take it for camera orbit
+      if (!hit) {
+        // Orbit-drag path: mark so onMove's hover block suppresses DoF
+        // hover switching until pointerup/cancel clears the flag.
+        offPlanetDragRef.current = true
+        return // let OrbitControls take it for camera orbit
+      }
 
       e.stopPropagation()
       pending.current = {
@@ -285,6 +314,10 @@ export function Interaction() {
     }
 
     const onUp = () => {
+      // Always clear the off-planet drag flag — pointerup/pointercancel are
+      // the universal release signals. Placed before the early-return so we
+      // don't leak the flag past a drag where `pending.current` was never set.
+      offPlanetDragRef.current = false
       if (!pending.current) return
       const wasCommitted = pending.current.kind === 'committed'
       pending.current = null
