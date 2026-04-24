@@ -23,3 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 .vercel
+.claude/
+blender-plugin/__pycache__/
+public/diorama2.glb
+public/tree*.glb

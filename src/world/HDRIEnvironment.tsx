@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useThree, useFrame } from '@react-three/fiber'
 import { Environment } from '@react-three/drei'
 import * as THREE from 'three'
@@ -33,6 +33,7 @@ function makeUniformEquirectTexture(hex: string): THREE.CanvasTexture {
 export function HDRIEnvironment() {
   const { scene } = useThree()
   const url = useHdri(s => s.url)
+  const filename = useHdri(s => s.filename)
   const preset = useHdri(s => s.preset)
   const blur = useHdri(s => s.blur)
   const intensity = useHdri(s => s.intensity)
@@ -95,10 +96,39 @@ export function HDRIEnvironment() {
 
   if (useUniform) return null
   if (url) {
+    // PNG = LDR equirect. drei's <Environment files=...> infers the loader
+    // from the URL extension, but blob URLs have none and PNGs aren't on
+    // drei's loader table anyway. Load it ourselves and pass via `map`.
+    const isPng = (filename ?? '').toLowerCase().endsWith('.png')
+    if (isPng) {
+      return <PngEquirectEnvironment url={url} />
+    }
     return <Environment key={`file:${url}`} files={url} background />
   }
   // `useUniform` guard above narrows preset out of 'uniform', but TS can't
   // infer through the Zustand selector — explicit cast.
   const dreiPreset = preset as Exclude<typeof preset, 'uniform'>
   return <Environment key={`preset:${dreiPreset}`} preset={dreiPreset} background />
+}
+
+function PngEquirectEnvironment({ url }: { url: string }) {
+  const [tex, setTex] = useState<THREE.Texture | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const loader = new THREE.TextureLoader()
+    loader.load(url, t => {
+      if (cancelled) { t.dispose(); return }
+      t.mapping = THREE.EquirectangularReflectionMapping
+      t.colorSpace = THREE.SRGBColorSpace
+      setTex(t)
+    }, undefined, err => {
+      console.error('[hdri] PNG load failed:', err)
+    })
+    return () => {
+      cancelled = true
+      setTex(prev => { prev?.dispose(); return null })
+    }
+  }, [url])
+  if (!tex) return null
+  return <Environment key={`png:${url}`} map={tex} background />
 }

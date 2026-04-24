@@ -106,6 +106,123 @@ _(Each entry must include a `**REF:**` field pointing to a Ground Truth doc.)_
 **Implication:** For shared scene state, prefer `useFrame` over `useEffect`. Cost is trivial (scalar assignments); robustness gain is total. Add a diagnostic harness that snapshots store + scene to detect divergence when introducing a new shared property.
 **REF:** UNGROUNDED — canonical instance `src/world/HDRIEnvironment.tsx:48-62`.
 
+### PV3: Mutable-ref props behind React wrappers need per-frame re-attach
+**Statement:** Wherever a library wraps an imperative instance in a `useMemo` keyed on every prop AND exposes a mutable-ref prop (e.g. `target={vec3}`, `depthTexture={tex}`), the ref prop must be re-attached to the live instance on every frame via an identity check — not via `useEffect` keyed on a stable dep list.
+**Causal status:** STRUCTURAL — the wrapper's re-memoisation invalidates any external ref connection silently; React doesn't know the ref should re-run its effect.
+**Scope:** `@react-three/postprocessing` `DepthOfField`, any similar wrapper pattern where the inner instance gets recreated on prop change. Likely applies to many pmndrs wrappers around postprocessing passes.
+**Breaks when:** The wrapper stabilises the inner instance across prop changes (most R3F primitive wrappers do this). Check via `dispose` behaviour in the wrapper source.
+**Confirmed by:** 2026-04-21 — DoF cursor-follow worked at mount, silently broke on first Leva slider drag. Probe proved effect re-instantiation; per-frame identity check fixed it permanently.
+**Implication:** For ANY R3F/drei/postprocessing wrapper where we need to drive a mutable parameter from our own animation loop, pattern is:
+```tsx
+useFrame(() => {
+  if (!ref.current) return
+  if (ref.current.target !== ourVec3) ref.current.target = ourVec3
+  // ...mutate ourVec3 here
+})
+```
+**REF:** UNGROUNDED — canonical instance `src/world/PostFx.tsx` (DoF target re-attach).
+
+### PV4: Tone mapping belongs on the renderer, not in the effect chain
+**Statement:** Wherever a scene uses postprocessing effect passes (especially realism-effects SSGI/SSR/TRAA, or any effect reading from the input buffer expecting linear color), the tone mapping must be applied by the renderer (`gl.toneMapping = ACESFilmicToneMapping`), NOT via a `<ToneMapping>` effect component.
+**Causal status:** CAUSAL — effects read inputBuffer.texture; if tone mapping is upstream in the effect chain, effects read already-compressed non-linear color and produce visually wrong output (SSGI bounce light reads too dim, bloom highlights over-bloom, etc.).
+**Scope:** Any scene with effect-based postprocessing that reads scene color.
+**Breaks when:** No effects read color (pure overlays like selective bloom, screen-space UI). Then tone mapping location doesn't matter.
+**Confirmed by:** 2026-04-20 — Path 1 architecture; SSGI's built-in tonemapping block assumes linear input. Moving ACES to renderer kept the effect chain correct.
+**Implication:** Configure ACES tone mapping on the R3F Canvas gl config; don't add a `<ToneMapping>` to PostFx. Compensate with `toneMappingExposure` for HDRI brightness (we run at 1.35).
+**REF:** UNGROUNDED — canonical instance `src/App.tsx` (Canvas gl config).
+
+### PV5: Effect chain contract with Canvas config
+**Statement:** Wherever an R3F scene uses a pmndrs `<EffectComposer>`, the Canvas + composer config must satisfy:
+- `<Canvas gl={{ antialias: false }}>` — SMAA runs in the effect chain instead
+- `<EffectComposer multisampling={0}>` — SSGI (Path 2) needs full MSAA control
+- `<EffectComposer stencilBuffer depthBuffer>` — standardises depth texture format so downstream passes (DoF, AO) read consistent formats
+**Causal status:** STRUCTURAL — each clause is driven by a specific downstream pass requirement.
+**Scope:** Any scene preparing for or running SSGI / SSR / TRAA alongside standard effects.
+**Breaks when:** Scene uses only screen-space overlays (UI), no depth-dependent effects.
+**Confirmed by:** 2026-04-20 — enabling stencilBuffer flipped depth format from DepthFormat+FloatType to DepthStencilFormat+UnsignedInt248Type, which is what most passes expect.
+**Implication:** Treat this as the default recipe for any R3F scene with realism-effects-adjacent ambitions. Deviate only with reason.
+**REF:** UNGROUNDED — canonical instance `src/App.tsx` (Canvas) + `src/world/PostFx.tsx` (EffectComposer).
+
+### PV6: InstancedMesh + material-level vertex patch must fold `instanceMatrix`
+**Statement:** Wherever a material's `onBeforeCompile` replaces `<project_vertex>`, the replacement MUST include `instanceMatrix` in worldPos (under `#ifdef USE_INSTANCING`), else all instances collapse to instance[0]'s location.
+**Causal status:** CAUSAL.
+**Scope:** `patchMaterialForSphere` + any future vertex-displacement patch used with InstancedMesh.
+**Breaks when:** Patch only runs against non-instanced geometry.
+**Confirmed by:** 2026-04-21 — grass InstancedMeshes invisible in sphere mode until the guard was added.
+**Implication:** Canonical snippet in `src/diorama/TileGrid.tsx:patchMaterialForSphere` — copy when writing new vertex patches.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/TileGrid.tsx` (project_vertex override with USE_INSTANCING branch).
+
+### PV7: Instance order must be shuffled when `mesh.count` is user-controlled
+**Statement:** Wherever the visible count of an InstancedMesh is driven by a user slider, instance matrices must be Fisher-Yates shuffled across authoring groups so `count = N` is a uniformly random subset.
+**Causal status:** STRUCTURAL — three renders `instances[0..count)`; unsorted group-order produces group-wise disappearance.
+**Scope:** Grass + 4 flower meshes; any future count-controlled instanced population.
+**Breaks when:** Count is always 100% OR order is visually meaningful.
+**Confirmed by:** 2026-04-21 — density slider at 10% showed grass only on first-sampled face blocks before shuffle.
+**Implication:** Shuffle in lockstep with every per-instance attribute (`iHue`).
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (per-bucket shuffle).
+
+### PV8: Rebuildable scene state lives in module-scope refs, not React state
+**Statement:** Wherever user state must survive a scene rebuild triggered outside React (hot reload, rebuildWithMask, mode switch), it lives in a module-scoped mutable ref that the build path reads, plus an explicit post-swap re-apply callback the rebuilder invokes.
+**Causal status:** CAUSAL — React doesn't re-fire useEffect on external three.js identity changes.
+**Scope:** `grassRefs.activeMask`, `grassRefs.reapplyControls`, every mesh/count slot on grassRefs.
+**Breaks when:** State is purely ephemeral (e.g. mouse position).
+**Confirmed by:** 2026-04-21 — hot-reload swap dropped painted mask + density back to defaults until mirrored into grassRefs and `reapplyControls()` called post-swap.
+**Implication:** When you add a Leva knob affecting a rebuildable object, store in grassRefs AND register in reapplyControls. Don't rely on useEffect deps.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts:grassRefs`.
+
+### PV9: Blender addon authors in Z-up; glTF export_yup=True bridges sides
+**Statement:** The Blender addon uses Blender-native Z-up (ground=XY, height=Z). glTF export flips to Y-up at the boundary. `buildDiorama.ts` face-block tables use three-js Y-up; the addon's tables use Blender Z-up.
+**Causal status:** STRUCTURAL — two frames bridged by the exporter's Y-Z swap.
+**Scope:** Blender addon files + the loadGlbDiorama path.
+**Breaks when:** Export flag changed to `export_yup=False` (would require three-js side changes).
+**Confirmed by:** 2026-04-21 — first guide-pass drew vertical rects because the validator used three-js axes.
+**Implication:** Every axis-aware line in the addon uses Blender conventions. README carries both tables for reference.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `blender-plugin/rubics_world.py` (FACE_BLOCKS y_min/y_max) vs `src/diorama/buildDiorama.ts` (z_min/z_max header).
+
+### PV10: Scene-graph helpers called post-mount must neutralise the diorama root transform
+**Statement:** Wherever a function called on an already-mounted diorama root reads `matrixWorld` (via `setFromObject`, `applyMatrix4`, `updateMatrixWorld` propagation), it must save/zero/restore the root's transform around the work. Initial-mount identity is not a stable invariant — TileGrid mutates `root.position/quaternion/matrix` every frame.
+**Causal status:** STRUCTURAL — the 24-pass rendering contract explicitly uses the root matrix as scratch space.
+**Scope:** `buildGrass`, `weldCubeNetSeams`, any future diorama-level helper.
+**Breaks when:** TileGrid's per-pass transform-write strategy changes to push into a child rather than the root (would invert the contract).
+**Confirmed by:** 2026-04-22 — rebuildWithMask returned ~400 candidates in a sliver near one face; fix landed in 9435936.
+**Implication:** Every such helper ships a save/restoreRoot pattern — do not assume identity. New helpers must follow suit.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (save/restoreRoot block) + `src/diorama/weldSeams.ts` (`try/finally` with prev* snapshots).
+
+### PV11: Grass emitter requires a ground/terrain-named mesh IN THE DIORAMA ROOT; presence ≠ visibility
+**Statement:** `buildGrass` sources its candidate sampling region from the first mesh (under the diorama root it was handed) whose name starts with `ground` or `terrain` (case-insensitive, so Blender's `terrain.001` matches). If no such mesh exists → `console.error` + `emptyGrassResult()`. No hardcoded fallback cube-net. **The mesh must be PRESENT in the root, but need not be VISIBLE** — `traverse()` visits invisible meshes (grass can still read geometry for AABB + triangles), while `WebGLRenderer` skips drawing them. Render-optimization toggles belong on `.visible`, never on root membership.
+**Causal status:** CAUSAL — the sampler needs an authoritative footprint; silent defaults would hide authoring bugs.
+**Scope:** `src/diorama/buildGrass.ts`, both imperative and glb load paths.
+**Breaks when:** An optimization path in TileGrid or buildDiorama *removes* the terrain mesh from the root to avoid double-draw (P23 — what happened in sphere mode with a separate global sphere-terrain). A new diorama pipeline that emits procedurally with no ground mesh also violates this; such pipelines need a different emission source.
+**Confirmed by:** 2026-04-22 — ground-authored grass shipped in 8d2b9ca. 2026-04-23 — presence-vs-visibility distinction established after sphere-mode regression (c00ef33 + P23).
+**Implication:** Every diorama must expose a named ground/terrain in the root passed to `buildGrass`. Blender addon's Init Scene and FACE_BLOCKS guides enforce this by construction. In sphere mode the imperative path keeps its flat `terrain` plane in the root and toggles `visible=false` so the global sphere-terrain is the one that actually renders.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (GROUND_NAME_PREFIXES, emptyGrassResult exit paths); `src/diorama/TileGrid.tsx:hideFlatTerrainInSphereMode`.
+
+### PV12: Grass blades MUST adhere to the ground's sculpted surface (height + normal)
+**Statement:** Every blade's position is lifted onto the ground by triangle-grid raycast (XY AABB → bin by cell → barycentric check → interpolate Y + face normal). Candidates that miss every triangle (ground hole) are excluded. Per-blade orientation uses `(groundNormal, yaw)` so blades grow out of the surface on slopes.
+**Causal status:** CAUSAL — without this, sculpted terrain shows grass floating or sunken.
+**Scope:** `src/diorama/buildGrass.ts:sampleGroundAt` + per-bucket matrix composition in `buildBucketMesh`.
+**Breaks when:** The ground's world-space AABB is invalid (caught with `isFinite(groundArea) && groundArea > 0`), or all its triangles are degenerate.
+**Confirmed by:** 2026-04-22 — sculpted terrain followed by blades in ceebca7.
+**Implication:** Grid resolution is 80×60 over the ground's AABB; O(k) per candidate where k is tris in the query cell (~1–5 for reasonable tessellation). One-time cost at build; zero per-frame cost.
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/buildGrass.ts` (groundTris array + sampleGroundAt closure).
+
+### PV13: Sphere-mode rendering needs gap=0 AND face-boundary EDGE_OVERDRAW epsilon
+**Statement:** Sphere cube-cell rendering must use `gap = 0` for the within-face clip planes (so halfCell reaches the face edges exactly) AND a small positive constant on the face-boundary planes (`(N±R)·p ≥ -EDGE_OVERDRAW`) so adjacent passes overlap by a sub-pixel sliver at cube edges. Either alone leaves a visible seam.
+**Causal status:** STRUCTURAL — two distinct failure classes (a within-face sky strip and a cross-face hairline), each with its own cause, each requiring its own remedy.
+**Scope:** `src/diorama/TileGrid.tsx:cubeCellRender` + the per-mode gap selection.
+**Breaks when:** A future mode brings back a global sphere-terrain backfill (which would mask the within-face gap and let the sphere-mode gap revert).
+**Confirmed by:** 2026-04-22 through 2026-04-23 — gap=0 in 257e58d, EDGE_OVERDRAW in 7ec4b34.
+**Implication:** `CUBE_GAP = 0.06` stays as a cube/split-preview feature; sphere gets its own zero. EDGE_OVERDRAW = 1e-3 is safe — invisible overdraw, no z-fighting (same shader output by construction).
+**Status:** IMPLEMENTED
+**REF:** UNGROUNDED — `src/diorama/TileGrid.tsx` (mode-specific gap on line 589; EDGE_OVERDRAW on cubeCellRender's face-boundary planes).
+
 ### Entry Format (with mandatory REF)
 
 ```

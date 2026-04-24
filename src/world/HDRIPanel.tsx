@@ -11,12 +11,37 @@ import { HDRI_PRESETS, useHdri, type HdriPreset } from './hdriStore'
  *
  * HDR/EXR files aren't renderable via <img>, so the preview is produced by
  * loading with three's RGBELoader/EXRLoader and tone-mapping the radiance
- * data to an 8-bit canvas. One-shot per upload; tiny (256×128) and
- * mirror-wrapping so the horizontal edges blend.
+ * data to an 8-bit canvas. PNGs (LDR equirects) render directly via <img>.
  */
 
 const THUMB_W = 256
 const THUMB_H = 128
+
+type HdriKind = 'hdr' | 'exr' | 'png'
+
+function detectKind(filename: string | null | undefined): HdriKind {
+  const n = (filename ?? '').toLowerCase()
+  if (n.endsWith('.exr')) return 'exr'
+  if (n.endsWith('.png')) return 'png'
+  return 'hdr'
+}
+
+async function buildPngThumbnail(url: string): Promise<HTMLCanvasElement | null> {
+  return new Promise(resolve => {
+    const img = new Image()
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      canvas.width = THUMB_W
+      canvas.height = THUMB_H
+      const ctx = canvas.getContext('2d')
+      if (!ctx) { resolve(null); return }
+      ctx.drawImage(img, 0, 0, THUMB_W, THUMB_H)
+      resolve(canvas)
+    }
+    img.onerror = () => resolve(null)
+    img.src = url
+  })
+}
 
 async function buildHdriThumbnail(url: string, isExr: boolean): Promise<HTMLCanvasElement | null> {
   const loader = isExr ? new EXRLoader() : new RGBELoader()
@@ -104,8 +129,9 @@ export function HDRIPanel() {
       return
     }
     setPreviewBusy(true)
-    const isExr = (filename ?? '').toLowerCase().endsWith('.exr')
-    buildHdriThumbnail(url, isExr).then(canvas => {
+    const kind = detectKind(filename)
+    const job = kind === 'png' ? buildPngThumbnail(url) : buildHdriThumbnail(url, kind === 'exr')
+    job.then(canvas => {
       setPreviewBusy(false)
       if (!wrap || !canvas) return
       canvas.style.cssText = 'width:100%;height:auto;display:block;border-radius:3px;'
@@ -119,8 +145,8 @@ export function HDRIPanel() {
     const file = e.target.files?.[0]
     if (!file) return
     const name = file.name.toLowerCase()
-    if (!name.endsWith('.hdr') && !name.endsWith('.exr')) {
-      alert('Please upload a .hdr or .exr file')
+    if (!name.endsWith('.hdr') && !name.endsWith('.exr') && !name.endsWith('.png')) {
+      alert('Please upload a .hdr, .exr, or .png file')
       return
     }
     // Revoke the old blob URL if present
@@ -174,7 +200,7 @@ export function HDRIPanel() {
             }}
           />
           <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            <button onClick={onPickFile} style={btnStyle}>Upload HDR/EXR</button>
+            <button onClick={onPickFile} style={btnStyle}>Upload HDR/EXR/PNG</button>
             {url && <button onClick={onUsePreset} style={btnStyle}>Use preset</button>}
           </div>
           {url && filename && (
@@ -183,7 +209,7 @@ export function HDRIPanel() {
           <input
             ref={fileRef}
             type="file"
-            accept=".hdr,.exr"
+            accept=".hdr,.exr,.png"
             onChange={onFileChange}
             style={{ display: 'none' }}
           />
