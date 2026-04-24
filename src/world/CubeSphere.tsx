@@ -22,6 +22,14 @@ const AXIS_TUPLE: Record<Axis, [number, number, number]> = {
   z: [0, 0, 1],
 }
 
+// @react-spring's `animated.meshStandardMaterial` + R3F's overloaded JSX
+// types trip TS2589 (instantiation excessively deep) at the usage site.
+// Aliasing through an `any`-typed binding short-circuits the inference chain
+// without changing runtime behavior — same element, same props, same
+// everything at runtime; TS just stops trying to unify the full prop set.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const AnimatedMaterial: any = animated.meshStandardMaterial
+
 function TileLabel({ homePos, id }: { homePos: THREE.Vector3; id: number }) {
   const ref = useRef<THREE.Group>(null)
   const { camera } = useThree()
@@ -97,7 +105,7 @@ function TileMesh({
             binds the texture to a USE_MAP-less shader — which silently
             ignores it. Remount is cheap (three.js pooled material creation)
             and sidesteps the needsUpdate dance entirely. */}
-        <animated.meshStandardMaterial
+        <AnimatedMaterial
           key={grassMap ? 'grass' : 'plain'}
           color={grassMap ? '#ffffff' : geom.color}
           map={grassMap}
