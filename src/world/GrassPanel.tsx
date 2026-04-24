@@ -25,13 +25,6 @@ function triggerDownload(dataUrl: string, filename: string) {
   document.body.removeChild(a)
 }
 
-async function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise(resolve => {
-    const r = new FileReader()
-    r.onloadend = () => resolve(r.result as string)
-    r.readAsDataURL(blob)
-  })
-}
 
 /** Render a clean black-and-white mask of the density map: white = allowed,
  *  black = out-of-bounds or inside a prop exclusion. Same coordinate space as
