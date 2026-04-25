@@ -28,6 +28,24 @@ const GRASS_STAMP_MIN_INTERVAL = 0.02
 const GRASS_STAMP_MIN_DIST = 0.008
 import { buildGrass, grassRefs } from './buildGrass'
 import { loadGlbDiorama } from './loadGlbDiorama'
+import { audioBus } from '../world/audio/bus'
+
+// Register named diorama groups as audio anchors so PositionalAudio nodes
+// follow car / windmill / bird-flock through space. Idempotent — running
+// twice just overwrites the same key. Called after each diorama (re)build.
+function registerDioramaAudioAnchors(root: THREE.Object3D) {
+  const car = root.getObjectByName('car')
+  const windmill = root.getObjectByName('windmill')
+  const birds = root.getObjectByName('birds')
+  if (car) audioBus.registerAnchor('car', car)
+  if (windmill) audioBus.registerAnchor('windmill', windmill)
+  if (birds) audioBus.registerAnchor('birds_group', birds)
+}
+function unregisterDioramaAudioAnchors() {
+  audioBus.unregisterAnchor('car')
+  audioBus.unregisterAnchor('windmill')
+  audioBus.unregisterAnchor('birds_group')
+}
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
@@ -591,6 +609,7 @@ export function TileGrid({ mode = 'split', bezier }: {
       : buildDiorama({ includeTerrain: true })
     if (!glbPath) hideFlatTerrainInSphereMode(diorama.root, mode)
     dioramaRef.current = diorama
+    if (!glbPath) registerDioramaAudioAnchors(diorama.root)
 
     // Disable frustum culling — the sphere projection shader moves vertices
     // to positions that differ from the bounding sphere Three.js computes
@@ -734,6 +753,7 @@ export function TileGrid({ mode = 'split', bezier }: {
         }
         diorama = next
         dioramaRef.current = next
+        registerDioramaAudioAnchors(next.root)
         // Re-apply the Leva panel's current values to the fresh meadow so
         // density / flower split / colours / wind survive the hot reload.
         // buildGrass defaults mesh.count to 50% otherwise, which would read
@@ -1045,6 +1065,7 @@ export function TileGrid({ mode = 'split', bezier }: {
       grassRefs.rebuildWithMask = null
       grassRefs.rebuildWithFlowerMask = null
       grassRefs.saveDiorama = null
+      unregisterDioramaAudioAnchors()
       ;(dioramaRef as unknown as { _cancelSwap?: () => void })._cancelSwap?.()
       ;(dioramaRef as unknown as { _offHmr?: () => void })._offHmr?.()
       // Dispose whatever root is LIVE in the ref (may be the stub, the
