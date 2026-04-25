@@ -25,7 +25,8 @@ export interface LoopDef {
 export interface EventDef {
   key: string
   anchor: AnchorRef
-  src: string  // 'synth:<name>' for now
+  src: string                // 'synth:<name>' or 'audio/<file>.ogg'
+  pitchJitter?: number       // ± playbackRate variation for sample one-shots
 }
 export interface Registry {
   loops: LoopDef[]
@@ -56,6 +57,10 @@ class AudioBus {
   private anchors = new Map<string, THREE.Object3D>()
   private modulators = new Map<string, Modulator>()
   private loops = new Map<string, LoopRuntime>()
+  // Sample loader cache. Each src string maps to a single in-flight Promise
+  // so multiple anchors / event uses of the same buffer share one fetch.
+  private bufferCache = new Map<string, Promise<AudioBuffer>>()
+  private audioLoader = new THREE.AudioLoader()
   // Gain graph for synth events: ambientGain | sfxGain → masterGain → ctx.destination.
   // Loops use THREE.Audio's built-in gain (their volumes are recomputed in tick()).
   private masterGain: GainNode | null = null
@@ -132,20 +137,52 @@ class AudioBus {
   setCategoryVolume(c: Category, v: number) { this.categoryVol[c] = v; this.applyGraphGains(); this.applyAllVolumes() }
   setCategoryMute(c: Category, m: boolean) { this.categoryMute[c] = m; this.applyGraphGains(); this.applyAllVolumes() }
 
-  // Trigger an event from registry by key. Currently only `synth:*` sources
-  // are supported (commit 2). Sample-based events would dispatch similarly.
+  // Trigger an event from registry by key. Supports synth: voices and
+  // sample events (audio/<file>.ogg) routed through sfxGain. Sample events
+  // load + cache the buffer on first call; subsequent plays reuse it.
   play(key: string, _opts?: { volume?: number }) {
     const def = REGISTRY.events.find(e => e.key === key)
     if (!def) return
     const ctx = this.listener?.context
     if (!ctx || !this.sfxGain) return
+    // Resume the context if the browser auto-suspended it (autoplay policy).
+    if (ctx.state === 'suspended') ctx.resume().catch(() => { /* ignore */ })
+
     if (def.src.startsWith('synth:')) {
       const fn = SYNTHS[def.src.slice('synth:'.length)]
       if (!fn) return
-      // Resume the context if the browser auto-suspended it (autoplay policy).
-      if (ctx.state === 'suspended') ctx.resume().catch(() => { /* ignore */ })
       fn(ctx, this.sfxGain)
+      return
     }
+
+    // Sample event — resolve the cached buffer, then schedule a fresh
+    // AudioBufferSourceNode through sfxGain. Pitch jitter randomises
+    // playbackRate to avoid the cloned-sample sound on repeated triggers
+    // (most useful for footsteps).
+    void this.loadBuffer(def.src).then(buf => {
+      if (!this.sfxGain) return
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      if (def.pitchJitter && def.pitchJitter > 0) {
+        const j = def.pitchJitter
+        src.playbackRate.value = 1 - j + Math.random() * (2 * j)
+      }
+      src.connect(this.sfxGain)
+      src.start()
+    }).catch(err => {
+      // eslint-disable-next-line no-console
+      console.warn('[audio] failed to load event sample', def.src, err)
+    })
+  }
+
+  private loadBuffer(src: string): Promise<AudioBuffer> {
+    const cached = this.bufferCache.get(src)
+    if (cached) return cached
+    const promise = new Promise<AudioBuffer>((resolve, reject) => {
+      this.audioLoader.load(src, resolve, undefined, reject)
+    })
+    this.bufferCache.set(src, promise)
+    return promise
   }
 
   // Internal — called by a per-frame tick.
@@ -228,10 +265,11 @@ class AudioBus {
     }
   }
 
-  // Wire up the audio graph for one loop. For synth sources we build a
-  // WebAudio chain immediately. For sample sources (commit 4) we'd load the
-  // buffer and create a THREE.Audio / PositionalAudio.
+  // Wire up the audio graph for one loop. Sample sources load via
+  // THREE.AudioLoader (cached); synth sources build a WebAudio chain
+  // immediately. Idempotent — already-attached loops short-circuit.
   private attachLoop(lr: LoopRuntime) {
+    if (lr.node || lr.synth) return
     if (!this.listener || !this.ambientGain || !this.sfxGain) return
     const ctx = this.listener.context
     const isAmbient = this.categoryFor(lr.def.key) === 'ambient'
@@ -274,7 +312,47 @@ class AudioBus {
       return
     }
 
-    // Sample-backed loop — implementation in commit 4.
+    // Sample-backed loop — load buffer, then attach a THREE.Audio (2D) or
+    // THREE.PositionalAudio (object: anchor). Volume is set every frame in
+    // tick() through node.setVolume().
+    void this.loadBuffer(lr.def.src).then(buf => {
+      if (!this.listener) return
+      // Re-check anchor registration in case it appeared while the buffer
+      // was loading.
+      if (lr.def.anchor.startsWith('object:')) {
+        const id = lr.def.anchor.slice('object:'.length)
+        const target = this.anchors.get(id)
+        if (!target) {
+          lr.pendingAnchor = id
+          lr.buffer = buf
+          return
+        }
+        const positional = new THREE.PositionalAudio(this.listener)
+        positional.setBuffer(buf)
+        positional.setLoop(true)
+        if (lr.def.refDist != null) positional.setRefDistance(lr.def.refDist)
+        if (lr.def.maxDist != null) positional.setMaxDistance(lr.def.maxDist)
+        if (lr.def.rolloff != null) positional.setRolloffFactor(lr.def.rolloff)
+        positional.setDistanceModel('inverse')
+        positional.setVolume(0)
+        target.add(positional)
+        positional.play()
+        lr.node = positional
+        lr.buffer = buf
+        return
+      }
+      // 2D world / camera_motion sample loop.
+      const a = new THREE.Audio(this.listener)
+      a.setBuffer(buf)
+      a.setLoop(true)
+      a.setVolume(0)
+      a.play()
+      lr.node = a
+      lr.buffer = buf
+    }).catch(err => {
+      // eslint-disable-next-line no-console
+      console.warn('[audio] failed to load loop sample', lr.def.key, lr.def.src, err)
+    })
   }
 
   // Lifecycle helper for the visibility gate (commit 5).
