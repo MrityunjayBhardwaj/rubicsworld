@@ -102,7 +102,7 @@ export function AudioBus() {
       flockAnchor.current.position.copy(c)
     }
 
-    audioBus.tick()
+    audioBus.tick(dt)
   })
 
   return null
