@@ -81,7 +81,7 @@ interface Bucket {
   geometry: THREE.BufferGeometry
 }
 
-function GrassScene() {
+export function GrassScene() {
   const { camera } = useThree()
 
   // ── Leva: mirror GrassPanel's Grass and Flowers folders ────────────────
