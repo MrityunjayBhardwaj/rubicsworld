@@ -1,15 +1,25 @@
 // Leva 'Audio' folder with master + per-category controls + per-sound rows
 // generated from the registry. Each loop and event gets its own mute / vol /
 // speed triplet that writes into the audioBus override maps.
+//
+// Settings persistence: every change writes the panel state to localStorage
+// so a page reload restores it. Save/Load/Reset buttons in the panel allow
+// explicit JSON export, file-picker import, and clearing back to defaults.
 
-import { useControls, folder } from 'leva'
-import { useEffect } from 'react'
+import { useControls, folder, button } from 'leva'
+import { useEffect, useRef } from 'react'
 import { audioBus, REGISTRY } from './bus'
 import { useAudioUi } from './audioUiStore'
+import {
+  defaultsFlat,
+  downloadJson,
+  loadFromLocalStorage,
+  persistToLocalStorage,
+  pickAndApply,
+  flatten,
+  copyToClipboard,
+} from './audioSettings'
 
-// Build the schema once at module init from REGISTRY. Each row produces three
-// keys: <key>__mute / <key>__vol / <key>__speed so the values destructure
-// cleanly without needing folder paths.
 function buildLoopRows() {
   const rows: Record<string, unknown> = {}
   for (const def of REGISTRY.loops) {
@@ -32,7 +42,26 @@ function buildEventRows() {
 export function AudioPanel() {
   const setShowVisualizer = useAudioUi(s => s.setShowVisualizer)
 
-  const v = useControls('Audio', {
+  // Function form returns [values, setLeva] so we can write Loaded JSON
+  // back into the UI after a file pick / Reset.
+  const [v, setLeva] = useControls('Audio', () => ({
+    save:    button(() => downloadJson(latestRef.current)),
+    load:    button(() => void pickAndApply(flat => {
+      // setLeva accepts a flat key→value map; per-key try/catch in case the
+      // JSON references an old key that's no longer in the registry.
+      for (const [k, val] of Object.entries(flat)) {
+        try { setLeva({ [k]: val }) }
+        catch { /* unknown key — skip */ }
+      }
+    })),
+    copy:    button(() => void copyToClipboard(latestRef.current)),
+    reset:   button(() => {
+      const flat = defaultsFlat()
+      for (const [k, val] of Object.entries(flat)) {
+        try { setLeva({ [k]: val }) }
+        catch { /* skip */ }
+      }
+    }),
     masterMute:    { value: false, label: 'mute' },
     masterVol:     { value: 1.0,   min: 0, max: 1.0, step: 0.01, label: 'master vol' },
     ambientMute:   { value: false, label: 'ambient mute' },
@@ -42,37 +71,56 @@ export function AudioPanel() {
     showVisualizer:{ value: false, label: 'show sound debug' },
     Loops:  folder(buildLoopRows(),  { collapsed: true }),
     Events: folder(buildEventRows(), { collapsed: true }),
-  }, { collapsed: true }) as Record<string, boolean | number>
+  }), { collapsed: true })
+
+  const values = v as Record<string, boolean | number>
+  const latestRef = useRef(values)
+  latestRef.current = values
+
+  // One-shot: load persisted settings from localStorage on first render.
+  // Run BEFORE the per-row useEffects fire so the bus picks up the loaded
+  // state without flashing defaults first.
+  const loadedRef = useRef(false)
+  useEffect(() => {
+    if (loadedRef.current) return
+    loadedRef.current = true
+    const persisted = loadFromLocalStorage()
+    if (!persisted) return
+    const flat = flatten(persisted)
+    for (const [k, val] of Object.entries(flat)) {
+      try { setLeva({ [k]: val }) }
+      catch { /* unknown key — skip */ }
+    }
+  }, [setLeva])
 
   // Master + category — write on every value change.
-  useEffect(() => { audioBus.setMasterMute(v.masterMute as boolean) },                [v.masterMute])
-  useEffect(() => { audioBus.setMasterVolume(v.masterVol as number) },                [v.masterVol])
-  useEffect(() => { audioBus.setCategoryMute('ambient', v.ambientMute as boolean) },  [v.ambientMute])
-  useEffect(() => { audioBus.setCategoryVolume('ambient', v.ambientVol as number) },  [v.ambientVol])
-  useEffect(() => { audioBus.setCategoryMute('sfx', v.sfxMute as boolean) },          [v.sfxMute])
-  useEffect(() => { audioBus.setCategoryVolume('sfx', v.sfxVol as number) },          [v.sfxVol])
-  useEffect(() => { setShowVisualizer(v.showVisualizer as boolean) },                 [v.showVisualizer, setShowVisualizer])
+  useEffect(() => { audioBus.setMasterMute(values.masterMute as boolean) },                [values.masterMute])
+  useEffect(() => { audioBus.setMasterVolume(values.masterVol as number) },                [values.masterVol])
+  useEffect(() => { audioBus.setCategoryMute('ambient', values.ambientMute as boolean) },  [values.ambientMute])
+  useEffect(() => { audioBus.setCategoryVolume('ambient', values.ambientVol as number) },  [values.ambientVol])
+  useEffect(() => { audioBus.setCategoryMute('sfx', values.sfxMute as boolean) },          [values.sfxMute])
+  useEffect(() => { audioBus.setCategoryVolume('sfx', values.sfxVol as number) },          [values.sfxVol])
+  useEffect(() => { setShowVisualizer(values.showVisualizer as boolean) },                 [values.showVisualizer, setShowVisualizer])
 
-  // Per-sound rows. Single effect dispatching every loop's overrides — Leva
-  // returns a fresh object each render so a [v] dep would re-fire constantly;
-  // `v` doesn't change identity unless a key changed, so each row's effect
-  // only re-runs when its specific value flipped.
+  // Per-sound rows — single effect dispatches all overrides; persists JSON
+  // to localStorage so a reload restores the panel state.
   useEffect(() => {
     for (const def of REGISTRY.loops) {
       audioBus.setLoopOverride(def.key, {
-        mute:  v[`${def.key}__mute`]  as boolean,
-        vol:   v[`${def.key}__vol`]   as number,
-        speed: v[`${def.key}__speed`] as number,
+        mute:  values[`${def.key}__mute`]  as boolean,
+        vol:   values[`${def.key}__vol`]   as number,
+        speed: values[`${def.key}__speed`] as number,
       })
     }
     for (const def of REGISTRY.events) {
       audioBus.setEventOverride(def.key, {
-        mute:  v[`${def.key}__mute`]  as boolean,
-        vol:   v[`${def.key}__vol`]   as number,
-        speed: v[`${def.key}__speed`] as number,
+        mute:  values[`${def.key}__mute`]  as boolean,
+        vol:   values[`${def.key}__vol`]   as number,
+        speed: values[`${def.key}__speed`] as number,
       })
     }
-  }, [v])
+    persistToLocalStorage(values)
+  }, [values])
 
   return null
 }

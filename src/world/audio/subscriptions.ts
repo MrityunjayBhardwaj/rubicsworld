@@ -3,11 +3,10 @@
 // double-subscribe.
 //
 //   sliceRotationActive  — bus modulator: 1 while drag||anim, else 0.
-//                          Drives the axis_rotation rumble loop.
-//   settle_chime         — event: fires when an animation completes a
-//                          commit (commitDir≠0).
+//                          Drives the axis_rotation rumble loop. The rumble
+//                          covers BOTH the drag and the commit-anim window
+//                          end-to-end — no separate one-shot stinger needed.
 
-import type { AnimState } from '../store'
 import { usePlanet } from '../store'
 import { audioBus } from './bus'
 
@@ -17,24 +16,10 @@ export function installAudioSubscriptions() {
   if (installed) return
   installed = true
 
-  // ── sliceRotationActive ──────────────────────────────────────────────
   // Track drag + anim presence; bus tick smooths attack/release so the
   // rumble fades naturally rather than snapping at boundary frames.
   usePlanet.subscribe(state => {
     const active = (state.drag != null || state.anim != null) ? 1 : 0
     audioBus.setSliceRotationActive(active as 0 | 1)
-  })
-
-  // ── settle_chime ─────────────────────────────────────────────────────
-  // Capture the previous anim so we know commitDir AT THE MOMENT it goes
-  // null. _finishAnim sets anim to null after applying the rotation, so
-  // observing the anim→null transition is the right event.
-  let prevAnim: AnimState | null = null
-  usePlanet.subscribe(state => {
-    const next = state.anim
-    if (prevAnim && !next && prevAnim.commitDir !== 0) {
-      audioBus.play('settle_chime')
-    }
-    prevAnim = next
   })
 }
