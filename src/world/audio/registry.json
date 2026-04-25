@@ -11,8 +11,7 @@
     { "key": "windmill_whoosh", "anchor": "object:windmill",    "src": "synth:windmillWhoosh",       "vol": 0.5,  "refDist": 2,   "maxDist": 18, "rolloff": 1.6 }
   ],
   "events": [
-    { "key": "settle_chime", "anchor": "world",         "src": "audio/axis_settle.ogg" },
-    { "key": "footstep",     "anchor": "object:player", "src": "audio/footstep_grass.ogg", "pitchJitter": 0.08 },
-    { "key": "jump",         "anchor": "world",         "src": "audio/jump_grass.ogg" }
+    { "key": "footstep", "anchor": "object:player", "src": "audio/footstep_grass.ogg", "pitchJitter": 0.08 },
+    { "key": "jump",     "anchor": "world",         "src": "audio/jump_grass.ogg" }
   ]
 }

@@ -55,7 +55,6 @@ encode_loop "$SRC/rubics_world_axis_rotation/rubics_world_axis_rotation.mp3" axi
 encode_loop "$SRC/grass_onhover_interaction.mp3"                      grass_swipe.ogg
 
 echo "encoding events..."
-encode_event "$SRC/rubics_world_axis_rotation/yodguard-earth-magic-5-378598.mp3" axis_settle.ogg
 encode_event "$SRC/walker/TomWinandySFX - FS_grass_jump_09.wav"       footstep_grass.ogg
 encode_event "$SRC/walker/jump_then_land_on_grass.mp3"                jump_grass.ogg
 
