@@ -211,3 +211,28 @@ N. [Your code can safely run here]
 ```
 
 The `**REF:**` field links to the Ground Truth doc that traces this lifecycle end-to-end with `file:line` citations. Every step in the lifecycle should be traceable through: catalogue → Ground Truth → source code.
+
+### PK6: Imperative diorama → public/diorama.glb bake lifecycle
+Order matters; deviating produces silent partial bakes.
+1. **Build throwaway** — `buildDiorama({ includeTerrain: true, skipMeadow: true })`. Meadow is procedural; bake captures props + animations only.
+2. **Strip texture references** on every material's map slots (P34) — async textures aren't decoded in a non-rendering route. Set `mat.needsUpdate = true`.
+3. **Auto-generate colliders** — for each top-level child not in skip list, compute world Box3, create a unit cube child of `colliderGroup` named `_col_<src.name>`, tag `userData.rubics_role = 'collider'`. SKIP_PREFIXES: `ground/terrain/flower/road/stonepath/path/_col_`.
+4. **Bake animations** — for each non-collider node in tree, sample `.position/.quaternion/.scale` at FPS over [0, DURATION]. DURATION must cover slowest prop's loop period (P37: car = 14.5s; meadow uses 16s). Prune flat tracks. Build `AnimationClip('rubics_loop', DURATION, tracks)`.
+5. **Restore matrices to t=0** so glb's static pose isn't whatever t=DURATION left.
+6. **`exporter.parse(root, ..., { binary: true, animations: clips, includeCustomExtensions: true })`** → ArrayBuffer.
+7. **Dispose throwaway** — geometry + material per mesh.
+8. **POST to `/__diorama/commit-glb`** with the binary body.
+9. **Server-side patches accessor names** — `vite.config.ts:patchGlbColorAccessorNames` writes `grass/flowers/colliders` for terrain's COLOR_0/1/2 (P33). Repacks GLB (recomputes header/JSON-chunk lengths, leaves BIN chunk untouched).
+10. **`fs.writeFile public/diorama.glb`** — Vite's static server picks up the new file on next request.
+**Common violations:** Skipping (5) bakes a frozen-at-end pose; skipping (9) ships unnamed Color/Color.001 layers; mixing (3) and (4) double-counts colliders into the animation track list (filter colliderGroup descendants from anim targets).
+**REF:** UNGROUNDED — `src/BakeRoute.tsx` (full bake) + `vite.config.ts:patchGlbColorAccessorNames`.
+
+### PK7: WalkControls per-step collision lifecycle
+Runs inside `tryStep(delta)` — reject any step that fails ANY gate.
+1. **Compute probe** — `probeWorld = posRef.current + delta`; `probeDir = probeWorld.normalize()`.
+2. **PNG walk-mask** — `isWalkBlocked(probeDir)` samples `walkMaskRefs.data` via flat-net inverse projection. Black = blocked.
+3. **AABB collider list** — `isPointBlocked(probeWorld, PLAYER_R)` against `colliderRefs` (Blender `rubics_collider` collection meshes, dynamic AABBs refreshed each frame via `updateDynamicColliders()`).
+4. **Vertex-color colliders layer** — `grassRefs.sampleColliderAt(flat.x, flat.z)` reads COLOR_2 R-channel via barycentric on the same triangle grid grass uses. Sample < 0.5 → blocked. Returns null when probe falls outside any tri (off-net) → treat as "no terrain coverage; other gates decide".
+5. **If all pass** → apply step. **If full-step fails** → axis-slide: project move onto fwd, retest; project onto right, retest; first that passes is applied.
+**Order rationale:** PNG mask is cheapest and most artist-controllable; AABB list is next; vertex colliders requires triangle search. Earliest reject wins on FPS.
+**REF:** UNGROUNDED — `src/world/WalkControls.tsx:tryStep`.
