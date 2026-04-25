@@ -2,13 +2,19 @@ import { useEffect, useRef } from 'react'
 import { useThree, useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { usePlanet } from './store'
+import { isWalkBlocked } from './walkMask'
+import { sphereDirToFlat } from './walkMask'
+import { isPointBlocked, updateDynamicColliders } from './colliderRefs'
+import { grassRefs } from '../diorama/buildGrass'
 
 /**
  * First-person surface walk on the planet.
  *
  * Camera invariants while mounted:
- *   • position = normalize(p) * (PLANET_R + PLAYER_H)  — always at head
- *     height above the surface along the local radial normal.
+ *   • position rides the actual ground surface — a per-frame raycast from
+ *     PLANET_R outward toward the planet centre lands on the diorama
+ *     terrain mesh; we then place the camera at hit + PLAYER_H along the
+ *     local up. Falls back to the smooth sphere when the ray misses.
  *   • up = normalize(position) — gravity points to planet centre, so "up"
  *     for the camera is the surface normal at our current spot.
  *   • forward is maintained explicitly (not derived from rotation) and
@@ -16,83 +22,119 @@ import { usePlanet } from './store'
  *     doesn't slide into the normal direction.
  *
  * Input:
- *   • Mouse move (pointer-locked) → yaw around normal, pitch around local
- *     right. Pitch clamped so forward never collapses onto up.
+ *   • Mouse move (no pointer-lock — Leva is hidden in walk mode anyway)
+ *     → yaw around normal, pitch around local right. Pitch clamped so
+ *     forward never collapses onto up.
  *   • W/A/S/D → translate along forward / right / -forward / -right in
- *     the tangent plane. Snap back to sphere surface after each step.
- *   • Tab → exit walk mode.
- *   • Pointer-lock release (Esc) → also exits.
+ *     the tangent plane. Walk-mask gates the move; rejected steps slide
+ *     along the dominant axis instead of full-stop.
+ *   • Space → jump (impulse along radial up; gravity pulls toward centre).
+ *   • Tab / Esc → exit walk mode.
+ *
+ * Entry transition: position + look direction lerp from the camera's
+ *   orbit-mode pose to the surface spawn over EASE_DUR seconds. Mouse-look
+ *   is ignored during the ease so the cinematic isn't fought.
  */
 
 const PLANET_R = 1.0
-const PLAYER_H = 0.08   // small-world scale — matches pocket-planet vibe
-const WALK_SPEED = 0.3  // world units per second (~20 s to walk the equator)
+const PLAYER_H = 0.16   // doubled from 0.08 for a taller eye-line
+const PLAYER_R = 0.03   // capsule radius — Minkowski-inflates each AABB
+const WALK_SPEED = 0.3
 const MOUSE_YAW   = 0.0025
 const MOUSE_PITCH = 0.0025
-const PITCH_MAX = Math.PI * 0.48  // ~86° — stop short of vertical either way
+const PITCH_MAX = Math.PI * 0.48
+const JUMP_SPEED = 0.6              // initial radial velocity on Space
+const GRAVITY    = 1.6              // pulled toward planet centre (units/s²)
+const EASE_DUR   = 0.7              // seconds for the orbit→walk fly-in
 
 export function WalkControls() {
-  const { camera } = useThree()
+  const { camera, scene } = useThree()
   const cameraMode = usePlanet(s => s.cameraMode)
   const setCameraMode = usePlanet(s => s.setCameraMode)
 
-  // Persistent state across frames. Initialized on mount.
   const posRef = useRef<THREE.Vector3>(new THREE.Vector3(0, PLANET_R + PLAYER_H, 0))
-  // Tangent-plane forward — drives WASD walking. Always strictly perpendicular
-  // to the local surface normal; drift-corrected each frame.
   const fwdRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, -1))
-  // Look-direction pitch in radians (scalar, ±PITCH_MAX). Kept separate from
-  // fwdRef so mouse-look up/down doesn't interfere with tangent walking:
-  // drift-correcting fwdRef would otherwise wipe any pitch the user applied.
   const pitchRef = useRef<number>(0)
   const keysRef = useRef<Set<string>>(new Set())
+  // Vertical state: signed offset above the ground in the radial direction
+  // (0 = on the surface, +ve = airborne). vertVel is the radial velocity.
+  const vertOffsetRef = useRef<number>(0)
+  const vertVelRef = useRef<number>(0)
+  // Eased entry: lerp camera pose orbit→walk so the transition reads as
+  // a fly-in rather than a snap. Active while progress < 1.
+  const easeRef = useRef<{ progress: number; from: THREE.Vector3; fromTarget: THREE.Vector3 } | null>(null)
 
   useEffect(() => {
     if (cameraMode !== 'walk') return
 
-    // Entry: spawn the player at the camera's current direction projected
-    // to the sphere surface. Feels continuous with wherever they were
-    // orbiting from. Forward = tangent in the direction the camera was facing.
     const camPos = camera.position.clone()
     const normal = camPos.clone().normalize()
     posRef.current.copy(normal).multiplyScalar(PLANET_R + PLAYER_H)
-    // Forward: take the camera's current -Z direction, project into the
-    // tangent plane, normalize. Fallback to a stable cross if degenerate.
     const camFwd = new THREE.Vector3()
-    camera.getWorldDirection(camFwd) // unit, looking from camera into scene
+    camera.getWorldDirection(camFwd)
     camFwd.addScaledVector(normal, -camFwd.dot(normal))
     if (camFwd.lengthSq() < 1e-4) {
-      // Camera was aimed straight at the planet centre — pick any tangent.
       camFwd.set(1, 0, 0).addScaledVector(normal, -normal.x).normalize()
     } else {
       camFwd.normalize()
     }
     fwdRef.current.copy(camFwd)
-    pitchRef.current = 0  // reset look pitch on every entry
-    keysRef.current.clear()  // drop any keys still held from orbit mode
+    pitchRef.current = 0
+    keysRef.current.clear()
+    vertOffsetRef.current = 0
+    vertVelRef.current = 0
 
-    // No pointer-lock: keeps the cursor visible so HDRI / Leva / any other
-    // HUD panel remains interactive while walking. Trade-off is that mouse
-    // deltas cap out when the cursor hits the window edge — acceptable
-    // because you can re-sweep and keep turning. FPS-purity loses to
-    // letting the user tune HDRI live without exiting walk mode.
+    // Capture orbit-mode pose so useFrame can ease toward the walk spawn.
+    const lookTarget = new THREE.Vector3()
+    camera.getWorldDirection(lookTarget)
+    lookTarget.multiplyScalar(2).add(camPos)
+    easeRef.current = {
+      progress: 0,
+      from: camPos.clone(),
+      fromTarget: lookTarget,
+    }
+
+    // Pointer-lock for infinite look. Without it, `movementX/Y` cap out
+    // when the cursor hits the window edge (you can't programmatically
+    // warp the cursor in a browser — pointer-lock is the ONLY way to get
+    // unbounded mouse deltas). Leva is hidden in walk mode (App.tsx wires
+    // <Leva hidden={cameraMode === 'walk'} />), so the cursor has nothing
+    // useful to interact with anyway. Esc releases the lock and exits.
+    const canvas = document.querySelector('canvas') as HTMLCanvasElement | null
+    // Try immediate lock from the keypress gesture chain that toggled walk
+    // mode. If the browser rejects (no recent gesture), the canvas click
+    // handler below catches the next user click as a fallback gesture.
+    try { canvas?.requestPointerLock?.() } catch { /* ignore */ }
+    const onCanvasClick = () => {
+      if (!document.pointerLockElement) {
+        try { canvas?.requestPointerLock?.() } catch { /* ignore */ }
+      }
+    }
+    const onPointerLockChange = () => {
+      // Fires for both lock acquisition AND release. On release (Esc, or
+      // app blur), drop back to orbit mode — keeps the lock state and
+      // walk state in lockstep.
+      if (!document.pointerLockElement) {
+        setCameraMode('orbit')
+      }
+    }
+    canvas?.addEventListener('click', onCanvasClick)
+    document.addEventListener('pointerlockchange', onPointerLockChange)
 
     const onMouseMove = (e: MouseEvent) => {
-      // Only look when the cursor is over the 3D canvas. Any HUD panel
-      // (Leva, HDRIPanel, BezierCurveEditor, TileLabelsLegend, tooltips,
-      // etc.) sits above the canvas with position:fixed — those targets
-      // should remain interactive without spinning the view.
-      const tgt = e.target as HTMLElement | null
-      if (!(tgt instanceof HTMLCanvasElement)) return
+      if (easeRef.current && easeRef.current.progress < 1) return
+      // When pointer-locked, mousemove fires on the locked element with
+      // unbounded movementX/Y — no need to gate by target. When NOT locked
+      // (lock failed / not yet engaged), keep the canvas-target gate so
+      // hovering over any future HUD panel doesn't spin the view.
+      if (!document.pointerLockElement) {
+        const tgt = e.target as HTMLElement | null
+        if (!(tgt instanceof HTMLCanvasElement)) return
+      }
       const up = posRef.current.clone().normalize()
-      // Yaw: rotate the tangent forward around the up axis and keep it
-      // strictly in the tangent plane. Negative movementX feels natural.
       fwdRef.current.applyAxisAngle(up, -e.movementX * MOUSE_YAW)
       fwdRef.current.addScaledVector(up, -fwdRef.current.dot(up))
       if (fwdRef.current.lengthSq() > 1e-8) fwdRef.current.normalize()
-      // Pitch: scalar accumulator, clamped. The pitched look-direction is
-      // derived in useFrame from (fwd, up, pitch) — keeping it separate from
-      // fwd means drift correction can flatten fwd without wiping pitch.
       pitchRef.current -= e.movementY * MOUSE_PITCH
       if (pitchRef.current >  PITCH_MAX) pitchRef.current =  PITCH_MAX
       if (pitchRef.current < -PITCH_MAX) pitchRef.current = -PITCH_MAX
@@ -104,6 +146,15 @@ export function WalkControls() {
       if (e.key === 'Tab' || e.key === 'Escape') {
         e.preventDefault()
         setCameraMode('orbit')
+        return
+      }
+      if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault()
+        // Only jump when grounded. Prevents mid-air double-jumps; gravity
+        // brings vertOffset back to zero on landing.
+        if (vertOffsetRef.current <= 1e-4 && vertVelRef.current <= 1e-4) {
+          vertVelRef.current = JUMP_SPEED
+        }
         return
       }
       keysRef.current.add(e.key.toLowerCase())
@@ -120,11 +171,17 @@ export function WalkControls() {
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
+      canvas?.removeEventListener('click', onCanvasClick)
+      document.removeEventListener('pointerlockchange', onPointerLockChange)
+      // Release the lock if we still hold it (e.g. user pressed Tab to
+      // exit, the browser still has the lock). Guard so the
+      // pointerlockchange handler — already detached — doesn't re-fire
+      // setCameraMode in a loop.
+      if (document.pointerLockElement) {
+        try { document.exitPointerLock?.() } catch { /* ignore */ }
+      }
       keysRef.current.clear()
-      // Restore a comfortable third-person orbit distance. OrbitControls
-      // remounts on next frame and takes over from here; we want the camera
-      // to end up pulled back from the surface along the last-looked direction
-      // so the transition reads as "stepping back from where you were."
+      easeRef.current = null
       const exitDir = posRef.current.clone().normalize()
       camera.position.copy(exitDir).multiplyScalar(4.0)
       camera.up.set(0, 1, 0)
@@ -132,11 +189,50 @@ export function WalkControls() {
     }
   }, [cameraMode, camera, setCameraMode])
 
+  // Reusable raycaster for the height-follow probe.
+  const heightRayRef = useRef(new THREE.Raycaster())
+
+  // Cast from a point above the surface along -up; first hit's distance from
+  // origin gives the local terrain radius. Falls back to PLANET_R when no hit
+  // (off-net) so the camera stays sane.
+  function sampleTerrainRadiusAlong(up: THREE.Vector3): number {
+    const PROBE = 1.0
+    const origin = up.clone().multiplyScalar(PLANET_R + PROBE)
+    const dir = up.clone().multiplyScalar(-1)
+    const ray = heightRayRef.current
+    ray.set(origin, dir)
+    ray.far = PROBE + 0.5
+    const hits = ray.intersectObjects(scene.children, true)
+    if (hits.length === 0) return PLANET_R
+    return (PLANET_R + PROBE) - hits[0].distance
+  }
+
   useFrame((_, dt) => {
     if (cameraMode !== 'walk') return
+
+    // Eased entry: blend from captured orbit pose to walk spawn pose.
+    const ease = easeRef.current
+    if (ease && ease.progress < 1) {
+      ease.progress = Math.min(1, ease.progress + dt / EASE_DUR)
+      const t = ease.progress * ease.progress * (3 - 2 * ease.progress)  // smoothstep
+
+      const up = posRef.current.clone().normalize()
+      const groundR = sampleTerrainRadiusAlong(up)
+      const targetPos = up.clone().multiplyScalar(groundR + PLAYER_H)
+      const targetLook = targetPos.clone().add(fwdRef.current)
+
+      const blendedPos = ease.from.clone().lerp(targetPos, t)
+      const blendedLook = ease.fromTarget.clone().lerp(targetLook, t)
+
+      camera.position.copy(blendedPos)
+      camera.up.copy(up)
+      camera.lookAt(blendedLook)
+
+      if (ease.progress >= 1) easeRef.current = null
+      return
+    }
+
     const up = posRef.current.clone().normalize()
-    // Drift correction on tangent forward. Only touches the tangent vector —
-    // pitch is in its own scalar so it's not disturbed.
     fwdRef.current.addScaledVector(up, -fwdRef.current.dot(up))
     if (fwdRef.current.lengthSq() < 1e-8) {
       fwdRef.current.set(1, 0, 0).addScaledVector(up, -up.x)
@@ -145,29 +241,74 @@ export function WalkControls() {
 
     const right = new THREE.Vector3().crossVectors(fwdRef.current, up).normalize()
 
-    // WASD walks along the TANGENT forward (unpitched), so looking up doesn't
-    // slow you down or push you off the surface. Look direction is pitched
-    // only for the camera, not for motion.
     const keys = keysRef.current
     const move = new THREE.Vector3()
     if (keys.has('w')) move.add(fwdRef.current)
     if (keys.has('s')) move.addScaledVector(fwdRef.current, -1)
     if (keys.has('d')) move.add(right)
     if (keys.has('a')) move.addScaledVector(right, -1)
+
     if (move.lengthSq() > 1e-8) {
       move.normalize().multiplyScalar(WALK_SPEED * dt)
-      posRef.current.add(move)
-      // Snap back to surface at player head height.
-      posRef.current.normalize().multiplyScalar(PLANET_R + PLAYER_H)
+      // Refresh dynamic colliders once per query batch — cars / NPCs may
+      // have moved this frame. Static boxes were baked at glb load.
+      updateDynamicColliders()
+      // Two-tier gate:
+      //   1. walk-mask (cheap, painted, ground-level no-go)
+      //   2. AABB collider list (3D boxes from Blender's rubics_collider
+      //      collection — handles bridges, walls, moving objects)
+      // Both tested in the same scene-graph world space. tryStep returns
+      // false on either failure → axis-slide fallback to keep diagonal
+      // movement smooth past walls.
+      const tryStep = (delta: THREE.Vector3): boolean => {
+        const probeWorld = posRef.current.clone().add(delta)
+        const probeDir = probeWorld.clone().normalize()
+        // 1. PNG walk-mask (legacy)
+        if (isWalkBlocked(probeDir)) return false
+        // 2. AABB colliders (Blender rubics_collider collection)
+        if (isPointBlocked(probeWorld, PLAYER_R)) return false
+        // 3. Vertex-color "colliders" layer (COLOR_2) on the terrain mesh.
+        //    Painted in Blender's Vertex Paint mode on the third layer.
+        //    R < 0.5 ⇒ blocked. Returns null when the probe falls outside
+        //    any ground triangle — treat that as "no terrain coverage,
+        //    don't add a verdict here" (other gates already ran).
+        if (grassRefs.sampleColliderAt) {
+          const flat = sphereDirToFlat(probeDir)
+          const m = grassRefs.sampleColliderAt(flat.x, flat.z)
+          if (m !== null && m < 0.5) return false
+        }
+        return true
+      }
+      if (tryStep(move)) {
+        posRef.current.add(move)
+      } else {
+        const fwdComp = fwdRef.current.clone().multiplyScalar(move.dot(fwdRef.current))
+        const rgtComp = right.clone().multiplyScalar(move.dot(right))
+        if (fwdComp.lengthSq() > 1e-10 && tryStep(fwdComp)) posRef.current.add(fwdComp)
+        else if (rgtComp.lengthSq() > 1e-10 && tryStep(rgtComp)) posRef.current.add(rgtComp)
+      }
     }
+
+    const upNow = posRef.current.clone().normalize()
+
+    // Height-follow + jump integration. Vertical offset rides terrain;
+    // jump impulse adds radial velocity; gravity decays toward the surface.
+    const groundR = sampleTerrainRadiusAlong(upNow)
+    vertVelRef.current -= GRAVITY * dt
+    vertOffsetRef.current += vertVelRef.current * dt
+    if (vertOffsetRef.current < 0) {
+      vertOffsetRef.current = 0
+      vertVelRef.current = 0
+    }
+    posRef.current.copy(upNow).multiplyScalar(groundR + PLAYER_H + vertOffsetRef.current)
 
     // Pitched look-direction: rotate tangent forward toward up by pitchRef.
     const cp = Math.cos(pitchRef.current)
     const sp = Math.sin(pitchRef.current)
-    const lookDir = fwdRef.current.clone().multiplyScalar(cp).addScaledVector(up, sp)
+    const lookDir = fwdRef.current.clone().multiplyScalar(cp).addScaledVector(upNow, sp)
 
     camera.position.copy(posRef.current)
-    camera.up.copy(up)
+    camera.up.copy(upNow)
     const target = posRef.current.clone().add(lookDir)
     camera.lookAt(target)
   })

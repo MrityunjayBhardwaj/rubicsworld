@@ -94,6 +94,94 @@ def _glb_path(context) -> str:
     return os.path.join(bpy.path.abspath(root), "public", "diorama.glb")
 
 
+# ── Collection conventions ─────────────────────────────────────────────────
+#
+# Two top-level collections carry semantic meaning on export:
+#
+#   rubics_diorama  — renderable scene (ground, trees, huts, ...). These
+#                     meshes arrive in three-js as normal visible objects.
+#   rubics_collider — invisible AABB colliders for the walk-mode collision
+#                     system. On glb export the plugin stamps each collider
+#                     with `obj["rubics_role"] = "collider"` (or
+#                     `"collider_dyn"` when the name starts with `_col_dyn_`),
+#                     which the glTF exporter carries through as per-node
+#                     `extras`, which three-js's GLTFLoader surfaces as
+#                     `mesh.userData.rubics_role`. Colliders render in
+#                     Blender so you can see/edit them, but the loader
+#                     hides them and the walk-mode code tests the player
+#                     against each collider's world AABB.
+#
+# Naming convention inside rubics_collider:
+#   _col_<purpose>_<n>       — static (e.g. _col_hut_01, _col_bridge_underpass_1)
+#   _col_dyn_<purpose>_<n>   — dynamic (e.g. _col_dyn_car_01); AABB
+#                              recomputed every frame from matrixWorld.
+#
+# Ground / terrain stays in rubics_diorama. Reference guides
+# (rubics-guide-*) remain in the scene root — plugin already filters them.
+
+DIORAMA_COLL_NAME  = "rubics_diorama"
+COLLIDER_COLL_NAME = "rubics_collider"
+
+
+def _ensure_collection(scene, name):
+    """Create `name` as a direct child of the scene root collection if
+    missing, or relink it if it exists orphaned. Returns the collection.
+    """
+    coll = bpy.data.collections.get(name)
+    if coll is None:
+        coll = bpy.data.collections.new(name)
+        scene.collection.children.link(coll)
+        return coll
+    # Already exists — verify it's reachable from the scene root, else link.
+    reachable = {c.name for c in scene.collection.children_recursive}
+    if coll.name not in reachable and coll.name not in {c.name for c in scene.collection.children}:
+        scene.collection.children.link(coll)
+    return coll
+
+
+def _move_to_collection(obj, target_coll):
+    """Move `obj` so its ONLY collection membership is `target_coll`.
+    Idempotent; safe if obj already lives there."""
+    if obj.users_collection and len(obj.users_collection) == 1 and obj.users_collection[0] == target_coll:
+        return
+    for c in list(obj.users_collection):
+        c.objects.unlink(obj)
+    target_coll.objects.link(obj)
+
+
+@contextmanager
+def _with_collider_tags(_context):
+    """Stamp rubics_role custom property on every object under the
+    rubics_collider collection for the duration of an export. Blender's
+    glTF exporter maps custom properties to glTF node `extras`; three-js's
+    GLTFLoader surfaces `extras` as `mesh.userData`. Cleaned up on exit so
+    the .blend file isn't mutated by an export.
+    """
+    coll = bpy.data.collections.get(COLLIDER_COLL_NAME)
+    if coll is None:
+        yield
+        return
+    orig = []
+    try:
+        for obj in coll.all_objects:
+            had = "rubics_role" in obj.keys()
+            prev = obj.get("rubics_role") if had else None
+            orig.append((obj, had, prev))
+            is_dyn = obj.name.lower().startswith("_col_dyn_")
+            obj["rubics_role"] = "collider_dyn" if is_dyn else "collider"
+        yield
+    finally:
+        for obj, had, prev in orig:
+            try:
+                if not had:
+                    if "rubics_role" in obj.keys():
+                        del obj["rubics_role"]
+                else:
+                    obj["rubics_role"] = prev
+            except ReferenceError:
+                pass
+
+
 # ── Live mode (auto-export on scene change) ────────────────────────────────
 
 # Module-scoped state — BoolProperty on Scene would persist per-blend, but
@@ -239,7 +327,12 @@ def _do_export_current(path: str) -> tuple[bool, int]:
     """
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with _with_isolate(bpy.context):
+        # Stack both context managers: isolate strips rubics-guide-* /
+        # outside-block meshes, collider-tag stamps rubics_role so the
+        # loader can split colliders from renderable diorama on the other
+        # side. export_extras=True is critical — without it the custom
+        # properties don't reach the glTF extras field.
+        with _with_isolate(bpy.context), _with_collider_tags(bpy.context):
             bpy.ops.export_scene.gltf(
                 filepath=path,
                 export_format='GLB',
@@ -251,6 +344,7 @@ def _do_export_current(path: str) -> tuple[bool, int]:
                 export_cameras=False,
                 export_lights=False,
                 use_visible=True,
+                export_extras=True,
             )
         size = os.path.getsize(path) if os.path.exists(path) else 0
         return True, size
@@ -463,8 +557,41 @@ class RUBICS_OT_Import(bpy.types.Operator):
                 if item.users == 0:
                     coll.remove(item)
 
+        # Snapshot existing objects so the post-import diff tells us
+        # exactly which objects came from this glb (Blender's importer
+        # appends to bpy.data.objects rather than returning a list).
+        before = set(bpy.data.objects)
         bpy.ops.import_scene.gltf(filepath=path)
-        self.report({'INFO'}, f"Imported {path}")
+        imported = [o for o in bpy.data.objects if o not in before]
+
+        # Sort imported objects into rubics_diorama / rubics_collider
+        # based on the `rubics_role` custom property carried through the
+        # glTF extras field. Anything else (renderable diorama meshes,
+        # the ground, lights, etc) goes to rubics_diorama.
+        diorama_coll  = _ensure_collection(context.scene, DIORAMA_COLL_NAME)
+        collider_coll = _ensure_collection(context.scene, COLLIDER_COLL_NAME)
+        moved_d = 0
+        moved_c = 0
+        for obj in imported:
+            role = obj.get("rubics_role", None)
+            if role in ("collider", "collider_dyn"):
+                _move_to_collection(obj, collider_coll)
+                # Display-only convention: wireframe + red so colliders
+                # read as authoring primitives, matching Add Collider.
+                obj.display_type = 'WIRE'
+                obj.show_in_front = True
+                obj.color = (1.0, 0.4, 0.4, 1.0)
+                obj.hide_render = True
+                moved_c += 1
+            else:
+                _move_to_collection(obj, diorama_coll)
+                moved_d += 1
+
+        self.report(
+            {'INFO'},
+            f"Imported {os.path.basename(path)}: {moved_d} → {DIORAMA_COLL_NAME}, "
+            f"{moved_c} → {COLLIDER_COLL_NAME}",
+        )
         return {'FINISHED'}
 
 
@@ -534,7 +661,13 @@ class RUBICS_OT_InitScene(bpy.types.Operator):
         bm.to_mesh(mesh)
         bm.free()
         obj = bpy.data.objects.new("ground", mesh)
-        context.collection.objects.link(obj)
+        # Ensure the two semantic collections exist and drop the ground into
+        # rubics_diorama. rubics_collider is created empty, ready for
+        # "Add Collider" invocations. See _with_collider_tags for why the
+        # split matters at export time.
+        diorama_coll  = _ensure_collection(context.scene, DIORAMA_COLL_NAME)
+        _ensure_collection(context.scene, COLLIDER_COLL_NAME)
+        diorama_coll.objects.link(obj)
         context.view_layer.objects.active = obj
         obj.select_set(True)
 
@@ -596,7 +729,239 @@ class RUBICS_OT_InitScene(bpy.types.Operator):
         obj.data.materials.clear()
         obj.data.materials.append(mat)
 
-        self.report({'INFO'}, "Initialized: 'ground' (8×6) with cube-net mask")
+        # 5. Density layers. Two POINT-domain FLOAT_COLOR attributes on the
+        #    ground mesh: `grass_density` and `flower_density`, both solid
+        #    white (R=1 ⇒ allow-all). Ordering matters — glTF exports color
+        #    attributes as COLOR_0, COLOR_1 in list order, and the three-js
+        #    side reads COLOR_0 as grass / COLOR_1 as flower. Paint them in
+        #    Vertex Paint mode with the corresponding layer active.
+        _ensure_density_layers(obj)
+
+        self.report({'INFO'}, "Initialized: 'ground' (8×6) with cube-net mask + density layers")
+        return {'FINISHED'}
+
+
+# Authoring-side layer names. glTF semantic names (COLOR_0/1/2) are
+# positional, so the three-js side relies on these being created in this
+# exact order. Each migrates from the historical names so prior paint values
+# survive a plugin upgrade:
+#   grass     ← grass_density / Color
+#   flowers   ← flower_density / Color.001
+#   colliders ← Color.002 (or fresh white)
+GRASS_LAYER     = "grass"
+FLOWERS_LAYER   = "flowers"
+COLLIDERS_LAYER = "colliders"
+DENSITY_LAYERS  = (GRASS_LAYER, FLOWERS_LAYER, COLLIDERS_LAYER)
+# Aliases tried (in order) when migrating a layer's paint values during
+# rename / reorder. First match wins.
+LAYER_ALIASES = {
+    GRASS_LAYER:     ("grass", "grass_density", "Color"),
+    FLOWERS_LAYER:   ("flowers", "flower_density", "Color.001"),
+    COLLIDERS_LAYER: ("colliders", "walk", "walk_density", "Color.002"),
+}
+
+
+def _ensure_density_layers(obj):
+    """Idempotently establish three POINT-domain FLOAT_COLOR attributes on
+    the given mesh, in this exact order:
+
+        COLOR_0 → grass      (grass distribution gate, R-channel = density)
+        COLOR_1 → flowers    (flower distribution gate)
+        COLOR_2 → colliders  (walk-mode no-go gate; black = blocked)
+
+    Why ordering matters: glTF semantic naming is positional. three.js's
+    GLTFLoader maps COLOR_0 → `geometry.attributes.color`, COLOR_1 →
+    `color_1`, COLOR_2 → `color_2`. Names get lost in glTF; positions don't.
+
+    Migration: when run on a mesh authored under the older naming
+    convention (grass_density / flower_density, or Blender defaults
+    Color / Color.001 / Color.002), this captures their paint values
+    BEFORE any deletion and restores them under the new names. Re-running
+    the operator on an already-correct mesh is a no-op.
+
+    Strips any extra color attributes beyond the three so the export
+    contract stays predictable (otherwise a stray fourth/fifth layer
+    pushes COLOR_2 to COLOR_3 and the three-js reader breaks).
+    """
+    mesh = obj.data
+    attrs = mesh.color_attributes
+
+    def _find(name):
+        try:
+            ca = attrs.get(name)
+            if ca is not None:
+                return ca
+        except AttributeError:
+            pass
+        for c in list(attrs):
+            if c.name == name:
+                return c
+        return None
+
+    def _capture_values(name):
+        ca = _find(name)
+        if ca is None:
+            return None
+        n = len(ca.data)
+        buf = array.array('f', [0.0] * (n * 4))
+        try:
+            ca.data.foreach_get("color", buf)
+            return list(buf)
+        except (AttributeError, TypeError, RuntimeError):
+            return [ch for item in ca.data for ch in (item.color[0], item.color[1], item.color[2], item.color[3])]
+
+    def _create_solid_white(name, saved=None):
+        ca = attrs.new(name=name, type='FLOAT_COLOR', domain='POINT')
+        n = len(ca.data)
+        if saved and len(saved) == n * 4:
+            ca.data.foreach_set("color", saved)
+        else:
+            ca.data.foreach_set("color", array.array('f', [1.0, 1.0, 1.0, 1.0] * n))
+        return ca
+
+    # Capture paint values from each canonical name OR its first matching
+    # alias. Capture happens BEFORE deletions so values survive the
+    # rebuild even when migrating from old layer names.
+    captured = {}
+    for canon, aliases in LAYER_ALIASES.items():
+        for alias in aliases:
+            v = _capture_values(alias)
+            if v is not None:
+                captured[canon] = v
+                break
+
+    existing_names = [ca.name for ca in attrs]
+    order_ok = (
+        len(existing_names) == len(DENSITY_LAYERS)
+        and tuple(existing_names) == DENSITY_LAYERS
+    )
+
+    if not order_ok:
+        # Strip every existing color attribute (we hold their values in
+        # `captured` already) and rebuild in canonical order.
+        for ca in list(attrs):
+            try:
+                attrs.remove(ca)
+            except (RuntimeError, ReferenceError):
+                pass
+        for canon in DENSITY_LAYERS:
+            _create_solid_white(canon, saved=captured.get(canon))
+
+    # Make grass the active render color by default so Vertex Paint mode
+    # opens on it; switch to flowers/colliders via Object Data Properties.
+    active = _find(GRASS_LAYER)
+    if active is not None:
+        try:
+            attrs.active_color = active
+        except (AttributeError, TypeError):
+            pass
+
+
+class RUBICS_OT_EnsureDensityLayers(bpy.types.Operator):
+    """Ensure the active mesh has the three canonical vertex-color layers
+    in the right order: grass (COLOR_0), flowers (COLOR_1), colliders
+    (COLOR_2). Idempotent — preserves existing paint values, migrates
+    legacy names (grass_density / flower_density / Color / Color.001),
+    strips any extras.
+    """
+    bl_idname = "rubics.ensure_density_layers"
+    bl_label  = "Ensure Density Layers (grass / flowers / colliders)"
+    bl_description = "Lock terrain mesh to three named color attributes: grass, flowers, colliders (COLOR_0..2). Migrates older names; strips extras."
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'MESH'
+
+    def execute(self, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH':
+            self.report({'ERROR'}, "Select a mesh first (the ground).")
+            return {'CANCELLED'}
+        name = (obj.name or "").lower()
+        if not (name.startswith("ground") or name.startswith("terrain")):
+            self.report({'WARNING'}, f"'{obj.name}' is not named ground/terrain — density layers only gate the meadow on the ground mesh.")
+        _ensure_density_layers(obj)
+        self.report({'INFO'}, f"'{obj.name}' now has {' / '.join(DENSITY_LAYERS)} (COLOR_0..2).")
+        return {'FINISHED'}
+
+
+class RUBICS_OT_AddCollider(bpy.types.Operator):
+    """Spawn a 1×1×1 cube collider in the rubics_collider collection.
+
+    Pick the cube, scale/move it around the volume you want to block. On
+    export the plugin stamps `rubics_role` on the object so three-js's
+    GLTFLoader carries it through to `mesh.userData.rubics_role`. The
+    walk-mode loader hides the cube and registers its world AABB.
+
+    Naming convention enforced here: cubes go in as `_col_<n>`. Rename
+    them to `_col_<purpose>_<n>` (e.g. `_col_hut_01`) for clarity, or
+    prefix with `_col_dyn_` to mark the collider as dynamic (AABB
+    recomputed every frame from matrixWorld — needed for cars / NPCs).
+    """
+    bl_idname = "rubics.add_collider"
+    bl_label  = "Add Collider"
+    bl_description = "Add an invisible AABB collider cube to the rubics_collider collection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    dynamic: bpy.props.BoolProperty(  # type: ignore[valid-type]
+        name="Dynamic",
+        description="Stamp the collider as dynamic (AABB updated each frame). Use for moving objects (cars, NPCs).",
+        default=False,
+    )
+
+    def execute(self, context):
+        scene = context.scene
+        coll = _ensure_collection(scene, COLLIDER_COLL_NAME)
+        # Find the next free numeric suffix.
+        prefix = "_col_dyn_" if self.dynamic else "_col_"
+        n = 1
+        while bpy.data.objects.get(f"{prefix}{n:02d}") is not None:
+            n += 1
+        name = f"{prefix}{n:02d}"
+
+        import bmesh
+        bm = bmesh.new()
+        bmesh.ops.create_cube(bm, size=1.0)
+        mesh = bpy.data.meshes.new(f"{name}-mesh")
+        bm.to_mesh(mesh)
+        bm.free()
+        obj = bpy.data.objects.new(name, mesh)
+        # Spawn at the 3D cursor, or origin if no cursor placement.
+        obj.location = scene.cursor.location.copy()
+        # Distinct-from-renderable display so they read as authoring
+        # primitives, not actual props. Rendered in viewport (so you can
+        # edit them) but excluded from final renders / exports of the .blend.
+        obj.display_type = 'WIRE'
+        obj.show_in_front = True
+        obj.color = (1.0, 0.4, 0.4, 1.0)  # show via solid-mode object color
+        obj.hide_render = True
+        coll.objects.link(obj)
+        # Select for immediate editing.
+        for o in context.selected_objects:
+            o.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+
+        self.report({'INFO'}, f"Added {'dynamic ' if self.dynamic else ''}collider '{name}' in {COLLIDER_COLL_NAME}.")
+        return {'FINISHED'}
+
+
+class RUBICS_OT_EnsureCollections(bpy.types.Operator):
+    """Create rubics_diorama + rubics_collider as direct children of the
+    scene root if missing. Idempotent — safe to run anytime; existing
+    collections are left untouched.
+    """
+    bl_idname = "rubics.ensure_collections"
+    bl_label  = "Ensure Collections"
+    bl_description = f"Create the {DIORAMA_COLL_NAME} and {COLLIDER_COLL_NAME} collections if missing"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        _ensure_collection(context.scene, DIORAMA_COLL_NAME)
+        _ensure_collection(context.scene, COLLIDER_COLL_NAME)
+        self.report({'INFO'}, f"Collections ready: {DIORAMA_COLL_NAME}, {COLLIDER_COLL_NAME}.")
         return {'FINISHED'}
 
 
@@ -627,7 +992,7 @@ class RUBICS_OT_Export(bpy.types.Operator):
 
         os.makedirs(os.path.dirname(path), exist_ok=True)
         hidden = _isolate_hide_set(context) if context.scene.rubics_isolate_export else set()
-        with _with_isolate(context):
+        with _with_isolate(context), _with_collider_tags(context):
             bpy.ops.export_scene.gltf(
                 filepath=path,
                 export_format='GLB',
@@ -639,6 +1004,7 @@ class RUBICS_OT_Export(bpy.types.Operator):
                 export_cameras=False,
                 export_lights=False,
                 use_visible=True,
+                export_extras=True,
             )
         size = os.path.getsize(path) if os.path.exists(path) else 0
         if hidden:
@@ -810,6 +1176,21 @@ class RUBICS_PT_Panel(bpy.types.Panel):
 
         layout.separator()
         col = layout.column(align=True)
+        col.label(text="Ground density painting:")
+        col.operator(RUBICS_OT_EnsureDensityLayers.bl_idname, icon='GROUP_VCOL')
+
+        layout.separator()
+        col = layout.column(align=True)
+        col.label(text="Collisions (rubics_collider):")
+        col.operator(RUBICS_OT_EnsureCollections.bl_idname, icon='OUTLINER_COLLECTION')
+        row = col.row(align=True)
+        op_static = row.operator(RUBICS_OT_AddCollider.bl_idname, text="Add Static",  icon='MESH_CUBE')
+        op_static.dynamic = False
+        op_dynamic = row.operator(RUBICS_OT_AddCollider.bl_idname, text="Add Dynamic", icon='AUTO')
+        op_dynamic.dynamic = True
+
+        layout.separator()
+        col = layout.column(align=True)
         col.label(text="Reference guides:")
         col.operator(RUBICS_OT_AddGuides.bl_idname,    icon='GRID')
         col.operator(RUBICS_OT_RemoveGuides.bl_idname, icon='X')
@@ -832,6 +1213,9 @@ CLASSES = [
     RUBICS_OT_LiveToggle,
     RUBICS_OT_AddGuides,
     RUBICS_OT_RemoveGuides,
+    RUBICS_OT_EnsureDensityLayers,
+    RUBICS_OT_EnsureCollections,
+    RUBICS_OT_AddCollider,
     RUBICS_PT_Panel,
 ]
 
