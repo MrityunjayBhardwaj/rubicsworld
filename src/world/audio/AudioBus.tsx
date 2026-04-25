@@ -15,6 +15,7 @@ export function AudioBus() {
   const orbitSpeedSmooth = useRef(0)
   const flockAnchor = useRef<THREE.Object3D | null>(null)
   const flockScratch = useRef(new THREE.Vector3())
+  const pondScratch = useRef(new THREE.Vector3())
 
   useEffect(() => {
     audioBus.attachListener(camera)
@@ -86,6 +87,26 @@ export function AudioBus() {
       orbitSpeedSmooth.current += (0 - orbitSpeedSmooth.current) * Math.min(1, dt * 4)
     }
     audioBus.setCameraOrbitSpeed(orbitSpeedSmooth.current)
+
+    // Theme music walk-duck: 1.0 in orbit, 0.5 in walk so the theme
+    // recedes when the player is "in" the diorama vs observing it.
+    audioBus.setThemeWalkDuck(cameraMode === 'walk' ? 0.5 : 1.0)
+
+    // Pond proximity for ambient_world cross-fade. Compute distance from
+    // listener (camera) to the pond mesh in world space, normalise to
+    // pond_water's audible band so the ambient wind reduction matches the
+    // pond audio's apparent reach.
+    const pond = audioBus.getAnchor('pond')
+    if (pond) {
+      const PROX_REF = 1.5  // matches registry pond_water.refDist
+      const PROX_MAX = 10   // matches registry pond_water.maxDist
+      pond.getWorldPosition(pondScratch.current)
+      const d = pondScratch.current.distanceTo(camera.position)
+      const proximity = Math.max(0, Math.min(1, (PROX_MAX - d) / (PROX_MAX - PROX_REF)))
+      audioBus.setPondProximity(proximity)
+    } else {
+      audioBus.setPondProximity(0)
+    }
 
     // Update flock centroid each frame. TileGrid registers the live 'birds'
     // group as anchor 'birds_group' — pull it from the bus, average child

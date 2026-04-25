@@ -17,7 +17,10 @@ export interface LoopDef {
   anchor: AnchorRef
   src: string
   vol: number
-  modulator?: string
+  // One named modulator OR a list combined multiplicatively. e.g.
+  // `['windStrength', 'awayFromPond']` makes the ambient wind fade in two
+  // dimensions: dialled-down wind strength AND player proximity to water.
+  modulator?: string | string[]
   refDist?: number
   maxDist?: number
   rolloff?: number
@@ -79,6 +82,16 @@ class AudioBus {
   // attack/release rates so the rumble fades in/out rather than snapping.
   private sliceRotActiveTarget = 0
   private sliceRotActive = 0
+  // Theme music duck multiplier — 1.0 in orbit, 0.5 in walk so the theme
+  // recedes when the player is "in the world" rather than observing it.
+  private themeWalkDuck = 1.0
+  // Pond proximity 0..1; 1 means listener is inside the pond's audible
+  // refDist. Used by `awayFromPond` modulator to cross-fade ambient wind
+  // away when the water sound takes over.
+  private pondProximity = 0
+  // Grass-swipe intensity 0..1; cursor-on-grass × cursor speed, written
+  // by the TileGrid hover-stamp loop.
+  private grassSwipeIntensity = 0
 
   attachListener(camera: THREE.Camera) {
     if (this.listener && this.listener.parent === camera) return
@@ -139,6 +152,18 @@ class AudioBus {
 
   setSliceRotationActive(target: 0 | 1) {
     this.sliceRotActiveTarget = target
+  }
+
+  setThemeWalkDuck(v: number) {
+    this.themeWalkDuck = Math.max(0, Math.min(1, v))
+  }
+
+  setPondProximity(v: number) {
+    this.pondProximity = Math.max(0, Math.min(1, v))
+  }
+
+  setGrassSwipeIntensity(v: number) {
+    this.grassSwipeIntensity = Math.max(0, Math.min(1, v))
   }
 
   setMasterMute(m: boolean) { this.masterMute = m; this.applyGraphGains(); this.applyAllVolumes() }
@@ -213,12 +238,20 @@ class AudioBus {
     // produces NaN/Infinity (e.g. modulator reading an uninitialised
     // uniform) doesn't throw.
     for (const lr of this.loops.values()) {
-      const mod = lr.def.modulator ? this.modulatorValue(lr.def.modulator) : 1
+      const mod = this.combinedModulator(lr.def.modulator)
       const raw = this.computeFinalGain(lr.def.key, lr.def.vol, mod)
       const finalGain = Number.isFinite(raw) ? raw : 0
       if (lr.node) lr.node.setVolume(finalGain)
       if (lr.synthGain) lr.synthGain.gain.value = finalGain
     }
+  }
+
+  private combinedModulator(spec: string | string[] | undefined): number {
+    if (!spec) return 1
+    if (typeof spec === 'string') return this.modulatorValue(spec)
+    let acc = 1
+    for (const name of spec) acc *= this.modulatorValue(name)
+    return acc
   }
 
   private modulatorValue(name: string): number {
@@ -230,6 +263,9 @@ class AudioBus {
     }
     if (name === 'cameraOrbitSpeed') return Number.isFinite(this.cameraOrbitSpeed) ? this.cameraOrbitSpeed : 0
     if (name === 'sliceRotationActive') return Number.isFinite(this.sliceRotActive) ? this.sliceRotActive : 0
+    if (name === 'themeWalkDuck') return Number.isFinite(this.themeWalkDuck) ? this.themeWalkDuck : 1
+    if (name === 'awayFromPond') return 1 - 0.7 * (Number.isFinite(this.pondProximity) ? this.pondProximity : 0)
+    if (name === 'grassSwipeIntensity') return Number.isFinite(this.grassSwipeIntensity) ? this.grassSwipeIntensity : 0
     const fn = this.modulators.get(name)
     return fn ? fn() : 1
   }
@@ -259,7 +295,7 @@ class AudioBus {
   private applyAllVolumes() {
     for (const lr of this.loops.values()) {
       if (!lr.node) continue
-      const mod = lr.def.modulator ? this.modulatorValue(lr.def.modulator) : 1
+      const mod = this.combinedModulator(lr.def.modulator)
       lr.node.setVolume(this.computeFinalGain(lr.def.key, lr.def.vol, mod))
     }
   }

@@ -26,6 +26,9 @@ let grassTrailLastY = 1e9
 let grassTrailLastZ = 1e9
 const GRASS_STAMP_MIN_INTERVAL = 0.02
 const GRASS_STAMP_MIN_DIST = 0.008
+// Smoothed grass-swipe intensity for the audio loop. Writes from the
+// stamp loop where stampActive + dd are already in scope.
+let grassSwipeSmooth = 0
 import { buildGrass, grassRefs } from './buildGrass'
 import { loadGlbDiorama } from './loadGlbDiorama'
 import { audioBus } from '../world/audio/bus'
@@ -37,14 +40,17 @@ function registerDioramaAudioAnchors(root: THREE.Object3D) {
   const car = root.getObjectByName('car')
   const windmill = root.getObjectByName('windmill')
   const birds = root.getObjectByName('birds')
+  const pond = root.getObjectByName('pond')
   if (car) audioBus.registerAnchor('car', car)
   if (windmill) audioBus.registerAnchor('windmill', windmill)
   if (birds) audioBus.registerAnchor('birds_group', birds)
+  if (pond) audioBus.registerAnchor('pond', pond)
 }
 function unregisterDioramaAudioAnchors() {
   audioBus.unregisterAnchor('car')
   audioBus.unregisterAnchor('windmill')
   audioBus.unregisterAnchor('birds_group')
+  audioBus.unregisterAnchor('pond')
 }
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
@@ -1228,6 +1234,7 @@ export function TileGrid({ mode = 'split', bezier }: {
       stampActive = 1
     }
     grassUniforms.uHoverActive.value = stampActive
+    let grassSwipeTarget = 0
     if (stampActive > 0.5) {
       const dt = now - grassTrailLastT
       const dx = stampX - grassTrailLastX
@@ -1247,7 +1254,23 @@ export function TileGrid({ mode = 'split', bezier }: {
         grassTrailLastY = stampY
         grassTrailLastZ = stampZ
       }
+      // Grass-swipe intensity for the audio loop: cursor speed (m/s) on
+      // the planet, normalised so a leisurely sweep (~1.5 m/s) maxes out.
+      // dt is wall-clock seconds since the last STAMP, not last frame —
+      // it goes large during pauses, which we want (intensity drops).
+      const speed = dt > 1e-3 ? dd / dt : 0
+      grassSwipeTarget = Math.max(0, Math.min(1, speed / 1.5))
     }
+    // Smooth toward target: 100ms attack, 250ms release. Frame dt is
+    // approximated at 60Hz here — the smoothing tau dominates and audio
+    // gain doesn't need sub-frame precision.
+    {
+      const tau = grassSwipeTarget > grassSwipeSmooth ? 0.10 : 0.25
+      const k = Math.min(1, (1 / 60) / tau)
+      grassSwipeSmooth += (grassSwipeTarget - grassSwipeSmooth) * k
+      if (!Number.isFinite(grassSwipeSmooth)) grassSwipeSmooth = 0
+    }
+    audioBus.setGrassSwipeIntensity(grassSwipeSmooth)
 
     diorama.update(clock.elapsedTime)
 
