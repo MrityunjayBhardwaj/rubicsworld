@@ -14,6 +14,7 @@ import { TileLabels, TileLabelsLegend } from './world/TileLabels'
 import { HDRIEnvironment } from './world/HDRIEnvironment'
 import { HDRIPanel } from './world/HDRIPanel'
 import { GrassPanel } from './world/GrassPanel'
+import { AudioBus } from './world/audio/AudioBus'
 import { CubeSphere } from './world/CubeSphere'
 import { TileGrid } from './diorama/TileGrid'
 import { DioramaGrid } from './diorama/DioramaGrid'
@@ -155,6 +156,7 @@ export default function App() {
             <WalkControls />
             <IntroCinematic />
             <TutorialHint />
+            <AudioBus />
           </>
         )}
         {preview ? (
