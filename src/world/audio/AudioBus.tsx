@@ -12,6 +12,7 @@ import { usePlanet } from '../store'
 export function AudioBus() {
   const { camera, scene } = useThree()
   const prevCamDir = useRef(new THREE.Vector3())
+  const prevCamPos = useRef(new THREE.Vector3())
   const orbitSpeedSmooth = useRef(0)
   const flockAnchor = useRef<THREE.Object3D | null>(null)
   const flockScratch = useRef(new THREE.Vector3())
@@ -77,12 +78,23 @@ export function AudioBus() {
       const now = camera.position.clone().normalize()
       if (prevCamDir.current.lengthSq() > 0 && dt > 1e-4) {
         const cosA = THREE.MathUtils.clamp(prevCamDir.current.dot(now), -1, 1)
-        const omega = Math.acos(cosA) / dt  // rad/s
-        // Map ~0..1.5 rad/s → 0..1, then smooth to avoid jitter.
+        const omega = Math.acos(cosA) / dt  // rad/s around scene origin
         const target = Math.min(1, omega / 1.5)
         orbitSpeedSmooth.current += (target - orbitSpeedSmooth.current) * Math.min(1, dt * 6)
       }
       prevCamDir.current.copy(now)
+      prevCamPos.current.copy(camera.position)
+    } else if (cameraMode === 'walk') {
+      // Walk mode: linear camera velocity (player movement). Map a brisk
+      // walk (~0.4 m/s in this scene) to ~0.7 so the wind-cutting layer is
+      // audible while moving without drowning out footsteps.
+      if (prevCamPos.current.lengthSq() > 0 && dt > 1e-4) {
+        const linVel = prevCamPos.current.distanceTo(camera.position) / dt
+        const target = Math.min(1, linVel / 0.6)
+        orbitSpeedSmooth.current += (target - orbitSpeedSmooth.current) * Math.min(1, dt * 6)
+      }
+      prevCamPos.current.copy(camera.position)
+      prevCamDir.current.copy(camera.position).normalize()
     } else {
       orbitSpeedSmooth.current += (0 - orbitSpeedSmooth.current) * Math.min(1, dt * 4)
     }

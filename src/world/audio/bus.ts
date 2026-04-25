@@ -53,6 +53,9 @@ interface LoopRuntime {
   synthGain: GainNode | null
   pendingAnchor: string | null  // anchor id we're waiting on (sample loops)
   buffer: AudioBuffer | null
+  // Last computed gain (post-modulator, post-override, post-master). Read
+  // by the visualiser to draw a live level meter at each anchor.
+  lastGain: number
 }
 
 class AudioBus {
@@ -75,8 +78,18 @@ class AudioBus {
   private masterVol = 1.0
   private categoryVol: Record<Category, number> = { master: 1, ambient: 1, sfx: 1 }
   private categoryMute: Record<Category, boolean> = { master: false, ambient: false, sfx: false }
-  private cameraOrbitSpeed = 0  // 0..1 normalised, written by AudioBus tick
+  // Camera-movement intensity 0..1. Composite metric: orbit angular speed
+  // when in orbit mode, linear camera velocity when in walk mode. Drives
+  // the wind_cutting layer either way ("you're moving fast → air rushes").
+  // Name kept as cameraOrbitSpeed for registry compat.
+  private cameraOrbitSpeed = 0
   private windStrengthGetter: (() => number) | null = null
+
+  // Per-sound user overrides driven by the Audio panel. Each value is a
+  // multiplier applied on top of the registry's base vol / a 1.0 default
+  // playbackRate. mute=true forces gain to 0 regardless of vol.
+  private loopOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean }>()
+  private eventOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean }>()
   // Slice-rotation rumble: target (0|1) is set by subscriptions.ts when
   // drag||anim transitions; tick() smooths the actual value with separate
   // attack/release rates so the rumble fades in/out rather than snapping.
@@ -166,6 +179,30 @@ class AudioBus {
     this.grassSwipeIntensity = Math.max(0, Math.min(1, v))
   }
 
+  // ── Per-sound overrides ─────────────────────────────────────────────
+  setLoopOverride(key: string, override: { vol?: number; speed?: number; mute?: boolean }) {
+    const prev = this.loopOverrides.get(key) ?? {}
+    const next = { ...prev, ...override }
+    this.loopOverrides.set(key, next)
+    // Speed change must be pushed to the live source NOW (sample loops
+    // continue playing — there's no per-tick step that re-applies it).
+    const lr = this.loops.get(key)
+    if (lr?.node && next.speed != null) {
+      try { lr.node.setPlaybackRate(next.speed) } catch { /* ignore */ }
+    }
+  }
+  setEventOverride(key: string, override: { vol?: number; speed?: number; mute?: boolean }) {
+    const prev = this.eventOverrides.get(key) ?? {}
+    this.eventOverrides.set(key, { ...prev, ...override })
+  }
+  getLoopOverride(key: string) { return this.loopOverrides.get(key) }
+  getEventOverride(key: string) { return this.eventOverrides.get(key) }
+  // For the visualiser — return the gain we last computed for this loop.
+  getLastLoopGain(key: string): number {
+    const lr = this.loops.get(key)
+    return lr?.lastGain ?? 0
+  }
+
   setMasterMute(m: boolean) { this.masterMute = m; this.applyGraphGains(); this.applyAllVolumes() }
   setMasterVolume(v: number) { this.masterVol = v; this.applyGraphGains(); this.applyAllVolumes() }
   setCategoryVolume(c: Category, v: number) { this.categoryVol[c] = v; this.applyGraphGains(); this.applyAllVolumes() }
@@ -177,31 +214,50 @@ class AudioBus {
   play(key: string, _opts?: { volume?: number }) {
     const def = REGISTRY.events.find(e => e.key === key)
     if (!def) return
+    const ovr = this.eventOverrides.get(key)
+    if (ovr?.mute) return
     const ctx = this.listener?.context
     if (!ctx || !this.sfxGain) return
     // Resume the context if the browser auto-suspended it (autoplay policy).
     if (ctx.state === 'suspended') ctx.resume().catch(() => { /* ignore */ })
 
+    const speedMul = ovr?.speed ?? 1
+    const volMul = ovr?.vol ?? 1
+
     if (def.src.startsWith('synth:')) {
       const fn = SYNTHS[def.src.slice('synth:'.length)]
       if (!fn) return
-      fn(ctx, this.sfxGain)
+      // Synth voices don't expose a speed knob — pass an inline gain node
+      // when vol override needs to attenuate.
+      if (volMul !== 1) {
+        const eventGain = ctx.createGain()
+        eventGain.gain.value = volMul
+        eventGain.connect(this.sfxGain)
+        fn(ctx, eventGain)
+      } else {
+        fn(ctx, this.sfxGain)
+      }
       return
     }
 
     // Sample event — resolve the cached buffer, then schedule a fresh
     // AudioBufferSourceNode through sfxGain. Pitch jitter randomises
     // playbackRate to avoid the cloned-sample sound on repeated triggers
-    // (most useful for footsteps).
+    // (most useful for footsteps); user-set speed override multiplies on top.
     void this.loadBuffer(def.src).then(buf => {
       if (!this.sfxGain) return
       const src = ctx.createBufferSource()
       src.buffer = buf
+      let rate = speedMul
       if (def.pitchJitter && def.pitchJitter > 0) {
         const j = def.pitchJitter
-        src.playbackRate.value = 1 - j + Math.random() * (2 * j)
+        rate *= 1 - j + Math.random() * (2 * j)
       }
-      src.connect(this.sfxGain)
+      src.playbackRate.value = rate
+      const dst: AudioNode = volMul !== 1
+        ? (() => { const g = ctx.createGain(); g.gain.value = volMul; g.connect(this.sfxGain!); return g })()
+        : this.sfxGain
+      src.connect(dst)
       src.start()
     }).catch(err => {
       // eslint-disable-next-line no-console
@@ -238,9 +294,13 @@ class AudioBus {
     // produces NaN/Infinity (e.g. modulator reading an uninitialised
     // uniform) doesn't throw.
     for (const lr of this.loops.values()) {
+      const ovr = this.loopOverrides.get(lr.def.key)
+      const baseVol = lr.def.vol * (ovr?.vol ?? 1)
+      const muted = ovr?.mute === true
       const mod = this.combinedModulator(lr.def.modulator)
-      const raw = this.computeFinalGain(lr.def.key, lr.def.vol, mod)
+      const raw = muted ? 0 : this.computeFinalGain(lr.def.key, baseVol, mod)
       const finalGain = Number.isFinite(raw) ? raw : 0
+      lr.lastGain = finalGain
       if (lr.node) lr.node.setVolume(finalGain)
       if (lr.synthGain) lr.synthGain.gain.value = finalGain
     }
@@ -295,8 +355,11 @@ class AudioBus {
   private applyAllVolumes() {
     for (const lr of this.loops.values()) {
       if (!lr.node) continue
+      const ovr = this.loopOverrides.get(lr.def.key)
+      const baseVol = lr.def.vol * (ovr?.vol ?? 1)
+      const muted = ovr?.mute === true
       const mod = this.combinedModulator(lr.def.modulator)
-      lr.node.setVolume(this.computeFinalGain(lr.def.key, lr.def.vol, mod))
+      lr.node.setVolume(muted ? 0 : this.computeFinalGain(lr.def.key, baseVol, mod))
     }
   }
 
@@ -304,7 +367,7 @@ class AudioBus {
   registerLoopRuntime(def: LoopDef): LoopRuntime {
     const existing = this.loops.get(def.key)
     if (existing) return existing
-    const lr: LoopRuntime = { def, node: null, synth: null, synthGain: null, pendingAnchor: null, buffer: null }
+    const lr: LoopRuntime = { def, node: null, synth: null, synthGain: null, pendingAnchor: null, buffer: null, lastGain: 0 }
     this.loops.set(def.key, lr)
     return lr
   }
@@ -352,7 +415,7 @@ class AudioBus {
         if (lr.def.refDist != null) positional.setRefDistance(lr.def.refDist)
         if (lr.def.maxDist != null) positional.setMaxDistance(lr.def.maxDist)
         if (lr.def.rolloff != null) positional.setRolloffFactor(lr.def.rolloff)
-        positional.setDistanceModel('inverse')
+        positional.setDistanceModel('linear'); if (lr.def.rolloff == null) positional.setRolloffFactor(1)
         target.add(positional)
         lr.node = positional
         lr.synth = handle
@@ -390,9 +453,11 @@ class AudioBus {
         if (lr.def.refDist != null) positional.setRefDistance(lr.def.refDist)
         if (lr.def.maxDist != null) positional.setMaxDistance(lr.def.maxDist)
         if (lr.def.rolloff != null) positional.setRolloffFactor(lr.def.rolloff)
-        positional.setDistanceModel('inverse')
+        positional.setDistanceModel('linear'); if (lr.def.rolloff == null) positional.setRolloffFactor(1)
         positional.setVolume(0)
         target.add(positional)
+        const ovr = this.loopOverrides.get(lr.def.key)
+        if (ovr?.speed != null) positional.setPlaybackRate(ovr.speed)
         positional.play()
         lr.node = positional
         lr.buffer = buf
@@ -403,6 +468,8 @@ class AudioBus {
       a.setBuffer(buf)
       a.setLoop(true)
       a.setVolume(0)
+      const ovr = this.loopOverrides.get(lr.def.key)
+      if (ovr?.speed != null) a.setPlaybackRate(ovr.speed)
       a.play()
       lr.node = a
       lr.buffer = buf
