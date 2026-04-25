@@ -114,9 +114,10 @@ export default function App() {
           width: 480,
           minWidth: 280,
           maxWidth: 900,
-          maxHeight: '92vh',
+          height: '92vh',          // explicit height so overflow-y can scroll
           resize: 'horizontal',
-          overflow: 'hidden',
+          overflowX: 'hidden',     // resize handle still works with non-visible overflow
+          overflowY: 'auto',       // vertical scroll when Audio panel rows expand past viewport
           zIndex: 1000,
           display: levaHidden ? 'none' : 'block',
         }}
