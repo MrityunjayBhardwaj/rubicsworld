@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { audioBus } from './bus'
+import { installAudioSubscriptions } from './subscriptions'
 
 // Mounts inside the main Canvas. Attaches the singleton AudioListener to the
 // active camera and ticks the bus per frame. Idempotent across StrictMode
@@ -10,6 +11,7 @@ export function AudioBus() {
 
   useEffect(() => {
     audioBus.attachListener(camera)
+    installAudioSubscriptions()
     return () => {
       // Don't detach on unmount: StrictMode double-invokes mount/unmount in
       // dev, and ripping the listener off mid-session kills the AudioContext
