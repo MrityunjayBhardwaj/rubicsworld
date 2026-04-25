@@ -27,3 +27,7 @@ dist-ssr
 blender-plugin/__pycache__/
 public/diorama2.glb
 public/tree*.glb
+
+# Audio raws — encoded outputs in public/audio/ are committed instead.
+# Re-encode any time via: bash scripts/encode-audio.sh
+src/sfx/
