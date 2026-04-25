@@ -98,7 +98,31 @@ export default function App() {
 
   return (
     <>
-      <Leva hidden={levaHidden} />
+      {/*
+        Leva mounted inside a resize-host: wide default (480px) so the
+        long auto-generated keys in the Audio panel (e.g. windmill_whoosh
+        __speed) aren't truncated, and `resize: horizontal` on the host
+        lets the user drag the bottom-right corner to widen further.
+        `<Leva fill />` makes the panel fill its parent.
+      */}
+      <div
+        id="leva-host"
+        style={{
+          position: 'fixed',
+          top: 10,
+          right: 10,
+          width: 480,
+          minWidth: 280,
+          maxWidth: 900,
+          maxHeight: '92vh',
+          resize: 'horizontal',
+          overflow: 'hidden',
+          zIndex: 1000,
+          display: levaHidden ? 'none' : 'block',
+        }}
+      >
+        <Leva fill hidden={levaHidden} />
+      </div>
       <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />
       <Cursor />
       <TileLabelsLegend />
