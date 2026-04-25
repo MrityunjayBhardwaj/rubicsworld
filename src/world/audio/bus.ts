@@ -74,6 +74,11 @@ class AudioBus {
   private categoryMute: Record<Category, boolean> = { master: false, ambient: false, sfx: false }
   private cameraOrbitSpeed = 0  // 0..1 normalised, written by AudioBus tick
   private windStrengthGetter: (() => number) | null = null
+  // Slice-rotation rumble: target (0|1) is set by subscriptions.ts when
+  // drag||anim transitions; tick() smooths the actual value with separate
+  // attack/release rates so the rumble fades in/out rather than snapping.
+  private sliceRotActiveTarget = 0
+  private sliceRotActive = 0
 
   attachListener(camera: THREE.Camera) {
     if (this.listener && this.listener.parent === camera) return
@@ -132,6 +137,10 @@ class AudioBus {
     this.cameraOrbitSpeed = Math.max(0, Math.min(1, v))
   }
 
+  setSliceRotationActive(target: 0 | 1) {
+    this.sliceRotActiveTarget = target
+  }
+
   setMasterMute(m: boolean) { this.masterMute = m; this.applyGraphGains(); this.applyAllVolumes() }
   setMasterVolume(v: number) { this.masterVol = v; this.applyGraphGains(); this.applyAllVolumes() }
   setCategoryVolume(c: Category, v: number) { this.categoryVol[c] = v; this.applyGraphGains(); this.applyAllVolumes() }
@@ -185,9 +194,20 @@ class AudioBus {
     return promise
   }
 
-  // Internal — called by a per-frame tick.
-  tick() {
+  // Internal — called by a per-frame tick. AudioBus passes dt so we can
+  // smooth state-driven modulators (slice rotation, future similar).
+  tick(dt: number = 1 / 60) {
     if (!this.listener) return
+    // Smooth slice-rumble: 200ms attack, 400ms release. Asymmetric so the
+    // rumble swells in quickly when the player starts dragging but fades
+    // gracefully on release rather than cutting hard.
+    {
+      const target = this.sliceRotActiveTarget
+      const cur = this.sliceRotActive
+      const tau = target > cur ? 0.20 : 0.40
+      const k = Math.min(1, dt / tau)
+      this.sliceRotActive = cur + (target - cur) * k
+    }
     // Update loop volumes from modulators. AudioParam.value rejects non-
     // finite — guard at the assignment site so an early-frame race that
     // produces NaN/Infinity (e.g. modulator reading an uninitialised
@@ -209,6 +229,7 @@ class AudioBus {
       return Number.isFinite(v) ? v : 0
     }
     if (name === 'cameraOrbitSpeed') return Number.isFinite(this.cameraOrbitSpeed) ? this.cameraOrbitSpeed : 0
+    if (name === 'sliceRotationActive') return Number.isFinite(this.sliceRotActive) ? this.sliceRotActive : 0
     const fn = this.modulators.get(name)
     return fn ? fn() : 1
   }
