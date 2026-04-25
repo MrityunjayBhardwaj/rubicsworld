@@ -279,13 +279,13 @@ class AudioBus {
   // smooth state-driven modulators (slice rotation, future similar).
   tick(dt: number = 1 / 60) {
     if (!this.listener) return
-    // Smooth slice-rumble: 200ms attack, 400ms release. Asymmetric so the
-    // rumble swells in quickly when the player starts dragging but fades
-    // gracefully on release rather than cutting hard.
+    // Smooth slice-rumble: 60ms attack so even a quick 250ms commit anim
+    // brings the loop up to ~80% of base before it ends, 350ms release so
+    // it tails off rather than cutting hard.
     {
       const target = this.sliceRotActiveTarget
       const cur = this.sliceRotActive
-      const tau = target > cur ? 0.20 : 0.40
+      const tau = target > cur ? 0.06 : 0.35
       const k = Math.min(1, dt / tau)
       this.sliceRotActive = cur + (target - cur) * k
     }
