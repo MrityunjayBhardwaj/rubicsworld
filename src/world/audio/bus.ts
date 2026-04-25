@@ -203,6 +203,32 @@ class AudioBus {
     return lr?.lastGain ?? 0
   }
 
+  // Diagnostic: dump every active loop's runtime state. Used from devtools
+  // to find sounds escaping the mute path.
+  dumpLoops(): Record<string, unknown> {
+    const out: Record<string, unknown> = {
+      masterMute: this.masterMute, masterVol: this.masterVol,
+      categoryMute: this.categoryMute, categoryVol: this.categoryVol,
+      masterGainValue: this.masterGain?.gain.value,
+      ambientGainValue: this.ambientGain?.gain.value,
+      sfxGainValue: this.sfxGain?.gain.value,
+    }
+    const loops: Record<string, unknown> = {}
+    for (const [k, lr] of this.loops) {
+      const live = lr.node ? (lr.node as THREE.Audio).getVolume?.() : null
+      loops[k] = {
+        nodeKind: lr.node ? (lr.node instanceof THREE.PositionalAudio ? 'positional' : 'audio') : null,
+        synth: !!lr.synth,
+        synthGainValue: lr.synthGain?.gain.value,
+        liveVolume: live,
+        lastGain: lr.lastGain,
+        override: this.loopOverrides.get(k),
+      }
+    }
+    out.loops = loops
+    return out
+  }
+
   setMasterMute(m: boolean) { this.masterMute = m; this.applyGraphGains(); this.applyAllVolumes() }
   setMasterVolume(v: number) { this.masterVol = v; this.applyGraphGains(); this.applyAllVolumes() }
   setCategoryVolume(c: Category, v: number) { this.categoryVol[c] = v; this.applyGraphGains(); this.applyAllVolumes() }
@@ -350,6 +376,12 @@ class AudioBus {
     this.masterGain.gain.value = Number.isFinite(masterEffective) ? masterEffective : 0
     this.ambientGain.gain.value = Number.isFinite(ambientEffective) ? ambientEffective : 0
     this.sfxGain.gain.value = Number.isFinite(sfxEffective) ? sfxEffective : 0
+    // Belt-and-suspenders: slave THREE.AudioListener's own master gain to
+    // master mute too. THREE.Audio / PositionalAudio bypass our masterGain
+    // graph (they route through the listener directly), so without this
+    // any source whose per-node setVolume() is briefly stale would still
+    // be audible. The listener's master gain is the global cut-off.
+    if (this.listener) this.listener.setMasterVolume(masterEffective)
   }
 
   private applyAllVolumes() {
@@ -416,6 +448,10 @@ class AudioBus {
         if (lr.def.maxDist != null) positional.setMaxDistance(lr.def.maxDist)
         if (lr.def.rolloff != null) positional.setRolloffFactor(lr.def.rolloff)
         positional.setDistanceModel('linear'); if (lr.def.rolloff == null) positional.setRolloffFactor(1)
+        // Synth oscillators are already running inside fn(ctx); setVolume(0)
+        // before adding to the scene graph so we don't briefly play at full
+        // gain before the first tick computes the proper level.
+        positional.setVolume(0)
         target.add(positional)
         lr.node = positional
         lr.synth = handle

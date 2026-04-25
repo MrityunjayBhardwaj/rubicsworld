@@ -32,6 +32,11 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__neighborIdx = NEIGHBOR_IDX
   ;(window as unknown as Record<string, unknown>).__hud = hudUniforms
   ;(window as unknown as Record<string, unknown>).__hdri = useHdri
+  // Dev-only audio diagnostic: window.__audio.dumpLoops() shows per-loop
+  // gain state, used to chase sounds that escape the mute path.
+  void import('./world/audio/bus').then(m => {
+    ;(window as unknown as Record<string, unknown>).__audio = m.audioBus
+  })
 }
 
 function Cursor() {
