@@ -16,6 +16,7 @@ import { HDRIPanel } from './world/HDRIPanel'
 import { GrassPanel } from './world/GrassPanel'
 import { AudioBus } from './world/audio/AudioBus'
 import { AudioPanel } from './world/audio/AudioPanel'
+import { SoundVisualizer } from './world/audio/SoundVisualizer'
 import { CubeSphere } from './world/CubeSphere'
 import { TileGrid } from './diorama/TileGrid'
 import { DioramaGrid } from './diorama/DioramaGrid'
@@ -159,6 +160,7 @@ export default function App() {
             <IntroCinematic />
             <TutorialHint />
             <AudioBus />
+            <SoundVisualizer />
           </>
         )}
         {preview ? (
