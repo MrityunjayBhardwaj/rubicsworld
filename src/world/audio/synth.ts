@@ -195,8 +195,81 @@ const carEngine: SynthLoopFn = (ctx) => {
   }
 }
 
+// Windmill whoosh — bandpass-filtered noise modulated by a slow LFO that
+// matches the blade-pass cadence (4 blades × ω/2π Hz with ω≈0.8 rad/s ⇒
+// ~0.5 Hz). The result reads as a soft rhythmic "whoosh-whoosh".
+const windmillWhoosh: SynthLoopFn = (ctx) => {
+  const src = ctx.createBufferSource()
+  src.buffer = makeNoiseBuffer(ctx, 4)
+  src.loop = true
+  const bp = ctx.createBiquadFilter()
+  bp.type = 'bandpass'
+  bp.frequency.value = 700
+  bp.Q.value = 1.4
+  const am = ctx.createGain()
+  am.gain.value = 0.1
+  const lfo = ctx.createOscillator()
+  lfo.type = 'sine'
+  lfo.frequency.value = 0.5
+  const lfoDepth = ctx.createGain()
+  lfoDepth.gain.value = 0.4
+  lfo.connect(lfoDepth).connect(am.gain)
+  src.connect(bp).connect(am)
+  src.start()
+  lfo.start()
+  return {
+    source: am,
+    stop: () => { try { src.stop() } catch { /* ignore */ } try { lfo.stop() } catch { /* ignore */ } },
+  }
+}
+
+// Bird-flock chirp ensemble — randomly scheduled short FM blips at three
+// pitches. Loops forever; each blip is a quick frequency slide on a sine
+// with a snappy AD envelope. Crude but pleasant on small mono speakers.
+const birdsFlock: SynthLoopFn = (ctx) => {
+  const out = ctx.createGain()
+  out.gain.value = 1.0
+  let stopped = false
+  let timeout: ReturnType<typeof setTimeout> | null = null
+  const fundamentals = [2400, 3200, 2000]
+
+  const scheduleNext = () => {
+    if (stopped) return
+    const wait = 250 + Math.random() * 700  // 0.25–0.95s between chirps
+    timeout = setTimeout(() => {
+      const f = fundamentals[Math.floor(Math.random() * fundamentals.length)]
+      const t0 = ctx.currentTime
+      const dur = 0.05 + Math.random() * 0.08
+      const osc = ctx.createOscillator()
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(f * 0.85, t0)
+      osc.frequency.linearRampToValueAtTime(f * 1.15, t0 + dur * 0.4)
+      osc.frequency.linearRampToValueAtTime(f * 0.95, t0 + dur)
+      const g = ctx.createGain()
+      g.gain.setValueAtTime(0, t0)
+      g.gain.linearRampToValueAtTime(0.18, t0 + 0.005)
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + dur)
+      osc.connect(g).connect(out)
+      osc.start(t0)
+      osc.stop(t0 + dur + 0.01)
+      scheduleNext()
+    }, wait)
+  }
+  scheduleNext()
+
+  return {
+    source: out,
+    stop: () => {
+      stopped = true
+      if (timeout) clearTimeout(timeout)
+    },
+  }
+}
+
 export const SYNTH_LOOPS: Record<string, SynthLoopFn> = {
   windAmbient,
   windCut,
   carEngine,
+  windmillWhoosh,
+  birdsFlock,
 }
