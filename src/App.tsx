@@ -15,6 +15,7 @@ import { HDRIEnvironment } from './world/HDRIEnvironment'
 import { HDRIPanel } from './world/HDRIPanel'
 import { GrassPanel } from './world/GrassPanel'
 import { AudioBus } from './world/audio/AudioBus'
+import { AudioPanel } from './world/audio/AudioPanel'
 import { CubeSphere } from './world/CubeSphere'
 import { TileGrid } from './diorama/TileGrid'
 import { DioramaGrid } from './diorama/DioramaGrid'
@@ -101,6 +102,7 @@ export default function App() {
       <Cursor />
       <TileLabelsLegend />
       <HDRIPanel />
+      {!preview && <AudioPanel />}
       {!preview && <GrassPanel />}
       {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <TutorialChrome />

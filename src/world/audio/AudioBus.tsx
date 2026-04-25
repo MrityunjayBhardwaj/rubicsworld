@@ -19,6 +19,29 @@ export function AudioBus() {
   useEffect(() => {
     audioBus.attachListener(camera)
     installAudioSubscriptions()
+
+    // First-gesture unlock — browsers auto-suspend the AudioContext until a
+    // user gesture. Hook a one-shot listener so loops start playing
+    // automatically on the first interaction.
+    const unlock = () => {
+      const ctx = audioBus.context()
+      if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => { /* ignore */ })
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+    }
+    window.addEventListener('pointerdown', unlock, { once: false })
+    window.addEventListener('keydown', unlock, { once: false })
+
+    // Visibility gate: suspend the AudioContext when the tab is hidden so
+    // background tabs don't drone wind. Resume on visible.
+    const onVis = () => {
+      const ctx = audioBus.context()
+      if (!ctx) return
+      if (document.hidden) ctx.suspend().catch(() => { /* ignore */ })
+      else ctx.resume().catch(() => { /* ignore */ })
+    }
+    document.addEventListener('visibilitychange', onVis)
+
     // Wind-strength source: read directly from the grass shader's wind
     // uniform so audio tracks whatever the user dialled in Leva.
     audioBus.setWindStrengthSource(() => grassUniforms.uWindStrength.value)
@@ -33,10 +56,14 @@ export function AudioBus() {
       audioBus.registerAnchor('birds_flock', a)
     }
     return () => {
-      // Don't detach on unmount: StrictMode double-invokes mount/unmount in
-      // dev, and ripping the listener off mid-session kills the AudioContext
-      // for the rest of the app. Listener stays parented to camera until the
-      // app reloads.
+      // Don't detach the listener on unmount: StrictMode double-invokes
+      // mount/unmount in dev, and ripping the listener off mid-session
+      // kills the AudioContext for the rest of the app. Listener stays
+      // parented to camera until the app reloads. Per-mount listeners are
+      // detached because a fresh mount adds fresh handlers.
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+      document.removeEventListener('visibilitychange', onVis)
     }
   }, [camera])
 
