@@ -8,6 +8,7 @@
 
 import * as THREE from 'three'
 import registryJson from './registry.json'
+import { SYNTHS } from './synth'
 
 export type AnchorRef = 'world' | 'camera_motion' | `object:${string}`
 
@@ -49,6 +50,11 @@ class AudioBus {
   private anchors = new Map<string, THREE.Object3D>()
   private modulators = new Map<string, Modulator>()
   private loops = new Map<string, LoopRuntime>()
+  // Gain graph for synth events: ambientGain | sfxGain → masterGain → ctx.destination.
+  // Loops use THREE.Audio's built-in gain (their volumes are recomputed in tick()).
+  private masterGain: GainNode | null = null
+  private ambientGain: GainNode | null = null
+  private sfxGain: GainNode | null = null
   // Categorise loops by key prefix for now: ambient_* and wind_* → ambient,
   // everything else (synth events + spatial loops) → sfx.
   private masterMute = false
@@ -63,6 +69,15 @@ class AudioBus {
     if (this.listener) this.listener.parent?.remove(this.listener)
     this.listener = new THREE.AudioListener()
     camera.add(this.listener)
+    // Build the gain graph once we have a context.
+    const ctx = this.listener.context
+    this.masterGain = ctx.createGain()
+    this.ambientGain = ctx.createGain()
+    this.sfxGain = ctx.createGain()
+    this.ambientGain.connect(this.masterGain)
+    this.sfxGain.connect(this.masterGain)
+    this.masterGain.connect(ctx.destination)
+    this.applyGraphGains()
   }
 
   detachListener() {
@@ -104,13 +119,26 @@ class AudioBus {
     this.cameraOrbitSpeed = Math.max(0, Math.min(1, v))
   }
 
-  setMasterMute(m: boolean) { this.masterMute = m; this.applyAllVolumes() }
-  setMasterVolume(v: number) { this.masterVol = v; this.applyAllVolumes() }
-  setCategoryVolume(c: Category, v: number) { this.categoryVol[c] = v; this.applyAllVolumes() }
-  setCategoryMute(c: Category, m: boolean) { this.categoryMute[c] = m; this.applyAllVolumes() }
+  setMasterMute(m: boolean) { this.masterMute = m; this.applyGraphGains(); this.applyAllVolumes() }
+  setMasterVolume(v: number) { this.masterVol = v; this.applyGraphGains(); this.applyAllVolumes() }
+  setCategoryVolume(c: Category, v: number) { this.categoryVol[c] = v; this.applyGraphGains(); this.applyAllVolumes() }
+  setCategoryMute(c: Category, m: boolean) { this.categoryMute[c] = m; this.applyGraphGains(); this.applyAllVolumes() }
 
-  // Stub; real implementation lands in commit 2 (synth) and commits 3-4 (loops).
-  play(_key: string, _opts?: { volume?: number }) { /* will be filled in commit 2 */ }
+  // Trigger an event from registry by key. Currently only `synth:*` sources
+  // are supported (commit 2). Sample-based events would dispatch similarly.
+  play(key: string, _opts?: { volume?: number }) {
+    const def = REGISTRY.events.find(e => e.key === key)
+    if (!def) return
+    const ctx = this.listener?.context
+    if (!ctx || !this.sfxGain) return
+    if (def.src.startsWith('synth:')) {
+      const fn = SYNTHS[def.src.slice('synth:'.length)]
+      if (!fn) return
+      // Resume the context if the browser auto-suspended it (autoplay policy).
+      if (ctx.state === 'suspended') ctx.resume().catch(() => { /* ignore */ })
+      fn(ctx, this.sfxGain)
+    }
+  }
 
   // Internal — called by a per-frame tick.
   tick() {
@@ -145,6 +173,16 @@ class AudioBus {
     if (this.masterMute || this.categoryMute.master) return 0
     if (this.categoryMute[cat]) return 0
     return base * mod * this.masterVol * this.categoryVol.master * this.categoryVol[cat]
+  }
+
+  private applyGraphGains() {
+    if (!this.masterGain || !this.ambientGain || !this.sfxGain) return
+    const masterEffective = (this.masterMute || this.categoryMute.master) ? 0 : this.masterVol * this.categoryVol.master
+    const ambientEffective = this.categoryMute.ambient ? 0 : this.categoryVol.ambient
+    const sfxEffective = this.categoryMute.sfx ? 0 : this.categoryVol.sfx
+    this.masterGain.gain.value = masterEffective
+    this.ambientGain.gain.value = ambientEffective
+    this.sfxGain.gain.value = sfxEffective
   }
 
   private applyAllVolumes() {
