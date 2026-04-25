@@ -1,15 +1,18 @@
 {
   "loops": [
-    { "key": "ambient_world",   "anchor": "world",              "src": "synth:windAmbient",   "vol": 0.18, "modulator": "windStrength" },
-    { "key": "wind_cutting",    "anchor": "camera_motion",      "src": "synth:windCut",       "vol": 0.45, "modulator": "cameraOrbitSpeed" },
-    { "key": "birds_flock",     "anchor": "object:birds_flock", "src": "synth:birdsFlock",    "vol": 0.7, "refDist": 4, "maxDist": 25, "rolloff": 1.4 },
-    { "key": "windmill_whoosh", "anchor": "object:windmill",    "src": "synth:windmillWhoosh","vol": 0.6, "refDist": 2, "maxDist": 18, "rolloff": 1.6 },
-    { "key": "car_engine",      "anchor": "object:car",         "src": "synth:carEngine",     "vol": 0.6, "refDist": 2, "maxDist": 15, "rolloff": 1.6 }
+    { "key": "theme_music",     "anchor": "world",              "src": "audio/theme.ogg",            "vol": 0.22, "modulator": "themeWalkDuck" },
+    { "key": "ambient_world",   "anchor": "world",              "src": "audio/windy_grass.ogg",      "vol": 0.45, "modulator": ["windStrength", "awayFromPond"] },
+    { "key": "wind_cutting",    "anchor": "camera_motion",      "src": "audio/wind_cutting.ogg",     "vol": 0.55, "modulator": "cameraOrbitSpeed" },
+    { "key": "axis_rotation",   "anchor": "world",              "src": "audio/axis_rotation.ogg",    "vol": 0.7,  "modulator": "sliceRotationActive" },
+    { "key": "grass_swipe",     "anchor": "world",              "src": "audio/grass_swipe.ogg",      "vol": 0.6,  "modulator": "grassSwipeIntensity" },
+    { "key": "birds_flock",     "anchor": "object:birds_flock", "src": "audio/birds.ogg",            "vol": 0.85, "refDist": 4,   "maxDist": 25, "rolloff": 1.4 },
+    { "key": "car_engine",      "anchor": "object:car",         "src": "audio/car.ogg",              "vol": 0.7,  "refDist": 2,   "maxDist": 15, "rolloff": 1.6 },
+    { "key": "pond_water",      "anchor": "object:pond",        "src": "audio/pond.ogg",             "vol": 0.6,  "refDist": 1.5, "maxDist": 10, "rolloff": 1.8 },
+    { "key": "windmill_whoosh", "anchor": "object:windmill",    "src": "synth:windmillWhoosh",       "vol": 0.5,  "refDist": 2,   "maxDist": 18, "rolloff": 1.6 }
   ],
   "events": [
-    { "key": "slice_click",  "anchor": "world",         "src": "synth:click"    },
-    { "key": "settle_chime", "anchor": "world",         "src": "synth:chime"    },
-    { "key": "footstep",     "anchor": "object:player", "src": "synth:footstep" },
-    { "key": "jump",         "anchor": "world",         "src": "synth:jump"     }
+    { "key": "settle_chime", "anchor": "world",         "src": "audio/axis_settle.ogg" },
+    { "key": "footstep",     "anchor": "object:player", "src": "audio/footstep_grass.ogg", "pitchJitter": 0.08 },
+    { "key": "jump",         "anchor": "world",         "src": "audio/jump_grass.ogg" }
   ]
 }
