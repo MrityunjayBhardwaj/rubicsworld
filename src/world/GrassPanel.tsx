@@ -12,9 +12,11 @@
  * exclusion is actually covering the authored prop footprint.
  */
 import { useControls, folder, button } from 'leva'
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { flowerColorUniforms, FLOWER_KEYS, grassDebug, grassRefs, grassUniforms, type FlowerKey } from '../diorama/buildGrass'
+import { settings, copySettingsToClipboard, downloadSettingsJson, pickAndApplySettings, commitSettingsToDisk } from '../settings'
+import { setWalkMask, walkMaskRefs, DEFAULT_WALK_MASK_URL } from './walkMask'
 
 function triggerDownload(dataUrl: string, filename: string) {
   const a = document.createElement('a')
@@ -71,11 +73,58 @@ function renderMaskCanvas(w: number, h: number): HTMLCanvasElement | null {
 }
 
 export function GrassPanel() {
-  const controls = useControls({
+  // useControls returns [values, set] when the first arg is a function —
+  // set() lets us push the applied JSON into Leva's UI state so sliders
+  // visually match what we wrote to the uniforms.
+  //
+  // The schema function is wrapped in useCallback so its identity is stable
+  // across renders. Without the wrap, every App re-render (cameraMode,
+  // preview toggle, HDRI preset change cascade, etc.) passes a FRESH
+  // function to useControls, which Leva's internal useMemo treats as a new
+  // schema → re-seeds initialData → visually "resets" sliders to
+  // defaults. Stable fn identity means Leva only builds the schema once.
+  const grassSchema = useCallback(() => ({
+    Project: folder(
+      {
+        // Copy the current live settings (grass + flowers + HDRI) to the
+        // clipboard as JSON in the exact shape of settings/defaults.json.
+        copySettings: button(() => { void copySettingsToClipboard() }),
+        // Download the current live settings as `settings.json` — drop the
+        // file into src/settings/ to hand-commit the new default.
+        saveSettings: button(() => { void downloadSettingsJson() }),
+        // File picker → load settings.json → write into live uniforms +
+        // HDRI store, then push the Leva-side keys back through setLeva()
+        // so the sliders match what we applied. Values NOT present in the
+        // loaded JSON are left at their current live state. Per-key try/
+        // catch guards against keys in the JSON that aren't registered as
+        // Leva controls — Leva's set() crashes the whole batch on a single
+        // unknown key (mappedPaths[p] is undefined); per-key isolation
+        // skips only the unknowns and applies the rest.
+        uploadSettings: button(() => {
+          void pickAndApplySettings(flat => {
+            for (const [k, v] of Object.entries(flat)) {
+              try {
+                setLeva({ [k]: v })
+              } catch {
+                // eslint-disable-next-line no-console
+                console.warn('[settings] unknown Leva key skipped:', k)
+              }
+            }
+          })
+        }),
+        // Dev-server-only: POSTs the live settings to Vite's middleware
+        // which writes src/settings/defaults.json directly. HMR then
+        // re-evaluates the module and the new values become the baked-in
+        // defaults on next reload. One-click alternative to Save → drop-
+        // into-folder.
+        commitSettings: button(() => { void commitSettingsToDisk() }),
+      },
+      { collapsed: false },
+    ),
     Grass: folder(
       {
-        visible:       { value: true },
-        density:       { value: 25, min: 0, max: 50, step: 0.1, label: 'density' },
+        visible:       { value: settings.grass.visible },
+        density:       { value: settings.grass.density, min: 0, max: 50, step: 0.1, label: 'density' },
         length:        { value: grassUniforms.uLengthScale.value,  min: 0.1, max: 6, step: 0.01, label: 'length' },
         windSpeed:     { value: grassUniforms.uWindFreq.value,     min: 0, max: 6, step: 0.01, label: 'wind speed' },
         windStrength:  { value: grassUniforms.uWindStrength.value, min: 0, max: 4, step: 0.01, label: 'wind strength' },
@@ -87,31 +136,57 @@ export function GrassPanel() {
         tipColor:      { value: '#' + grassUniforms.uTipColor.value.getHexString(),  label: 'tip colour' },
         stemColor:     { value: '#' + grassUniforms.uStemColor.value.getHexString(), label: 'flower stem colour' },
         hueJitter:     { value: grassUniforms.uHueJitter.value, min: 0, max: 0.5, step: 0.01, label: 'hue jitter' },
+        hoverRadius:   { value: grassUniforms.uHoverRadius.value,   min: 0.02, max: 0.8, step: 0.005, label: 'hover radius (m)' },
+        hoverStrength: { value: grassUniforms.uHoverStrength.value, min: 0,    max: 3,   step: 0.01,  label: 'hover strength' },
+        trailDecay:    { value: grassUniforms.uTrailDecay.value,    min: 0.1,  max: 4,   step: 0.05,  label: 'trail decay (s)' },
         densityMap:    { value: false, label: 'show density map' },
         saveDensityMap: button(() => saveOverlayPng()),
         saveMask:       button(() => saveMaskPng()),
         saveCubenet:    button(() => { void saveCubenetPng() }),
         loadMask:       button(() => { void loadMaskPng() }),
         clearMask:      button(() => { grassRefs.rebuildWithMask?.(null) }),
-        saveDioramaGlb: button(() => { void saveDioramaGlb() }),
+        saveDioramaGlb:   button(() => { void saveDioramaGlb() }),
+        commitDioramaGlb: button(() => { void commitDioramaGlbToDisk() }),
       },
       { collapsed: true },
     ),
     Flowers: folder(
       {
-        flowerPct:    { value: 50, min: 0, max: 100, step: 0.5, label: 'flower % (vs grass)' },
-        pinkWeight:   { value: 1.0, min: 0, max: 1, step: 0.01, label: 'pink ratio' },
-        purpleWeight: { value: 1.0, min: 0, max: 1, step: 0.01, label: 'purple ratio' },
-        yellowWeight: { value: 1.0, min: 0, max: 1, step: 0.01, label: 'yellow ratio' },
-        redWeight:    { value: 1.0, min: 0, max: 1, step: 0.01, label: 'red ratio' },
+        flowerPct:    { value: settings.flowers.flowerPct,    min: 0, max: 100, step: 0.5, label: 'flower % (vs grass)' },
+        pinkWeight:   { value: settings.flowers.pinkWeight,   min: 0, max: 1, step: 0.01, label: 'pink ratio' },
+        purpleWeight: { value: settings.flowers.purpleWeight, min: 0, max: 1, step: 0.01, label: 'purple ratio' },
+        yellowWeight: { value: settings.flowers.yellowWeight, min: 0, max: 1, step: 0.01, label: 'yellow ratio' },
+        redWeight:    { value: settings.flowers.redWeight,    min: 0, max: 1, step: 0.01, label: 'red ratio' },
         pinkColor:    { value: '#' + flowerColorUniforms.pink.value.getHexString(),   label: 'pink' },
         purpleColor:  { value: '#' + flowerColorUniforms.purple.value.getHexString(), label: 'purple' },
         yellowColor:  { value: '#' + flowerColorUniforms.yellow.value.getHexString(), label: 'yellow' },
         redColor:     { value: '#' + flowerColorUniforms.red.value.getHexString(),    label: 'red' },
+        // Flower-specific distribution mask (white=allow, black=exclude). Shares
+        // the 8×6 flat-net coord frame with the grass mask but gates ONLY the
+        // 4 flower buckets — so you can blanket-allow grass everywhere and
+        // constrain flowers to specific regions (or vice versa).
+        loadFlowerMask:   button(() => { void loadFlowerMaskPng() }),
+        clearFlowerMask:  button(() => { grassRefs.rebuildWithFlowerMask?.(null) }),
+        saveFlowerMask:   button(() => { void saveFlowerMaskPng() }),
+        commitFlowerMask: button(() => { void commitFlowerMaskToDisk() }),
       },
       { collapsed: true },
     ),
-  })
+    Walk: folder(
+      {
+        // Player no-go mask. White = walkable, black = blocked. Same flat-net
+        // 8×6 frame as the grass / flower masks — start from grass-mask.png
+        // (most no-grass zones are also no-walk zones) and tweak.
+        loadWalkMask:   button(() => { void loadWalkMaskPng() }),
+        clearWalkMask:  button(() => { setWalkMask(null) }),
+        saveWalkMask:   button(() => { void saveWalkMaskPng() }),
+        commitWalkMask: button(() => { void commitWalkMaskToDisk() }),
+      },
+      { collapsed: true },
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [])
+  const [controls, setLeva] = useControls(grassSchema)
 
   useEffect(() => {
     grassUniforms.uWindStrength.value = controls.windStrength
@@ -121,6 +196,9 @@ export function GrassPanel() {
     grassUniforms.uLengthScale.value  = controls.length
     grassUniforms.uWindDir.value.set(controls.windDirX, controls.windDirZ)
     grassUniforms.uHueJitter.value    = controls.hueJitter
+    grassUniforms.uHoverRadius.value   = controls.hoverRadius
+    grassUniforms.uHoverStrength.value = controls.hoverStrength
+    grassUniforms.uTrailDecay.value    = controls.trailDecay
     grassUniforms.uBaseColor.value.set(new THREE.Color(controls.baseColor))
     grassUniforms.uTipColor.value.set(new THREE.Color(controls.tipColor))
     grassUniforms.uStemColor.value.set(new THREE.Color(controls.stemColor))
@@ -143,6 +221,20 @@ export function GrassPanel() {
   //   grassCount   = totalVisible − flowerShare (clamped to grass max)
   //   per-colour   = flowerShare × weight / sumWeights (clamped per-colour)
   // maxGrass is treated as the ballpark "total slots visible" since each of
+  // Load the bundled default density mask on first mount. Waits for
+  // grassRefs.rebuildWithMask to be published by TileGrid, then rasterizes
+  // /grass-mask.png and applies it. Idempotent via module-scoped guard so
+  // HMR remounts of this panel don't re-trigger a second rebuild.
+  useEffect(() => { void applyDefaultGrassMask() }, [])
+
+  // Same pattern for the flower-only mask. Independent ref guard so the two
+  // default loaders don't race each other's state.
+  useEffect(() => { void applyDefaultFlowerMask() }, [])
+
+  // Walk mask is consumed by WalkControls (not by buildGrass), so it doesn't
+  // need to wait for grassRefs hooks — just rasterize and stash.
+  useEffect(() => { void applyDefaultWalkMask() }, [])
+
   // the 5 buckets is allocated ≈ the same capacity — simpler than juggling a
   // composite number and stays consistent with the density=0..50 UX.
   useEffect(() => {
@@ -280,6 +372,62 @@ async function saveDioramaGlb() {
   setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 
+/** Bake the imperative diorama (props + colliders + 4-second procedural
+ *  animation loop) and overwrite public/diorama.glb on disk via the
+ *  /__diorama/commit-glb middleware. After this, hitting the app with
+ *  ?glb=1 loads an exact copy of the imperative scene; importing the
+ *  glb in Blender drops props into rubics_diorama and collider cubes
+ *  into rubics_collider via the Import operator's role-sorting. */
+async function commitDioramaGlbToDisk() {
+  if (!grassRefs.saveDiorama) {
+    alert('Diorama bake not ready yet — try again in a moment.')
+    return
+  }
+  const blob = await grassRefs.saveDiorama()
+  if (!blob) {
+    alert('Diorama bake failed — see console.')
+    return
+  }
+  try {
+    const res = await fetch('/__diorama/commit-glb', {
+      method: 'POST',
+      headers: { 'Content-Type': 'model/gltf-binary' },
+      body: blob,
+    })
+    const payload = await res.json().catch(() => ({ ok: false, error: 'non-JSON response' }))
+    if (!res.ok || !payload.ok) {
+      // eslint-disable-next-line no-console
+      console.error('[diorama] commit failed:', payload)
+      alert('diorama.glb commit failed — see console. (Only works in `npm run dev`.)')
+      return
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[diorama] committed ${payload.size} bytes to ${payload.path}`)
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[diorama] commit error:', err)
+    alert('diorama.glb commit error — see console.')
+  }
+}
+
+async function rasterizePngToImageData(url: string): Promise<ImageData | null> {
+  const img = await new Promise<HTMLImageElement | null>(resolve => {
+    const i = new Image()
+    i.crossOrigin = 'anonymous'
+    i.onload = () => resolve(i)
+    i.onerror = () => resolve(null)
+    i.src = url
+  })
+  if (!img) return null
+  const c = document.createElement('canvas')
+  c.width = img.width
+  c.height = img.height
+  const ctx = c.getContext('2d')
+  if (!ctx) return null
+  ctx.drawImage(img, 0, 0)
+  return ctx.getImageData(0, 0, img.width, img.height)
+}
+
 async function loadMaskPng() {
   if (!grassRefs.rebuildWithMask) return
   const file = await new Promise<File | null>(resolve => {
@@ -290,23 +438,256 @@ async function loadMaskPng() {
     inp.click()
   })
   if (!file) return
-  const url = URL.createObjectURL(file)
-  const img = await new Promise<HTMLImageElement | null>(resolve => {
-    const i = new Image()
-    i.onload = () => resolve(i)
-    i.onerror = () => resolve(null)
-    i.src = url
-  })
-  if (!img) { URL.revokeObjectURL(url); return }
+  const blobUrl = URL.createObjectURL(file)
+  const data = await rasterizePngToImageData(blobUrl)
+  URL.revokeObjectURL(blobUrl)
+  if (data) grassRefs.rebuildWithMask(data)
+}
+
+/** URL of the bundled default density mask. Lives in /public so Vite serves
+ *  it at the site root — no `?url` import gymnastics, works identically in
+ *  dev + prod builds. Overwritten via the Grass panel's Upload/Load mask
+ *  button at runtime (which calls rebuildWithMask with a user-picked PNG). */
+export const DEFAULT_GRASS_MASK_URL = '/grass-mask.png'
+/** Same as above but for the flower-only distribution mask. Bundled 1×1 white
+ *  by default (no gating) — Commit Flower Mask overwrites with the current
+ *  live mask on disk via vite.config.ts's /__mask/commit/flower middleware. */
+export const DEFAULT_FLOWER_MASK_URL = '/flower-mask.png'
+
+/** Re-encode an ImageData back to a PNG Blob via a canvas round-trip. Used by
+ *  Save/Commit Flower Mask so the in-memory mask (which may have been rasterized
+ *  from any file the user picked) is persisted as a valid PNG. */
+function imageDataToPngBlob(data: ImageData): Promise<Blob | null> {
   const c = document.createElement('canvas')
-  c.width = img.width
-  c.height = img.height
+  c.width = data.width
+  c.height = data.height
   const ctx = c.getContext('2d')
-  if (!ctx) { URL.revokeObjectURL(url); return }
-  ctx.drawImage(img, 0, 0)
-  const data = ctx.getImageData(0, 0, img.width, img.height)
-  URL.revokeObjectURL(url)
+  if (!ctx) return Promise.resolve(null)
+  ctx.putImageData(data, 0, 0)
+  return new Promise(resolve => c.toBlob(b => resolve(b), 'image/png'))
+}
+
+async function loadFlowerMaskPng() {
+  if (!grassRefs.rebuildWithFlowerMask) return
+  const file = await new Promise<File | null>(resolve => {
+    const inp = document.createElement('input')
+    inp.type = 'file'
+    inp.accept = 'image/png, image/jpeg, image/webp'
+    inp.onchange = () => resolve(inp.files?.[0] ?? null)
+    inp.click()
+  })
+  if (!file) return
+  const blobUrl = URL.createObjectURL(file)
+  const data = await rasterizePngToImageData(blobUrl)
+  URL.revokeObjectURL(blobUrl)
+  if (data) grassRefs.rebuildWithFlowerMask(data)
+}
+
+async function saveFlowerMaskPng() {
+  const mask = grassRefs.activeFlowerMask
+  if (!mask) {
+    // eslint-disable-next-line no-console
+    console.warn('[flower-mask] no active flower mask — upload one first')
+    return
+  }
+  const blob = await imageDataToPngBlob(mask)
+  if (!blob) return
+  const url = URL.createObjectURL(blob)
+  triggerDownload(url, `flower-mask_${tstamp()}.png`)
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
+}
+
+/** Dev-only: POST the current flower mask to vite's /__mask/commit/flower
+ *  middleware, which writes it to public/flower-mask.png on disk. Page reload
+ *  then picks up the bundled default. One-click alternative to Save →
+ *  drop-into-public/. */
+async function commitFlowerMaskToDisk() {
+  const mask = grassRefs.activeFlowerMask
+  if (!mask) {
+    // eslint-disable-next-line no-console
+    console.warn('[flower-mask] no active flower mask — upload one first')
+    alert('Upload a flower mask first, then commit.')
+    return
+  }
+  const blob = await imageDataToPngBlob(mask)
+  if (!blob) return
+  try {
+    const res = await fetch('/__mask/commit/flower', {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: blob,
+    })
+    const payload = await res.json().catch(() => ({ ok: false, error: 'non-JSON response' }))
+    if (!res.ok || !payload.ok) {
+      // eslint-disable-next-line no-console
+      console.error('[flower-mask] commit failed:', payload)
+      alert('Flower-mask commit failed — see console. (Only works in `npm run dev`.)')
+      return
+    }
+    // eslint-disable-next-line no-console
+    console.log('[flower-mask] committed to', payload.path)
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[flower-mask] commit error:', err)
+    alert('Flower-mask commit error — see console. (Only works in `npm run dev`.)')
+  }
+}
+
+async function loadWalkMaskPng() {
+  const file = await new Promise<File | null>(resolve => {
+    const inp = document.createElement('input')
+    inp.type = 'file'
+    inp.accept = 'image/png, image/jpeg, image/webp'
+    inp.onchange = () => resolve(inp.files?.[0] ?? null)
+    inp.click()
+  })
+  if (!file) return
+  const blobUrl = URL.createObjectURL(file)
+  const data = await rasterizePngToImageData(blobUrl)
+  URL.revokeObjectURL(blobUrl)
+  if (data) setWalkMask(data)
+}
+
+async function saveWalkMaskPng() {
+  const mask = walkMaskRefs.data
+  if (!mask) {
+    // eslint-disable-next-line no-console
+    console.warn('[walk-mask] no active walk mask — upload one first')
+    return
+  }
+  const blob = await imageDataToPngBlob(mask)
+  if (!blob) return
+  const url = URL.createObjectURL(blob)
+  triggerDownload(url, `walk-mask_${tstamp()}.png`)
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
+}
+
+async function commitWalkMaskToDisk() {
+  const mask = walkMaskRefs.data
+  if (!mask) {
+    // eslint-disable-next-line no-console
+    console.warn('[walk-mask] no active walk mask — upload one first')
+    alert('Upload a walk mask first, then commit.')
+    return
+  }
+  const blob = await imageDataToPngBlob(mask)
+  if (!blob) return
+  try {
+    const res = await fetch('/__mask/commit/walk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: blob,
+    })
+    const payload = await res.json().catch(() => ({ ok: false, error: 'non-JSON response' }))
+    if (!res.ok || !payload.ok) {
+      // eslint-disable-next-line no-console
+      console.error('[walk-mask] commit failed:', payload)
+      alert('Walk-mask commit failed — see console. (Only works in `npm run dev`.)')
+      return
+    }
+    // eslint-disable-next-line no-console
+    console.log('[walk-mask] committed to', payload.path)
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[walk-mask] commit error:', err)
+    alert('Walk-mask commit error — see console. (Only works in `npm run dev`.)')
+  }
+}
+
+let defaultWalkMaskApplied = false
+async function applyDefaultWalkMask() {
+  if (defaultWalkMaskApplied) return
+  defaultWalkMaskApplied = true
+  if (walkMaskRefs.data) return  // user already uploaded
+  // Two-tier default: explicit walk-mask first, grass-mask as fallback.
+  // The grass exclusion painting (pond / road / hut footprint) usually
+  // matches what should also block walking — saves the author from
+  // painting a duplicate file. Override with Upload Walk Mask in the
+  // panel, then Commit, to break the link.
+  let data = await rasterizePngToImageData(DEFAULT_WALK_MASK_URL)
+  if (!data) {
+    data = await rasterizePngToImageData(DEFAULT_GRASS_MASK_URL)
+    if (data) {
+      // eslint-disable-next-line no-console
+      console.log('[walk-mask] no /walk-mask.png — falling back to /grass-mask.png')
+    }
+  }
+  if (data && !walkMaskRefs.data) setWalkMask(data)
+}
+
+let defaultFlowerMaskApplied = false
+async function applyDefaultFlowerMask() {
+  if (defaultFlowerMaskApplied) return
+  for (let i = 0; i < 60 && !grassRefs.rebuildWithFlowerMask; i++) {
+    await new Promise(r => setTimeout(r, 50))
+  }
+  if (!grassRefs.rebuildWithFlowerMask) {
+    // eslint-disable-next-line no-console
+    console.warn('[flower-mask] rebuildWithFlowerMask not available after 3s — skipping default mask')
+    return
+  }
+  if (grassRefs.activeFlowerMask) {
+    defaultFlowerMaskApplied = true
+    return
+  }
+  const data = await rasterizePngToImageData(DEFAULT_FLOWER_MASK_URL)
+  if (!data) {
+    // The bundled default is optional — a 404 here (file not on disk yet) is
+    // fine; flowers simply fall back to the grass mask / AABB gate. Don't
+    // warn so the first-ever session doesn't spam the console.
+    defaultFlowerMaskApplied = true
+    return
+  }
+  if (grassRefs.activeFlowerMask) {
+    defaultFlowerMaskApplied = true
+    return
+  }
+  grassRefs.rebuildWithFlowerMask(data)
+  defaultFlowerMaskApplied = true
+}
+
+/** Apply the bundled default density mask to the grass system as soon as
+ *  `grassRefs.rebuildWithMask` becomes available. grassRefs is populated by
+ *  TileGrid after the first build — order-of-mount can put GrassPanel
+ *  ahead of TileGrid, so we poll briefly. Done-once per session via the
+ *  module-scoped guard; `clearMask` in Leva still works normally after.
+ *
+ *  Skip if a mask is ALREADY active (user uploaded their own mask before
+ *  this hook finished polling, or buildDiorama's preservation of
+ *  grassRefs.activeMask already re-applied a prior mask on a rebuild
+ *  cascade). Prevents clobbering a user's custom upload. */
+let defaultMaskApplied = false
+async function applyDefaultGrassMask() {
+  if (defaultMaskApplied) return
+  // Wait for the rebuild hook (published by TileGrid after grass build).
+  for (let i = 0; i < 60 && !grassRefs.rebuildWithMask; i++) {
+    await new Promise(r => setTimeout(r, 50))
+  }
+  if (!grassRefs.rebuildWithMask) {
+    // eslint-disable-next-line no-console
+    console.warn('[grass] rebuildWithMask not available after 3s — skipping default mask')
+    return
+  }
+  // If a mask already exists (user uploaded in the meantime, or a cascade
+  // rebuild restored one from grassRefs.activeMask), don't overwrite.
+  if (grassRefs.activeMask) {
+    defaultMaskApplied = true
+    return
+  }
+  const data = await rasterizePngToImageData(DEFAULT_GRASS_MASK_URL)
+  if (!data) {
+    // eslint-disable-next-line no-console
+    console.warn('[grass] default mask PNG failed to load')
+    return
+  }
+  // Re-check after async load — a user mask may have been uploaded during
+  // the fetch/decode window.
+  if (grassRefs.activeMask) {
+    defaultMaskApplied = true
+    return
+  }
   grassRefs.rebuildWithMask(data)
+  defaultMaskApplied = true
 }
 
 /** Same painter as DensityMapOverlay but writes to any given dimensions.

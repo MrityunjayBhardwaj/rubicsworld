@@ -242,3 +242,23 @@ The `**REF:**` field creates the three-layer provenance chain:
 Catalogue (compact invariant)  →  Ground Truth doc  →  source file:line
 ```
 If no Ground Truth doc exists for this invariant's domain, create one using `~/.anvideck/projects/[project]/ref/GROUND_TRUTH_META_PROMPT.md`.
+
+### PV14: Vertex-color layers ship as positional COLOR_0/1/2 — names are not preserved by the spec, so consumers MUST read by index AND authors MUST enforce list order
+glTF semantic naming for color attributes is positional. Blender's importer auto-numbers as `Color`, `Color.001`, `Color.002`; three.js's GLTFLoader maps them to `geometry.attributes.color`, `color_1`, `color_2`. If the author swaps the painting on layer 0 vs. layer 1, the meaning silently swaps everywhere. Authoring tools must normalise list order; readers consume positionally.
+**Implications:** Plugin's `_ensure_density_layers` reorders to canonical `grass / flowers / colliders`; `buildGrass.ts` reads `color`, `color_1`, `color_2` by name; `vite.config.ts:patchGlbColorAccessorNames` writes accessor.name post-export so Blender's UI shows the canonical names.
+**REF:** UNGROUNDED — canonical instances `blender-plugin/rubics_world.py:_ensure_density_layers`, `src/diorama/buildGrass.ts:625`, `vite.config.ts:patchGlbColorAccessorNames`.
+
+### PV15: The visible mesh is the source of truth; any authoring channel attached to a HIDDEN twin must be explicitly forwarded
+Sphere mode hides flat `terrain` and renders `sphere-terrain`. Any property the author can edit on `terrain` (PBR scalars, vertex colors, UVs) must either (a) not be authored on the hidden mesh, or (b) be explicitly copied to the visible mesh at scene-build time. The implicit assumption "edits propagate" is false at this boundary.
+**Implications:** `buildSphereTerrain(sourceMat?)` accepts a source material; TileGrid traverses for `terrain`'s material and passes it. Vertex-color authoring on flat terrain still works because buildGrass reads from the hidden mesh's geometry directly (a separate channel that doesn't need forwarding).
+**REF:** UNGROUNDED — canonical instance `src/diorama/buildDiorama.ts:buildSphereTerrain` + `src/diorama/TileGrid.tsx:~628` (source traversal). Family: P23, P31.
+
+### PV16: Bake-time scene-graph must be CPU-only; no FBO, no composite, no postprocessing
+Offline glTF serialization runs on the scene graph that GLTFExporter walks — it doesn't need a renderer, doesn't write to FBOs, and doesn't trigger postprocessing. Bake routes (`/bake/`, `saveDiorama`) construct a throwaway root, manipulate it, run exporter.parse, dispose. They're decoupled from B4's FBO pipeline by construction. New bake-adjacent code must preserve this: never reach into `sphereTarget`, `quadRef`, or composer state.
+**Implications:** `BakeRoute.tsx` mounts a non-rendering React tree. No `<Canvas>`, no `useFrame`. headless Chromium can drive it with software WebGL because zero per-frame load → zero stall.
+**REF:** UNGROUNDED — canonical instances `src/BakeRoute.tsx`, `src/diorama/TileGrid.tsx:saveDiorama`. Distinguishes from B4 (live render path).
+
+### PV17: Authored layer ordering is the round-trip contract
+For dual-channel-mask authoring (grass density / flower density / walk colliders / etc), the AUTHORING TOOL (Blender plugin) and the READER (three.js side) must agree on ordering. Names get lost; positions don't. Plugin enforces the order at "ensure" time (rebuilding from scratch if mis-ordered); reader trusts the order.
+**Implications:** Adding a 4th canonical layer requires updating BOTH sides simultaneously. A future "wind", "moisture", "snow" layer would be COLOR_3 → `color_3`.
+**REF:** UNGROUNDED — canonical instance `blender-plugin/rubics_world.py:DENSITY_LAYERS` and `LAYER_ALIASES` migration table.

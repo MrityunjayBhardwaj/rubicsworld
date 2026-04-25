@@ -1,4 +1,4 @@
-# New-session handoff prompt — Rubic's World (Day 15 end: DoF perception SOLVED on branch debug/dof-only; integration + merge still open)
+# New-session handoff prompt — Rubic's World (Day 17 end: walk mode + 3-layer terrain + Blender 2-collection model on branch features-and-fixes)
 
 Copy the block below into the next session verbatim.
 
@@ -6,97 +6,118 @@ Copy the block below into the next session verbatim.
 
 We're continuing **Rubic's World** — solo Vibe Jam 2026 entry.
 
-**Deadline:** 1 May 2026, 13:37 UTC (~7 days out)
+**Deadline:** 1 May 2026, 13:37 UTC (~6 days out)
 **Live URL:** https://rubicsworld.vercel.app (auto-deploys on `git push origin main`)
 **Repo:** https://github.com/MrityunjayBhardwaj/rubicsworld
-**Local dev:** `npm run dev` → http://localhost:5173 (custom Vite plugin pins the port)
+**Local dev:** `npm run dev` → http://localhost:5173
+**Bake offline:** `node bake-diorama.mjs` (rebuilds `public/diorama.glb` from imperative source)
 **Working dir:** `/Users/mrityunjaybhardwaj/Documents/projects/RubicsWorld`
-**Current branch:** `debug/dof-only` — stacked on `feat/seam-investigation` → `feat/seam-weld` → `feat/grass-from-ground` → `feat/grass` → `main`. **None merged.** Now FIVE unmerged branches.
+**Current branch:** `features-and-fixes` — branched off `main` after PR #16 (DoF + full PostFx) and PR #17 (TS build fixes). ~30+ commits above main, **NOT pushed yet**.
 
 ## Canonical reads (in order)
 
 1. `PHASE_1.md` — 15-day plan + stack + cut order.
-2. `THESIS.md` — full game design.
-3. `BLENDER_PIPELINE.md` — authoring contract (face-block layout, subdivision rules, animation compat).
-4. `blender-plugin/README.md` — addon install, panel walkthrough.
-5. Memory: `~/.claude/projects/-Users-mrityunjaybhardwaj-Documents-projects-RubicsWorld/memory/` — **`project_architecture_day15.md` is the CURRENT snapshot** (day14.md is SUPERSEDED). Also read `feedback_dof_integration.md` (three simultaneous rules for DoF), `feedback_blender_pipeline.md`, `feedback_shader_patches.md`, `feedback_library_ref_attachment.md`.
-6. `.anvi/` catalogues — `hetvabhasa.md` P1–P25, `vyapti.md` PV1–PV13, `krama.md` PK1–PK5, `dharana.md` (B2 FATAL @ 4 patterns, **B4 FATAL @ 4 patterns**).
+2. `THESIS.md` — game design.
+3. `BLENDER_PIPELINE.md` — authoring contract.
+4. `blender-plugin/README.md` — addon walkthrough.
+5. Memory: `~/.claude/projects/-Users-mrityunjaybhardwaj-Documents-projects-RubicsWorld/memory/` — **`project_architecture_day17.md` is the current snapshot** (day16 SUPERSEDED). Also read `feedback_dof_integration.md`, `feedback_shader_patches.md`, `feedback_library_ref_attachment.md`.
+6. `.anvi/` catalogues — hetvabhasa P1–P38 (P31–P38 new this session), vyapti PV1–PV17 (PV14–PV17 new), krama PK1–PK7 (PK6–PK7 new), dharana B2/B4 with B4 expanded to 8 patterns.
+7. `src/settings/defaults.json` — single source of truth for grass/flowers/HDRI defaults.
 
-## Where we are
+## Where we are (Day 17 ⇒ session ended fresh)
 
-**Five unmerged branches stacked.** `main` still has only Day 11 content. Everything below rides on top.
+Branch went from "walk mode shipped" to "city-ready collision pipeline + glb-as-canonical bake." Everything below is **uncommitted on `features-and-fixes`** but type-checks clean, runs, and the baked glb on disk reflects the latest source.
 
-### `feat/grass` — meadow + Blender round-trip + Live Mode + addon
-### `feat/grass-from-ground` — grass authoring from the ground
-### `feat/seam-weld` — Phase A + sphere seam fixes + classic rubik view
-### `feat/seam-investigation` — classic rubik view + Blender Init + Day-14 DoF/grass work
-### `feat/debug/dof-only` (current) — DoF PERCEPTION SOLVED (Day 15)
+### Walk mode — fully functional
+- Pointer-lock (infinite mouse-look), Esc releases lock + exits walk
+- Leva auto-hidden in walk mode
+- 2× player height (PLAYER_H = 0.16); per-frame raycast height-follow on the ground; Space-jump with gravity
+- 0.7s smoothstep entry from orbit pose → walk spawn
+- Grass-trail brush stamps from the camera position — blades bend behind the player same fade as cursor brush
+- **Three-gate collision** in `WalkControls.tryStep`:
+  1. PNG walk-mask (falls back to `grass-mask.png` if no `walk-mask.png`)
+  2. AABB list from Blender's `rubics_collider` collection
+  3. Vertex-color `colliders` layer on the terrain mesh (R < 0.5 = blocked)
 
-**Day 15 — DoF finally works perceptually.** Required three fixes, all applied on this branch:
+### Three-layer terrain vertex colors
+- `buildTerrain()` ships `color`/`color_1`/`color_2` BufferAttributes named `grass`/`flowers`/`colliders` (all-white defaults except grass which carries the cross-net dim mask).
+- `buildGrass.ts` consumes them positionally; exposes `grassRefs.sampleColliderAt(flatX, flatZ)`.
+- Plugin's "Ensure Density Layers" enforces canonical names + ordering, migrating legacy `Color` / `Color.001` / `grass_density` / `flower_density` / `walk` etc.
+- Server-side `vite.config.ts:patchGlbColorAccessorNames` writes accessor.name post-export → Blender shows `grass`/`flowers`/`colliders` instead of auto-numbered defaults.
 
-1. **P24 — force-bind depth, bypass EffectComposer.** Day-14's P21 `gl_FragDepth` write from the composite quad wasn't reaching postprocessing's CoC-sampled DepthTexture. Symptom: DoF uniforms probed correct, but only `bokehScale` changed the output. Fix: `useFrame(() => effect.setDepthTexture(sphereTarget.depthTexture))`. Publish `sphereTarget.depthTexture` through `hudUniforms.uSphereDepth` so PostFx can read it from outside TileGrid.
+### Blender plugin — two-collection model
+- `rubics_diorama` (renderable) and `rubics_collider` (invisible AABB cubes)
+- New ops: `Ensure Collections`, `Add Static`, `Add Dynamic` (spawns wireframe cube at 3D cursor)
+- Export tags `userData.rubics_role` via context manager + `export_extras=True`
+- Import operator sorts incoming nodes by `rubics_role` into the right collection
 
-2. **P25 fix — screen-space aperture mask.** Depth-based DoF on a convex planet focuses at scalar depth, which on a sphere corresponds to an intersection-of-spheres CIRCLE, not a point. Result: hovering the cursor produced a focus RING, not a focus spot. Fix: patch `cocMaterial.fragmentShader` via string-replace — `magnitude = max(depthCoC, smoothstep(sharpR, blurR, length((vUv - cursorUv) * vec2(aspect, 1))))`. Uniforms written per frame from projected `dofTarget`; idempotent (`mat.userData.__cocPatched`); re-applied on wrapper re-instantiation via `lastPatchedMat` ref.
+### BakeRoute (`/bake/` standalone page)
+- Non-rendering React tree: builds throwaway diorama, strips texture refs, auto-generates 11 colliders, samples animations 30Hz × 16s (covers car's 14.5s loop), exports + commits.
+- `bake-diorama.mjs` is a Playwright driver that hits `/bake/` headlessly. Headless WebGL works because no per-frame load.
+- Vite middleware `/__diorama/commit-glb` writes to disk + patches accessor names.
 
-3. **Front-pole off-cursor target.** When cursor is off planet, target was at origin → focus depth = cameraDistance → focal plane intersected planet at the silhouette rim → visible center blurred. Fix: target = `normalize(camera.position) * planetRadius` (front pole). Focus depth = cameraDistance − R → closest visible surface. With rangeWholePlanet=20m ≫ planet depth variation ≈ 2m, whole planet reads sharp.
+### Sphere-terrain reads PBR from authored terrain
+- `buildSphereTerrain(sourceMat?)` accepts an override; TileGrid traverses for the hidden `terrain` mesh and forwards. Closes the P23-family channel where Blender PBR edits never reached the visible sphere.
 
-Infra added this day:
-- `src/DOFtest.tsx` — minimal-scene DoF diagnostic route, proved the prop-path works in isolation (narrowed failure to composite/depth chain). Served at `http://localhost:5173/DOFtest/` via pathname gating in `src/main.tsx`.
-- `PLANET_SPHERE` exported from `Interaction.tsx`, radius default 1.05, live-tunable via `focus surface R` Leva slider. Raycast sphere sits at grass canopy — DoF target lands on visible surface.
-- **PostFx was STRIPPED** of every effect except DoF to isolate the diagnosis. SMAA, N8AO, SSAO, Bloom, Noise, Vignette, RealismFX — all gone. This branch ships with DoF only.
+### Diagnosed but NOT fixed (deferred)
+- **`metallicRoughnessTexture` overrides the Metallic slider** (P32). Blender's Principled BSDF effective metalness = `factor × texture.B`; if texture's B channel is ~0, slider has no effect. Fix in Blender = disconnect the texture noodle from Metallic input.
+- **applyIblKnobs caches `__baseRoughness` on first sight** (P36). Direct material-property writes get stomped next frame unless you also reset `userData.__baseRoughness`.
+- **Bake strips textures** (P34). Round-trip via Blender's Export Diorama preserves them; the JS bake doesn't (yet). Wire `await image.decode()` per texture if texture-fidelity round-trip becomes important.
+
+## Public files
+
+```
+public/
+  diorama.glb          807 KB; 11 colliders, 2 anim tracks, terrain has named grass/flowers/colliders layers
+  grass-mask.png       painted exclusion mask for grass distribution
+  flower-mask.png      painted exclusion mask for flowers
+  walk-mask.png        OPTIONAL — falls back to grass-mask if absent
+```
 
 ## 🔴 FIRST TASKS — pick one
 
-### Option A — Re-integrate stripped effects, then ship
-Day 15's DoF-only PostFx was a diagnostic step. Before merging, reinstate SMAA/N8AO/SSAO/Bloom/Noise/Vignette/RealismFX alongside the Day-15 fixes. Verify DoF still works with the full chain. Then merge `debug/dof-only` → `feat/seam-investigation` → `main` as one big stack. ~2-3 hours.
+### Option A — Ship features-and-fixes to main (~45 min)
+Commit in 3-4 logical chunks, push, open PR. ~30+ commits of polish should land before the deadline. **Recommended.** The longer it sits unmerged, the harder rebase gets.
 
-### Option B — Ship the stack as-is (risky)
-Merge `debug/dof-only` straight to main with DoF only. Other effects disappear from the live build. Simplest aesthetic, less to go wrong, but loses Bloom warmth, AO grounding, SMAA edges, etc. Only viable if we decide the simpler look is what we want for the jam.
+### Option B — Audio pass (~1 day)
+Howler still unwired. Ambient wind, slice-rotation click, settle chime, walk-mode footsteps, jump SFX. Big perceptual win for the jam build.
 
-### Option C — DoF tuning pass
-Defaults on the branch are conservative (`screen sharp R = 0.08`, `screen blur R = 0.30`, `bokeh = 4`). For a photo-style shallow focus: `sharp ~0.15`, `blur ~0.40`, `bokeh ~6`. Tune to taste, set new defaults, commit. ~30 min. Can do in parallel with A or B.
+### Option C — Build the City planet (~3-4 days)
+Next milestone per memory. Will exercise dynamic AABB + vertex-collider paths heavily — the architecture is ready, the content isn't.
 
-### Option D — Audio pass
-Howler still unwired. Ambient wind, slice-rotation click, settle chime, walk-mode footsteps. ~1 day.
+### Option D — Bundle split / perf
+~1 MB gzipped now; split drei/three/realism-effects/lottie into lazy chunks. Mobile-first bandwidth savings.
 
-### Option E — Per-cell visibility culling
-`.anvi/todos.md` MEADOW_PERF_CULLING. ~6× draw-call reduction on glb scenes.
+My lean: **A** (ship), then **B** (audio fills the silence on the jam build), then **C** if time permits.
 
-### Option F — Bundle split
-~850 KB gzipped. Split drei/three/realism-effects/lottie into lazy chunks.
+## Hard invariants (don't change without re-reading catalogues)
 
-My lean: **A first** (re-integrate so we don't ship a gutted PostFx to the jam build) → **C** (tune the aperture defaults) → **D** (audio). The jam deadline is ~7 days out; spending 2-3 hours on A to preserve the full visual stack is worth it.
+All PV1–PV17 hold. Notable for this session:
+- **PV14:** color attributes are positional. Reorder = both Blender plugin AND three.js side update simultaneously.
+- **PV15:** visible mesh is source of truth — hidden-twin authoring must explicit-forward.
+- **PV16:** bake routes are CPU-only — no FBO/composite/postfx in `/bake/`.
+- **PV17:** authored layer ordering is the round-trip contract.
 
-## Hard invariants (don't change without reading catalogues)
-
-PV1, PV6, PV7, PV8, PV9, PV10, PV12, PV13 still hold. PV11 (updated Day 14) still holds.
-
-**NEW invariant candidates (not yet codified in vyapti.md):**
-- **DoF depth source must be force-bound.** When an offscreen custom render path feeds EffectComposer, the composer's depth chain is unreliable. Call `effect.setDepthTexture(sourceDepth)` per frame, bypassing composer-managed depth wiring. Canonical in `src/world/PostFx.tsx`.
-- **DoF target off-cursor = front pole, not origin.** `normalize(camera.position) * planetRadius`.
-
-New hetvabhasa entries this day: **P24** (composite gl_FragDepth → EffectComposer depth chain broken; force-bind via setDepthTexture), **P25** (depth-based DoF on convex surface produces focus ring; fix with screen-space aperture patch).
-
-Dharana boundary status:
-- **B2** (R3F ↔ postprocessing EffectComposer) — FATAL, 4 patterns clustered (P4, P6, P7, P22).
-- **B4** (offscreen composite ↔ depth-dependent post-effects) — FATAL, **4 patterns** clustered (P8, P21, P23, P24). The "strongest smell" at B4 is now "uniforms probe correct but GPU output behaves as if they're at defaults" — default response = force-bind textures directly to effect materials.
+**Three-gate walk collision must stay 3 gates.** Skipping any silently regresses authoring.
 
 ## Working style
 
 - Concise. 1–2 sentence end-of-turn.
-- **Observation over inference.** Runtime probes BEFORE claiming a fix works. For DoF specifically, "uniform probe correct" is NOT proof of "effect works" — check the visual response to focusRange/focusDistance sliders independently. If only bokeh changes output, depth chain is broken regardless of what uniform probes say.
+- **Observation over inference.** Runtime probes before claiming a fix. For walk/grass/postfx specifically: page-reload after shader changes (onBeforeCompile caches results).
 - Options-not-implementations before non-trivial work.
-- Playwright for verification; screenshots to `/tmp/rubics-test/`. CDP `Page.captureScreenshot` bypasses Playwright's font-load wait when the page has a live WebGL canvas. Headless Playwright on SwiftShader is too slow for our scene — verify in the real browser.
+- Playwright for verification; bakes via `node bake-diorama.mjs` (NOT via UI button — UI button works in browser, but the headless flow goes through `/bake/`).
 - Commits: gitmoji + `Problem:` / `Fix:` body. No `Co-Authored-By`.
 - Always-deployable main. Ship in sequence.
 - Catalogues + memory stay in sync; new pattern → catalogue entry before moving on.
 
 ## Start by
 
-1. `git status` — should be clean on `debug/dof-only` (or have uncommitted Day-15 work ready to commit).
-2. `git log --oneline main..HEAD` — confirm the stack (~40+ commits).
-3. Verify DoF still works in http://localhost:5173 — hover on planet, sharp circle around cursor, no ring, no uniform blur. Off planet, whole planet mostly sharp.
-4. Pick an option above. Lean: **A** (re-integrate stripped effects) first.
+1. `git status` — should be clean OR have today's diffs ready to stage.
+2. `git log --oneline main..HEAD` — confirm the branch commit list.
+3. `npm run dev` → http://localhost:5173. Press Tab → walk mode → cursor locks, mouse look is infinite, WASD walks, Space jumps. Walk into a hut → blocked. Esc releases.
+4. http://localhost:5173/?glb=1 — same scene from the baked glb.
+5. http://localhost:5173/bake/ — re-bake (or run `node bake-diorama.mjs`).
+6. Pick an option above. Lean: **A** (ship) → **B** (audio).
 
 ---
 

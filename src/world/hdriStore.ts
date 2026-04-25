@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type * as THREE from 'three'
+import { settings } from '../settings'
 
 // `uniform` is local (solid-color equirect). The rest map 1:1 to drei's
 // <Environment preset=...>.
@@ -60,16 +61,16 @@ interface HdriStore {
 export const useHdri = create<HdriStore>(set => ({
   url: null,
   filename: null,
-  preset: 'sunset',
-  blur: 0.25,
-  intensity: 1.0,
-  rotation: 0,
-  backgroundOpacity: 0,
-  physicalLights: true,
-  uniformColor: '#808080',
-  envMapIntensity: 1.0,
-  roughnessBoost: 0.0,
-  fresnelEnabled: true,
+  preset: settings.hdri.preset as HdriPreset,
+  blur: settings.hdri.blur,
+  intensity: settings.hdri.intensity,
+  rotation: settings.hdri.rotation,
+  backgroundOpacity: settings.hdri.backgroundOpacity,
+  physicalLights: settings.hdri.physicalLights,
+  uniformColor: settings.hdri.uniformColor,
+  envMapIntensity: settings.hdri.envMapIntensity,
+  roughnessBoost: settings.hdri.roughnessBoost,
+  fresnelEnabled: settings.hdri.fresnelEnabled,
   envTexture: null,
 
   setUrl: (url, filename) => set({ url, filename: filename ?? null }),

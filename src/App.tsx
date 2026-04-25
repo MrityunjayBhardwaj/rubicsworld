@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
+import { Leva } from 'leva'
 import * as THREE from 'three'
 import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
@@ -86,9 +87,15 @@ export default function App() {
   // camera profile — not the orthographic-ish top-down of grid/split/cube.
   const isTopDownPreview = preview === 'grid' || preview === 'split' || preview === 'cube'
   const isRubik = preview === 'rubik'
+  // Hide Leva (and the HDRI/Grass panels live inside it) while in walk
+  // mode — clears the screen of HUD chrome so the cursor only ever lands
+  // on the canvas. Esc / Tab returns to orbit and Leva pops back.
+  const cameraMode = usePlanet(s => s.cameraMode)
+  const levaHidden = cameraMode === 'walk'
 
   return (
     <>
+      <Leva hidden={levaHidden} />
       <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />
       <Cursor />
       <TileLabelsLegend />

@@ -12,6 +12,20 @@ import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useFBO } from '@react-three/drei'
 import { buildDiorama, buildSphereTerrain, fresnelUniform, sliceRotUniforms, hudUniforms, HALF_W, HALF_H, type DioramaScene } from './buildDiorama'
+import { grassUniforms, GRASS_TRAIL_N } from './buildGrass'
+
+// Grass hover-trail ring buffer state. Module-scoped because there's a
+// single TileGrid mounting the scene; state must persist across frames.
+// Stamp cadence: every 20 ms OR when cursor moves ≥ 8 mm since last stamp.
+// With 32 slots these values give ~0.64 s of trail history, comfortably
+// longer than the 0.5 s default decay so the ring never "runs out".
+let grassTrailIdx = 0
+let grassTrailLastT = -1
+let grassTrailLastX = 1e9
+let grassTrailLastY = 1e9
+let grassTrailLastZ = 1e9
+const GRASS_STAMP_MIN_INTERVAL = 0.02
+const GRASS_STAMP_MIN_DIST = 0.008
 import { buildGrass, grassRefs } from './buildGrass'
 import { loadGlbDiorama } from './loadGlbDiorama'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
@@ -612,7 +626,24 @@ export function TileGrid({ mode = 'split', bezier }: {
     // building it for glb mode — the glb's cube-net terrain projects onto
     // the sphere via the same pipeline as every other prop.
     if (mode === 'sphere' && !glbPath) {
-      const terrainMesh = buildSphereTerrain()
+      // Source PBR scalars from the (hidden) cube-net terrain mesh so any
+      // material edits authored upstream — imperative `mat()` in
+      // buildTerrain or a Blender-edited terrain on the glb path — drive
+      // the visible sphere-terrain's reflectivity / colour. Without this
+      // the sphere-terrain stays at hard-coded `roughness:0.95
+      // metalness:0` regardless of what the author painted (P23 trap:
+      // the consumer queried wasn't tracking the same mesh the author
+      // edited).
+      let terrainSrcMat: THREE.Material | null = null
+      diorama.root.traverse(o => {
+        if (terrainSrcMat) return
+        const m = o as THREE.Mesh
+        if (m.isMesh && m.name === 'terrain') {
+          const mat = m.material
+          terrainSrcMat = Array.isArray(mat) ? mat[0] : mat
+        }
+      })
+      const terrainMesh = buildSphereTerrain(terrainSrcMat)
       terrainMesh.frustumCulled = false
       const terrainScene = new THREE.Scene()
       terrainScene.add(terrainMesh)
@@ -808,23 +839,149 @@ export function TileGrid({ mode = 'split', bezier }: {
     // transforms throughout so the exported scene opens centred at origin.
     grassRefs.saveDiorama = async () => {
       const throwaway = buildDiorama({ includeTerrain: true, skipMeadow: true })
-      // Ensure matrices are current — newly built objects may have matrix
-      // auto-update disabled upstream, and the exporter serialises
-      // matrixWorld as-is.
       throwaway.root.updateMatrixWorld(true)
+
+      // Auto-generate AABB colliders for every named prop in the
+      // throwaway. Each top-level child of the diorama root represents
+      // one prop group (hut, windmill, trees, fence, ...). We skip
+      // ground/terrain/flowers/road/stonepath because walking ON those is
+      // intentional. Each collider is a unit cube parented to the root,
+      // tagged with `userData.rubics_role = 'collider'` — GLTFExporter
+      // serialises userData as glTF `extras`, which the import side
+      // (loadGlbDiorama traversal + Blender's Import operator) reads to
+      // sort into rubics_collider. Idempotent on re-bake — throwaway is
+      // brand new each call.
+      const SKIP_PREFIXES = ['ground', 'terrain', 'flower', 'road', 'stonepath', 'path', '_col_']
+      const colliderGroup = new THREE.Group()
+      colliderGroup.name = 'rubics_collider'
+      const _box = new THREE.Box3()
+      for (const child of throwaway.root.children) {
+        const name = (child.name || '').toLowerCase()
+        if (!name) continue
+        if (SKIP_PREFIXES.some(p => name.startsWith(p))) continue
+        _box.makeEmpty().setFromObject(child)
+        if (_box.isEmpty() || !isFinite(_box.min.x)) continue
+        const sx = Math.max(0.02, _box.max.x - _box.min.x)
+        const sy = Math.max(0.02, _box.max.y - _box.min.y)
+        const sz = Math.max(0.02, _box.max.z - _box.min.z)
+        const cx = (_box.min.x + _box.max.x) * 0.5
+        const cy = (_box.min.y + _box.max.y) * 0.5
+        const cz = (_box.min.z + _box.max.z) * 0.5
+        const geom = new THREE.BoxGeometry(1, 1, 1)
+        // Use a basic material — the box renders only inside Blender as a
+        // wireframe authoring primitive on this side. Doesn't matter
+        // visually; we tag it as collider so import sorts + hides it.
+        const mat = new THREE.MeshBasicMaterial({ visible: false })
+        const cube = new THREE.Mesh(geom, mat)
+        cube.name = `_col_${child.name}`
+        cube.position.set(cx, cy, cz)
+        cube.scale.set(sx, sy, sz)
+        cube.userData = { rubics_role: 'collider' }
+        colliderGroup.add(cube)
+      }
+      throwaway.root.add(colliderGroup)
+
+      // Bake procedural animations into keyframe clips. The imperative
+      // diorama drives motion via `update(t)` callbacks (windmill spin,
+      // car path, smoke wisps, birds, etc.) — GLTFExporter can't capture
+      // those. We sample each tracked node's position/quaternion/scale at
+      // 30 Hz over a 4-second loop, build per-channel KeyframeTracks,
+      // bundle into one AnimationClip. Loop-friendly content (windmill,
+      // birds) lines up at clip end; non-looping content (smoke wisps)
+      // approximates well enough for a 4s capture.
+      const FPS = 30
+      const DURATION = 4.0
+      const SAMPLES = Math.round(FPS * DURATION) + 1
+      // Collect candidate animated nodes — every child of root that's
+      // NOT the new collider group, NOT terrain/ground (static), NOT
+      // already in colliderGroup. Includes nested rotors / sub-meshes
+      // because windmill blades are sub-children of the windmill group.
+      const animTargets: { node: THREE.Object3D; path: string }[] = []
+      throwaway.root.traverse(node => {
+        if (node === throwaway.root) return
+        if (node === colliderGroup) return
+        if (node.parent === colliderGroup) return
+        const lname = (node.name || '').toLowerCase()
+        if (!lname) return
+        if (lname.startsWith('ground') || lname.startsWith('terrain')) return
+        if (lname.startsWith('_col_')) return
+        animTargets.push({ node, path: node.name })
+      })
+      // Time array, shared across tracks.
+      const times = new Float32Array(SAMPLES)
+      for (let i = 0; i < SAMPLES; i++) times[i] = i / FPS
+      // Per-target sample buffers.
+      type Buf = { pos: Float32Array; rot: Float32Array; scl: Float32Array }
+      const buffers = new Map<THREE.Object3D, Buf>()
+      for (const { node } of animTargets) {
+        buffers.set(node, {
+          pos: new Float32Array(SAMPLES * 3),
+          rot: new Float32Array(SAMPLES * 4),
+          scl: new Float32Array(SAMPLES * 3),
+        })
+      }
+      // Drive `update(t)` and snapshot each frame.
+      for (let s = 0; s < SAMPLES; s++) {
+        throwaway.update(s / FPS)
+        throwaway.root.updateMatrixWorld(true)
+        for (const { node } of animTargets) {
+          const b = buffers.get(node)!
+          b.pos[s * 3 + 0] = node.position.x
+          b.pos[s * 3 + 1] = node.position.y
+          b.pos[s * 3 + 2] = node.position.z
+          b.rot[s * 4 + 0] = node.quaternion.x
+          b.rot[s * 4 + 1] = node.quaternion.y
+          b.rot[s * 4 + 2] = node.quaternion.z
+          b.rot[s * 4 + 3] = node.quaternion.w
+          b.scl[s * 3 + 0] = node.scale.x
+          b.scl[s * 3 + 1] = node.scale.y
+          b.scl[s * 3 + 2] = node.scale.z
+        }
+      }
+      // Build tracks. Skip tracks whose values never change (static
+      // props produce noise-free flat arrays — emitting them just bloats
+      // the glb). Tolerance ~1e-5 catches floating-point drift while
+      // letting genuinely-animated tracks through.
+      const tracks: THREE.KeyframeTrack[] = []
+      const FLAT_EPS = 1e-5
+      const isFlat = (arr: Float32Array, stride: number): boolean => {
+        for (let k = 0; k < stride; k++) {
+          const ref = arr[k]
+          for (let s = 1; s < SAMPLES; s++) {
+            if (Math.abs(arr[s * stride + k] - ref) > FLAT_EPS) return false
+          }
+        }
+        return true
+      }
+      for (const { node, path } of animTargets) {
+        const b = buffers.get(node)!
+        if (!isFlat(b.pos, 3)) tracks.push(new THREE.VectorKeyframeTrack(`${path}.position`, Array.from(times), Array.from(b.pos)))
+        if (!isFlat(b.rot, 4)) tracks.push(new THREE.QuaternionKeyframeTrack(`${path}.quaternion`, Array.from(times), Array.from(b.rot)))
+        if (!isFlat(b.scl, 3)) tracks.push(new THREE.VectorKeyframeTrack(`${path}.scale`, Array.from(times), Array.from(b.scl)))
+      }
+      const clips: THREE.AnimationClip[] = []
+      if (tracks.length > 0) {
+        clips.push(new THREE.AnimationClip('rubics_loop', DURATION, tracks))
+      }
+
+      // Restore matrices to t=0 so the static export pose is sensible
+      // (otherwise the glb's "rest" pose is whatever t=4s left behind).
+      throwaway.update(0)
+      throwaway.root.updateMatrixWorld(true)
+
       const exporter = new GLTFExporter()
       const arrayBuffer = await new Promise<ArrayBuffer | null>(resolve => {
         exporter.parse(
           throwaway.root,
           result => {
             if (result instanceof ArrayBuffer) resolve(result)
-            else resolve(null)   // { binary: true } guarantees ArrayBuffer
+            else resolve(null)
           },
           err => { console.error('[diorama] GLTFExporter failed:', err); resolve(null) },
-          { binary: true, animations: [] },
+          { binary: true, animations: clips, includeCustomExtensions: true },
         )
       })
-      // Dispose the throwaway to keep memory clean.
+      // Dispose throwaway (props + colliders) before returning.
       throwaway.root.traverse(c => {
         const m = c as THREE.Mesh
         if (!m.isMesh) return
@@ -834,6 +991,8 @@ export function TileGrid({ mode = 'split', bezier }: {
         else mat?.dispose()
       })
       if (!arrayBuffer) return null
+      // eslint-disable-next-line no-console
+      console.log(`[diorama] baked: ${colliderGroup.children.length} colliders, ${tracks.length} animation tracks, ${arrayBuffer.byteLength} bytes`)
       return new Blob([arrayBuffer], { type: 'model/gltf-binary' })
     }
 
@@ -842,15 +1001,13 @@ export function TileGrid({ mode = 'split', bezier }: {
     // for a new one driven by pixel sampling, then re-applies the sphere
     // projection patch (idempotent guard skips already-patched props and only
     // touches the new grass material).
-    grassRefs.rebuildWithMask = (mask) => {
+    // Shared rebuilder — disposes existing meadow meshes, re-runs buildGrass
+    // with BOTH current masks, re-applies sphere patch + Leva state. Called by
+    // rebuildWithMask AND rebuildWithFlowerMask; each writes to its own
+    // ref slot first so the fresh build picks them up.
+    const rebuildMeadow = () => {
       const diorama = dioramaRef.current
       if (!diorama) return
-      // Persist across hot-reload swaps: loadGlbDiorama reads activeMask
-      // and forwards it to buildGrass. null here = clear (drop back to
-      // AABB exclusion). Store BEFORE the rebuild so the new grass uses it.
-      grassRefs.activeMask = mask
-      // Dispose every previous meadow mesh (grass + 4 flowers) before building
-      // fresh ones. The old handles live in grassRefs.meadowMeshes.
       for (const old of grassRefs.meadowMeshes) {
         old.parent?.remove(old)
         old.geometry.dispose()
@@ -858,15 +1015,27 @@ export function TileGrid({ mode = 'split', bezier }: {
         if (Array.isArray(m)) m.forEach(x => x.dispose())
         else m.dispose()
       }
-      const grass = buildGrass(diorama.root, { maskImage: mask ?? undefined })
+      const grass = buildGrass(diorama.root, {
+        maskImage:       grassRefs.activeMask ?? undefined,
+        flowerMaskImage: grassRefs.activeFlowerMask ?? undefined,
+      })
       for (const mesh of grass.meshes) diorama.root.add(mesh)
       if (mode === 'sphere' && sphereUniformsRef.current) {
         patchSceneForSphere(diorama.root, sphereUniformsRef.current)
       }
       diorama.root.updateMatrixWorld(true)
-      // Re-apply Leva state (density / flower split / colours) since the new
-      // meshes came in with buildGrass defaults.
       grassRefs.reapplyControls?.()
+    }
+    grassRefs.rebuildWithMask = (mask) => {
+      // Persist across hot-reload swaps: loadGlbDiorama reads activeMask
+      // and forwards it to buildGrass. null here = clear (drop back to
+      // AABB exclusion). Store BEFORE the rebuild so the new grass uses it.
+      grassRefs.activeMask = mask
+      rebuildMeadow()
+    }
+    grassRefs.rebuildWithFlowerMask = (mask) => {
+      grassRefs.activeFlowerMask = mask
+      rebuildMeadow()
     }
 
     return () => {
@@ -874,6 +1043,7 @@ export function TileGrid({ mode = 'split', bezier }: {
       gl.clippingPlanes = []
       grassRefs.captureTopView = null
       grassRefs.rebuildWithMask = null
+      grassRefs.rebuildWithFlowerMask = null
       grassRefs.saveDiorama = null
       ;(dioramaRef as unknown as { _cancelSwap?: () => void })._cancelSwap?.()
       ;(dioramaRef as unknown as { _offHmr?: () => void })._offHmr?.()
@@ -995,6 +1165,66 @@ export function TileGrid({ mode = 'split', bezier }: {
           const neighIdx = NEIGHBOR_IDX[base + e]
           mask[base + e] = selfHome && atHome[neighIdx] ? 0 : 1
         }
+      }
+    }
+
+    // ---- Grass cursor-trail stamping ----
+    // Ring buffer of recent cursor positions feeds grassUniforms.uTrailPos
+    // (flat Float32Array, xyz×GRASS_TRAIL_N). Each stamp carries a timestamp
+    // in uTrailTime so the shader can fade pushes by (1 - age/decay)². We
+    // stamp on cursor move (either 20 ms since last stamp OR 8 mm cursor
+    // motion). uHudCursorActive is the canonical gate — already 0 when the
+    // ray misses the planet AND force-suppressed during off-planet orbit
+    // drags (Interaction.tsx: offPlanetDragRef), so the trail doesn't
+    // extend during camera orbits.
+    const now = clock.elapsedTime
+    grassUniforms.uNow.value = now
+    // Source the trail "brush" from EITHER the cursor raycast (orbit mode)
+    // OR the player camera position (walk mode). Same shader path consumes
+    // either — uTrailPos entries are normalised on the unit sphere inside
+    // `<begin_vertex>`, so we can pass any world-space point that's near
+    // the planet surface and the comparison stays correct.
+    const isWalking = pState.cameraMode === 'walk'
+    let stampX = 0, stampY = 0, stampZ = 0
+    let stampActive = 0
+    if (isWalking) {
+      // Player feet: camera position projected from head height back down to
+      // the surface. Camera sits at (groundR + PLAYER_H) along the up axis;
+      // we want the brush to land at the actual standing point so blades
+      // bend AROUND the player, not above their head.
+      const camPos = camera.position
+      const len = Math.sqrt(camPos.x * camPos.x + camPos.y * camPos.y + camPos.z * camPos.z)
+      if (len > 1e-6) {
+        const k = 1 / len  // unit direction; the shader normalises again
+        stampX = camPos.x * k
+        stampY = camPos.y * k
+        stampZ = camPos.z * k
+        stampActive = 1
+      }
+    } else if (hudUniforms.uHudCursorActive.value > 0.5) {
+      const hit = hudUniforms.uHudCursor.value
+      stampX = hit.x; stampY = hit.y; stampZ = hit.z
+      stampActive = 1
+    }
+    grassUniforms.uHoverActive.value = stampActive
+    if (stampActive > 0.5) {
+      const dt = now - grassTrailLastT
+      const dx = stampX - grassTrailLastX
+      const dy = stampY - grassTrailLastY
+      const dz = stampZ - grassTrailLastZ
+      const dd = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      if (dt >= GRASS_STAMP_MIN_INTERVAL || dd >= GRASS_STAMP_MIN_DIST) {
+        const i = grassTrailIdx
+        const flat = grassUniforms.uTrailPos.value
+        flat[i * 3 + 0] = stampX
+        flat[i * 3 + 1] = stampY
+        flat[i * 3 + 2] = stampZ
+        grassUniforms.uTrailTime.value[i] = now
+        grassTrailIdx = (i + 1) % GRASS_TRAIL_N
+        grassTrailLastT = now
+        grassTrailLastX = stampX
+        grassTrailLastY = stampY
+        grassTrailLastZ = stampZ
       }
     }
 
