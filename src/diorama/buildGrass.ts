@@ -58,6 +58,12 @@ export interface GrassOpts {
   excludeNames?: readonly string[]
   groundOffset?: number
   maskImage?: ImageData | null
+  /** Independent mask gating ONLY flower candidates (4 coloured buckets).
+   *  When set, a candidate routed to a flower bucket is kept iff the flower
+   *  mask says allowed at that flat-space position. Grass candidates are
+   *  unaffected — they still go through `maskImage` / AABB exclusions.
+   *  When unset, flowers fall back to the same gate as grass. */
+  flowerMaskImage?: ImageData | null
   maskThreshold?: number
 }
 
@@ -74,29 +80,59 @@ export interface GrassUniforms {
   uHueJitter:     { value: number }
   /** Shared across all flower materials (stem colour). */
   uStemColor:     { value: THREE.Color }
+  /** Cursor-driven hover interaction with TRAIL decay. A ring buffer of
+   *  recent cursor stamps (world-space). Each blade iterates all stamps
+   *  and picks the max tangent-plane push, scaled by (1 - age/decay)²
+   *  so stamps linger then fade. TileGrid owns the ring buffer + stamping
+   *  cadence; this module owns the shader-side consumption.
+   *  Stamps are stored as a flat Float32Array (xyz×TRAIL_N) per the
+   *  feedback_shader_patches rule: flat Float32Array for array uniforms. */
+  uHoverActive:   { value: number }  // global on/off; each stamp also gates on age
+  uHoverRadius:   { value: number }
+  uHoverStrength: { value: number }
+  uNow:           { value: number }
+  uTrailPos:      { value: Float32Array }  // length 3 * TRAIL_N
+  uTrailTime:     { value: Float32Array }  // length TRAIL_N
+  uTrailDecay:    { value: number }        // seconds
 }
+
+/** Number of cursor stamps in the trail ring buffer. Must match the
+ *  `#define TRAIL_N` injected into the grass vertex shader. 32 gives ~0.64s
+ *  of trail at 50 Hz stamping — plenty for a 0.5s decay default. */
+export const GRASS_TRAIL_N = 32
+
+// Defaults sourced from settings/defaults.json — single source of truth.
+// Mirror `new` / wrap into three.js types where needed.
+import { settings } from '../settings'
 
 /** Module-scoped uniforms shared by grass + flowers (wind, lighting-ish). */
 export const grassUniforms: GrassUniforms = {
   uTime:         { value: 0 },
-  uWindDir:      { value: new THREE.Vector2(1, 0.35).normalize() },
-  uWindStrength: { value: 1.0 },
-  uWindFreq:     { value: 1.5 },
-  uWaveScale:    { value: 3.5 },
-  uBendAmount:   { value: 0.35 },
-  uLengthScale:  { value: 1.0 },
-  uBaseColor:    { value: new THREE.Color('#3c6a2a') },
-  uTipColor:     { value: new THREE.Color('#cfe489') },
-  uHueJitter:    { value: 0.18 },
-  uStemColor:    { value: new THREE.Color('#3f6a2c') },
+  uWindDir:      { value: new THREE.Vector2(settings.grass.windDirX, settings.grass.windDirZ).normalize() },
+  uWindStrength: { value: settings.grass.windStrength },
+  uWindFreq:     { value: settings.grass.windSpeed },
+  uWaveScale:    { value: settings.grass.waveScale },
+  uBendAmount:   { value: settings.grass.bendAmount },
+  uLengthScale:  { value: settings.grass.length },
+  uBaseColor:    { value: new THREE.Color(settings.grass.baseColor) },
+  uTipColor:     { value: new THREE.Color(settings.grass.tipColor) },
+  uHueJitter:    { value: settings.grass.hueJitter },
+  uStemColor:    { value: new THREE.Color(settings.grass.stemColor) },
+  uHoverActive:   { value: 0 },
+  uHoverRadius:   { value: settings.grass.hoverRadius },
+  uHoverStrength: { value: settings.grass.hoverStrength },
+  uNow:           { value: 0 },
+  uTrailPos:      { value: new Float32Array(GRASS_TRAIL_N * 3) },
+  uTrailTime:     { value: new Float32Array(GRASS_TRAIL_N).fill(-1e6) },
+  uTrailDecay:    { value: settings.grass.trailDecay },
 }
 
 /** Per-flower-colour uniforms — one vec3 per flower type, written by Leva. */
 export const flowerColorUniforms: Record<FlowerKey, { value: THREE.Color }> = {
-  pink:   { value: new THREE.Color('#ff6aa3') },
-  purple: { value: new THREE.Color('#b868d8') },
-  yellow: { value: new THREE.Color('#f5d23a') },
-  red:    { value: new THREE.Color('#e03a3a') },
+  pink:   { value: new THREE.Color(settings.flowers.pinkColor) },
+  purple: { value: new THREE.Color(settings.flowers.purpleColor) },
+  yellow: { value: new THREE.Color(settings.flowers.yellowColor) },
+  red:    { value: new THREE.Color(settings.flowers.redColor) },
 }
 
 export interface GrassResult {
@@ -116,6 +152,10 @@ export const grassRefs: {
   meadowMax: Record<Bucket, number>             // per-bucket allocated max
   captureTopView: (() => Promise<Blob | null>) | null
   rebuildWithMask: ((mask: ImageData | null) => void) | null
+  /** Independent flower-only mask rebuild. Symmetric to rebuildWithMask —
+   *  stores activeFlowerMask, then tears down and re-runs buildGrass so the
+   *  new flower-mask is sampled. */
+  rebuildWithFlowerMask: ((mask: ImageData | null) => void) | null
   /** Build a throwaway flat cube-net diorama (no meadow, no shader patches)
    *  and export it as a .glb Blob via GLTFExporter. Registered by TileGrid so
    *  the Leva panel can trigger a download without owning an exporter. */
@@ -129,6 +169,15 @@ export const grassRefs: {
    *  cleared when rebuildWithMask(null) is called. loadGlbDiorama reads
    *  this and forwards it to buildGrass on every rebuild. */
   activeMask: ImageData | null
+  /** Currently-loaded painted FLOWER mask (flat-space, same coord frame as
+   *  activeMask). When set, only flower buckets are filtered by it; grass
+   *  stays on the grass mask / AABB exclusion path. */
+  activeFlowerMask: ImageData | null
+  /** Sample the colliders (COLOR_2) vertex-color layer at a flat-net
+   *  position. Returns the R-channel value (1.0 default = walkable, low =
+   *  blocked). Null when the diorama has no terrain mesh or the layer is
+   *  missing — caller treats that as "no terrain-side collision data". */
+  sampleColliderAt: ((flatX: number, flatZ: number) => number | null) | null
 } = {
   mesh: null,
   maxCount: 0,
@@ -136,9 +185,12 @@ export const grassRefs: {
   meadowMax: { grass: 0, pink: 0, purple: 0, yellow: 0, red: 0 },
   captureTopView: null,
   rebuildWithMask: null,
+  rebuildWithFlowerMask: null,
   saveDiorama: null,
   reapplyControls: null,
   activeMask: null,
+  activeFlowerMask: null,
+  sampleColliderAt: null,
 }
 
 export interface GrassDebugData {
@@ -154,7 +206,7 @@ export const grassDebug: { data: GrassDebugData | null } = { data: null }
 // ── Geometry helpers ───────────────────────────────────────────────────────
 
 /** Tapered grass blade — two crossed quads. Narrow, procedural taper in shader. */
-function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry {
+export function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry()
   const w = width / 2
   const positions: number[] = []
@@ -194,6 +246,7 @@ function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry
 
 const VERTEX_COMMON = /* glsl */`
   #include <common>
+  #define TRAIL_N ${GRASS_TRAIL_N}
   attribute float iHue;
   varying float vHue;
   varying vec2  vGrassUv;
@@ -204,6 +257,13 @@ const VERTEX_COMMON = /* glsl */`
   uniform float uWaveScale;
   uniform float uBendAmount;
   uniform float uLengthScale;
+  uniform float uHoverActive;
+  uniform float uHoverRadius;
+  uniform float uHoverStrength;
+  uniform float uNow;
+  uniform vec3  uTrailPos[TRAIL_N];
+  uniform float uTrailTime[TRAIL_N];
+  uniform float uTrailDecay;
 `
 
 const VERTEX_BEGIN = /* glsl */`
@@ -238,6 +298,60 @@ const VERTEX_BEGIN = /* glsl */`
   vec3 kxp = cross(k, p);
   float kdotp = dot(k, p);
   transformed = p * c + kxp * s + k * kdotp * oc;
+
+  // ---- Cursor hover push with TRAIL decay ----
+  // Ring buffer of world-space cursor stamps (TileGrid.tsx owns the buffer).
+  // Per blade we iterate all stamps, compute tangent-plane push, fade by
+  // (1 - age/decay)², MAX-combine so stamps don't stack into compression
+  // artifacts. Expired stamps contribute zero → smooth recovery to wind.
+  //
+  // COORD-SPACE: the blade world position the shader can compute here is
+  // in the PRE-sphere-projection cube layout — patchMaterialForSphere later
+  // rewrites the project_vertex chunk to normalize(modelMatrix * _osPos) * R
+  // which only applies at the final gl_Position step. uTrailPos is in POST-sphere
+  // world (cursor raycast against the planet sphere). To compare them, we
+  // project BOTH sides onto the unit sphere via normalize(·) — gives the
+  // direction from planet center to where the blade ends up, and matches
+  // the cursor's direction. Chord distance on a unit sphere ≈ angle-on-sphere
+  // in radians ≈ arc length on a sphere of radius ~1 (our planet), so the
+  // uHoverRadius value stays interpretable as meters-on-surface.
+  // modelMatrix reflects TileGrid's per-tile-pass transform on dioramaRoot.
+  if (uHoverActive > 0.5) {
+    vec3 preSphereWorld  = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
+    vec3 worldVert       = normalize(preSphereWorld);  // direction / on unit sphere
+    vec3 surfUp          = worldVert;                   // radial = outward on unit sphere
+    float heightMask     = clamp(transformed.y, 0.0, 2.0);
+    vec3 accumOffset     = vec3(0.0);
+
+    for (int i = 0; i < TRAIL_N; i++) {
+      float age = uNow - uTrailTime[i];
+      if (age < 0.0 || age > uTrailDecay) continue;
+      float fade = 1.0 - age / uTrailDecay;
+      fade = fade * fade; // softer tail
+
+      // Both sides on the unit sphere: chord distance ≈ arc length for
+      // small hovers, and matches the cursor's raycast space regardless of
+      // the actual planet radius.
+      vec3 worldDelta = worldVert - normalize(uTrailPos[i]);
+      float d = length(worldDelta);
+      if (d >= uHoverRadius || d < 1e-5) continue;
+
+      vec3 tangentDelta = worldDelta - surfUp * dot(worldDelta, surfUp);
+      float tLen = length(tangentDelta);
+      if (tLen < 1e-5) continue;
+
+      vec3 awayWorld = tangentDelta / tLen;
+      float amount = uHoverRadius - d;
+      vec3 push = awayWorld * amount * uHoverStrength * heightMask * fade;
+      if (length(push) > length(accumOffset)) accumOffset = push;
+    }
+
+    // world → dioramaRoot-local → instance-local. Both transposes invert
+    // orthonormal rotations (no scale). This is the inverse of what the
+    // standard vertex pipeline applies to the "transformed" variable.
+    mat3 worldToRoot = transpose(mat3(modelMatrix));
+    transformed += transpose(iRot) * worldToRoot * accumOffset;
+  }
 `
 
 const GRASS_FRAG_COMMON = /* glsl */`
@@ -285,7 +399,7 @@ const FLOWER_FRAG_MAP = /* glsl */`
   }
 `
 
-function createGrassMaterial(): THREE.MeshStandardMaterial {
+export function createGrassMaterial(): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.88,
@@ -294,6 +408,14 @@ function createGrassMaterial(): THREE.MeshStandardMaterial {
     alphaTest: 0.5,
     transparent: false,
   })
+  // Distinguish from flower materials in the program cache. Without this,
+  // patchMaterialForSphere wraps onBeforeCompile with an identical closure
+  // body for both grass and flower — three.js sees the same post-wrap
+  // onBeforeCompile.toString() + customProgramCacheKey output and REUSES
+  // the first-compiled program (grass's) for flower materials → flowers
+  // render with GRASS_FRAG_MAP (taper + blade color) on flower-sized quads
+  // = "widened grass" instead of stem+blossom.
+  mat.customProgramCacheKey = () => 'rubics:grass'
   mat.onBeforeCompile = shader => {
     shader.uniforms.uTime         = grassUniforms.uTime
     shader.uniforms.uWindDir      = grassUniforms.uWindDir
@@ -305,6 +427,13 @@ function createGrassMaterial(): THREE.MeshStandardMaterial {
     shader.uniforms.uBaseColor    = grassUniforms.uBaseColor
     shader.uniforms.uTipColor     = grassUniforms.uTipColor
     shader.uniforms.uHueJitter    = grassUniforms.uHueJitter
+    shader.uniforms.uHoverActive   = grassUniforms.uHoverActive
+    shader.uniforms.uHoverRadius   = grassUniforms.uHoverRadius
+    shader.uniforms.uHoverStrength = grassUniforms.uHoverStrength
+    shader.uniforms.uNow           = grassUniforms.uNow
+    shader.uniforms.uTrailPos      = grassUniforms.uTrailPos
+    shader.uniforms.uTrailTime     = grassUniforms.uTrailTime
+    shader.uniforms.uTrailDecay    = grassUniforms.uTrailDecay
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', VERTEX_COMMON)
       .replace('#include <begin_vertex>', VERTEX_BEGIN)
@@ -315,7 +444,7 @@ function createGrassMaterial(): THREE.MeshStandardMaterial {
   return mat
 }
 
-function createFlowerMaterial(color: { value: THREE.Color }): THREE.MeshStandardMaterial {
+export function createFlowerMaterial(color: { value: THREE.Color }): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.85,
@@ -324,6 +453,11 @@ function createFlowerMaterial(color: { value: THREE.Color }): THREE.MeshStandard
     alphaTest: 0.5,
     transparent: false,
   })
+  // Distinguish from grass material in the program cache. All flower colors
+  // can share ONE program (they differ only by uFlowerColor uniform, not
+  // shader code) — so a single 'rubics:flower' key for every flower type
+  // is correct and efficient.
+  mat.customProgramCacheKey = () => 'rubics:flower'
   mat.onBeforeCompile = shader => {
     shader.uniforms.uTime         = grassUniforms.uTime
     shader.uniforms.uWindDir      = grassUniforms.uWindDir
@@ -335,6 +469,13 @@ function createFlowerMaterial(color: { value: THREE.Color }): THREE.MeshStandard
     shader.uniforms.uHueJitter    = grassUniforms.uHueJitter
     shader.uniforms.uStemColor    = grassUniforms.uStemColor
     shader.uniforms.uFlowerColor  = color
+    shader.uniforms.uHoverActive   = grassUniforms.uHoverActive
+    shader.uniforms.uHoverRadius   = grassUniforms.uHoverRadius
+    shader.uniforms.uHoverStrength = grassUniforms.uHoverStrength
+    shader.uniforms.uNow           = grassUniforms.uNow
+    shader.uniforms.uTrailPos      = grassUniforms.uTrailPos
+    shader.uniforms.uTrailTime     = grassUniforms.uTrailTime
+    shader.uniforms.uTrailDecay    = grassUniforms.uTrailDecay
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', VERTEX_COMMON)
       .replace('#include <begin_vertex>', VERTEX_BEGIN)
@@ -357,6 +498,7 @@ function emptyGrassResult(): GrassResult {
   grassRefs.maxCount = 0
   grassRefs.meadowMeshes = []
   grassRefs.meadowMax = { grass: 0, pink: 0, purple: 0, yellow: 0, red: 0 }
+  grassRefs.sampleColliderAt = null
   grassDebug.data = null
   const stubGeom = new THREE.BufferGeometry()
   const stubMat = new THREE.MeshBasicMaterial()
@@ -393,13 +535,17 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   const {
     densityPerUnit2 = 20000,
     exclusionMargin = 0.05,
-    bladeHeight     = 0.015,
-    bladeWidth      = 0.003,
-    flowerHeight    = 0.020,
-    flowerWidth     = 0.018,
+    // Grass/flower dimensions sourced from settings/defaults.json so the
+    // "widened grass" aesthetic (which became the preferred look after the
+    // program-cache collision bug was fixed) can be tweaked from one place.
+    bladeHeight     = settings.grass.bladeHeight,
+    bladeWidth      = settings.grass.bladeWidth,
+    flowerHeight    = settings.flowers.flowerHeight,
+    flowerWidth     = settings.flowers.flowerWidth,
     excludeNames    = DEFAULT_EXCLUDE,
     groundOffset    = 0.0005,
     maskImage       = null,
+    flowerMaskImage = null,
     maskThreshold   = 128,
   } = opts
 
@@ -477,16 +623,29 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   // XZ bbox overlaps the query cell. Barycentric check in the XZ plane
   // rejects cells that land outside any triangle (island-shaped grounds,
   // holes). One-time cost; zero per-frame cost.
-  type GroundSample = { y: number; normal: THREE.Vector3; density: number }
+  type GroundSample = {
+    y: number
+    normal: THREE.Vector3
+    grassDensity: number
+    flowerDensity: number
+    /** R-channel of the colliders (COLOR_2) layer, barycentric-interpolated.
+     *  WalkControls samples this via grassRefs.sampleColliderAt and treats
+     *  values below a threshold (0.5) as no-go. Default 1 ⇒ walkable. */
+    colliderMask: number
+  }
   const groundTris: {
     ax: number; ay: number; az: number
     bx: number; by: number; bz: number
     cx: number; cy: number; cz: number
     xMin: number; xMax: number; zMin: number; zMax: number
     nx: number; ny: number; nz: number
-    // Vertex-color R channel per corner (0..1). If the ground has no
-    // COLOR_0 attribute, all three default to 1 so sample.density === 1.
-    rA: number; rB: number; rC: number
+    // Vertex-color R channel per corner (0..1). Grass uses COLOR_0,
+    // flowers use COLOR_1. Missing attrs default to 1 (allow-all); a
+    // missing flower layer falls back to the grass value so scenes
+    // authored before the two-layer convention keep working.
+    gA: number; gB: number; gC: number
+    fA: number; fB: number; fC: number
+    cA: number; cB: number; cC: number   // colliders mask R per corner
   }[] = []
   {
     const gm = groundMesh as THREE.Mesh
@@ -504,7 +663,18 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     // preserving current behaviour for un-painted grounds. glTF / three.js
     // standardises the name `color`; three.js's GLTFLoader auto-populates it
     // from the glTF `COLOR_0` attribute.
-    const colorAttr = geom.attributes.color as THREE.BufferAttribute | undefined
+    const colorAttr  = geom.attributes.color   as THREE.BufferAttribute | undefined
+    // Three canonical vertex-color layers, ordered by glTF semantic index:
+    //   COLOR_0 (`color`)   → grass     density (R = per-candidate keep prob)
+    //   COLOR_1 (`color_1`) → flowers   density (same shape, gates flowers)
+    //   COLOR_2 (`color_2`) → colliders mask    (R < threshold = walk-blocked)
+    // three.js GLTFLoader maps additional COLOR_n via toLowerCase fallback
+    // (ATTRIBUTES table only carries COLOR_0 explicitly). Blender exports
+    // color_attributes in list order, and the plugin's "Ensure Density
+    // Layers" op enforces this exact ordering. Missing layers fall back:
+    // flowers → grass, colliders → all-allow (1.0 everywhere).
+    const color1Attr = geom.attributes.color_1 as THREE.BufferAttribute | undefined
+    const color2Attr = geom.attributes.color_2 as THREE.BufferAttribute | undefined
     const world = gm.matrixWorld
     const vA = new THREE.Vector3()
     const vB = new THREE.Vector3()
@@ -525,9 +695,15 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       nrm.crossVectors(e1, e2)
       if (nrm.lengthSq() < 1e-20) continue  // degenerate tri
       nrm.normalize()
-      const rA = colorAttr ? colorAttr.getX(ia) : 1
-      const rB = colorAttr ? colorAttr.getX(ib) : 1
-      const rC = colorAttr ? colorAttr.getX(ic) : 1
+      const gA = colorAttr ? colorAttr.getX(ia) : 1
+      const gB = colorAttr ? colorAttr.getX(ib) : 1
+      const gC = colorAttr ? colorAttr.getX(ic) : 1
+      const fA = color1Attr ? color1Attr.getX(ia) : gA
+      const fB = color1Attr ? color1Attr.getX(ib) : gB
+      const fC = color1Attr ? color1Attr.getX(ic) : gC
+      const cA = color2Attr ? color2Attr.getX(ia) : 1
+      const cB = color2Attr ? color2Attr.getX(ib) : 1
+      const cC = color2Attr ? color2Attr.getX(ic) : 1
       groundTris.push({
         ax: vA.x, ay: vA.y, az: vA.z,
         bx: vB.x, by: vB.y, bz: vB.z,
@@ -537,7 +713,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
         zMin: Math.min(vA.z, vB.z, vC.z),
         zMax: Math.max(vA.z, vB.z, vC.z),
         nx: nrm.x, ny: nrm.y, nz: nrm.z,
-        rA, rB, rC,
+        gA, gB, gC, fA, fB, fC, cA, cB, cC,
       })
     }
   }
@@ -591,8 +767,10 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       const eps = 1e-6
       if (u < -eps || v < -eps || w < -eps) continue
       const y = u * tri.ay + v * tri.by + w * tri.cy
-      const density = u * tri.rA + v * tri.rB + w * tri.rC
-      return { y, normal: new THREE.Vector3(tri.nx, tri.ny, tri.nz), density }
+      const grassDensity  = u * tri.gA + v * tri.gB + w * tri.gC
+      const flowerDensity = u * tri.fA + v * tri.fB + w * tri.fC
+      const colliderMask  = u * tri.cA + v * tri.cB + w * tri.cC
+      return { y, normal: new THREE.Vector3(tri.nx, tri.ny, tri.nz), grassDensity, flowerDensity, colliderMask }
     }
     return null
   }
@@ -622,20 +800,25 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     }
   }
 
-  const maskW = maskImage?.width ?? 0
-  const maskH = maskImage?.height ?? 0
-  const maskData = maskImage?.data
-  const allowedByMask = (flatX: number, flatZ: number): boolean => {
-    if (!maskData) return true
-    const u = (flatX + MASK_HALF_W) / (MASK_HALF_W * 2)
-    const v = (flatZ + MASK_HALF_H) / (MASK_HALF_H * 2)
-    if (u < 0 || u >= 1 || v < 0 || v >= 1) return false
-    const px = Math.min(maskW - 1, Math.floor(u * maskW))
-    const py = Math.min(maskH - 1, Math.floor(v * maskH))
-    const i = (py * maskW + px) * 4
-    const lum = (maskData[i] + maskData[i + 1] + maskData[i + 2]) / 3
-    return lum > maskThreshold
+  // Build a sampler for any painted mask sharing the flat-space
+  // (-MASK_HALF_W..MASK_HALF_W, -MASK_HALF_H..MASK_HALF_H) frame. Returns
+  // null if no mask is provided — caller uses that to skip the gate.
+  function buildMaskSampler(img: ImageData | null): ((x: number, z: number) => boolean) | null {
+    if (!img) return null
+    const w = img.width, h = img.height, data = img.data
+    return (flatX: number, flatZ: number) => {
+      const u = (flatX + MASK_HALF_W) / (MASK_HALF_W * 2)
+      const v = (flatZ + MASK_HALF_H) / (MASK_HALF_H * 2)
+      if (u < 0 || u >= 1 || v < 0 || v >= 1) return false
+      const px = Math.min(w - 1, Math.floor(u * w))
+      const py = Math.min(h - 1, Math.floor(v * h))
+      const i = (py * w + px) * 4
+      const lum = (data[i] + data[i + 1] + data[i + 2]) / 3
+      return lum > maskThreshold
+    }
   }
+  const allowedByMask = buildMaskSampler(maskImage)
+  const allowedByFlowerMask = buildMaskSampler(flowerMaskImage)
 
   // Step 2 — sample candidates + classify each into one of 5 buckets. Even
   // split at BUILD time (each bucket gets 1/5 of survivors on average). The
@@ -667,34 +850,45 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   const groundWidth  = groundMax.x - groundMin.x
   const groundDepth  = groundMax.z - groundMin.z
 
+  // Per-bucket gate — grass candidates use the grass mask / AABB exclusions
+  // exactly as before; flower candidates run through the flower mask if set,
+  // else fall back to the grass gate so enabling only the flower mask doesn't
+  // silently drop all flowers. Composes WITH the vertex-color density gate
+  // and the ground-surface presence check below.
+  const passesGrassGate = (flatX: number, flatZ: number): boolean => {
+    if (allowedByMask) return allowedByMask(flatX, flatZ)
+    for (const r of exclusions) {
+      if (flatX >= r.xMin && flatX <= r.xMax && flatZ >= r.zMin && flatZ <= r.zMax) return false
+    }
+    return true
+  }
+  const passesFlowerGate = (flatX: number, flatZ: number): boolean => {
+    if (allowedByFlowerMask) return allowedByFlowerMask(flatX, flatZ)
+    return passesGrassGate(flatX, flatZ)
+  }
+
   for (let i = 0; i < totalCandidates; i++) {
     const flatX = groundMin.x + Math.random() * groundWidth
     const flatZ = groundMin.z + Math.random() * groundDepth
-    if (maskImage) {
-      if (!allowedByMask(flatX, flatZ)) { excluded++; continue }
-    } else {
-      let inside = false
-      for (const r of exclusions) {
-        if (flatX >= r.xMin && flatX <= r.xMax && flatZ >= r.zMin && flatZ <= r.zMax) {
-          inside = true; break
-        }
-      }
-      if (inside) { excluded++; continue }
-    }
+    // Even 20% split across buckets — decide bucket BEFORE the gate so each
+    // mask only filters its own kind.
+    const bucketIdx = Math.min(4, Math.floor(Math.random() * 5))
+    const bucket = BUCKETS[bucketIdx]
+    const ok = bucket === 'grass' ? passesGrassGate(flatX, flatZ) : passesFlowerGate(flatX, flatZ)
+    if (!ok) { excluded++; continue }
     // Lift the candidate onto the actual ground surface. Miss ⇒ candidate
     // sits over a hole/gap in the ground geometry; treat as excluded so the
     // meadow stays strictly surface-bound.
     const sample = sampleGroundAt(flatX, flatZ)
     if (!sample) { excluded++; continue }
     // Vertex-color density gate. Composes WITH exclusions (both must allow).
-    // When the ground has no COLOR_0 attribute, sample.density === 1 and
-    // this is a no-op. When the user has painted the ground in Blender's
-    // Vertex Paint mode, the R channel acts as a per-candidate probability:
+    // Grass candidates read COLOR_0 (grass_density layer); flower candidates
+    // read COLOR_1 (flower_density). When the ground has no attribute,
+    // density === 1 and this is a no-op. When painted in Blender's Vertex
+    // Paint mode, the R channel acts as a per-candidate probability:
     // white=always keep, black=always reject, grey=proportional.
-    if (sample.density < 1 && Math.random() > sample.density) { excluded++; continue }
-    // Even 20% split across buckets.
-    const bucketIdx = Math.min(4, Math.floor(Math.random() * 5))
-    const bucket = BUCKETS[bucketIdx]
+    const density = bucket === 'grass' ? sample.grassDensity : sample.flowerDensity
+    if (density < 1 && Math.random() > density) { excluded++; continue }
     const bp = per[bucket]
     bp.positions.push(new THREE.Vector3(flatX, sample.y + groundOffset, flatZ))
     bp.positions2D.push(new THREE.Vector2(flatX, flatZ))
@@ -809,6 +1003,15 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
   grassRefs.mesh        = built.grass.mesh
   grassRefs.maxCount    = built.grass.max
   grassRefs.meadowMeshes = meshes
+  // Publish the colliders sampler (consumed by WalkControls). Reuses the
+  // same triangle-grid we built for grass/flower density gating, returning
+  // the COLOR_2 R-channel value at the player's flat-net position. Returns
+  // null when the candidate falls outside any ground triangle so the caller
+  // can fall back to its other gates (PNG walk-mask, AABB colliders).
+  grassRefs.sampleColliderAt = (x: number, z: number): number | null => {
+    const s = sampleGroundAt(x, z)
+    return s ? s.colliderMask : null
+  }
   grassRefs.meadowMax   = maxPerBucket
 
   // Density-map debug data. `halfW/halfH = 4/3` stays pinned to the mask's
@@ -849,6 +1052,7 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       grassRefs.mesh = null
       grassRefs.maxCount = 0
       grassRefs.meadowMeshes = []
+      grassRefs.sampleColliderAt = null
       grassRefs.meadowMax = { grass: 0, pink: 0, purple: 0, yellow: 0, red: 0 }
     }
   }
