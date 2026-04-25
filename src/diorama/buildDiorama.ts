@@ -19,7 +19,7 @@
  */
 
 import * as THREE from 'three'
-import { buildGrass } from './buildGrass'
+import { buildGrass, grassRefs } from './buildGrass'
 
 export const BASE_W = 8
 export const BASE_H = 6
@@ -446,7 +446,32 @@ function buildTerrain(): THREE.Mesh {
   }
 
   uv.needsUpdate = true
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  // Three vertex-colour layers carry the authoring contract:
+  //   COLOR_0 (`color`)   → grass     density (cross-net dim mask doubles
+  //                          as the grass keep-probability gate)
+  //   COLOR_1 (`color_1`) → flowers   density (all-white default = allow)
+  //   COLOR_2 (`color_2`) → colliders mask    (all-white default = walkable;
+  //                          paint black in Blender to block walking)
+  // three.js GLTFExporter writes them as COLOR_0..2 in this exact order
+  // and emits each BufferAttribute's `.name` as the glTF accessor name —
+  // Blender's glTF-2 importer pulls accessor names through to its Color
+  // Attributes panel, so the layers arrive named `grass / flowers /
+  // colliders` rather than the default `Color / Color.001 / Color.002`.
+  // three-js readers consume them positionally so renames don't break
+  // loading.
+  const grassAttr = new THREE.BufferAttribute(colors, 3)
+  grassAttr.name = 'grass'
+  g.setAttribute('color', grassAttr)
+  const flowersLayer = new Float32Array(pos.count * 3)
+  flowersLayer.fill(1)
+  const flowersAttr = new THREE.BufferAttribute(flowersLayer, 3)
+  flowersAttr.name = 'flowers'
+  g.setAttribute('color_1', flowersAttr)
+  const collidersLayer = new Float32Array(pos.count * 3)
+  collidersLayer.fill(1)
+  const collidersAttr = new THREE.BufferAttribute(collidersLayer, 3)
+  collidersAttr.name = 'colliders'
+  g.setAttribute('color_2', collidersAttr)
   g.computeVertexNormals()
 
   const m = new THREE.Mesh(g, mat({
@@ -1280,12 +1305,21 @@ export interface BuildDioramaOpts {
  *  NOTE: this terrain doesn't follow rubik tile rotation; that's intentional
  *  and acceptable while the terrain is uniform green. If the terrain ever
  *  carries spatially-distinct content per tile, this needs revisiting. */
-export function buildSphereTerrain(): THREE.Mesh {
+export function buildSphereTerrain(sourceMat?: THREE.Material | null): THREE.Mesh {
   const geom = new THREE.SphereGeometry(1, 96, 64)
+  // PBR scalars come from `sourceMat` when supplied (so authoring on the
+  // hidden flat-terrain mesh — imperative or glb — drives the visible
+  // sphere-terrain reflectivity / colour). Falls back to the legacy
+  // matte-green dielectric defaults so callers that don't pass a source
+  // get the same look as before.
+  const src = sourceMat as THREE.MeshStandardMaterial | null | undefined
   const sphereMat = new THREE.MeshStandardMaterial({
-    color: TERRAIN_GREEN,
-    roughness: 0.95,
-    metalness: 0,
+    color: src?.color ? src.color.clone() : new THREE.Color(TERRAIN_GREEN),
+    roughness: src?.roughness ?? 0.95,
+    metalness: src?.metalness ?? 0,
+    emissive: src?.emissive ? src.emissive.clone() : new THREE.Color(0x000000),
+    emissiveIntensity: src?.emissiveIntensity ?? 1,
+    envMapIntensity: src?.envMapIntensity ?? 1,
   })
   const mesh = new THREE.Mesh(geom, sphereMat)
   mesh.name = 'sphere-terrain'
@@ -1351,7 +1385,17 @@ export function buildDiorama(opts: BuildDioramaOpts = {}): DioramaScene {
   // projection pipeline as every other prop. skipMeadow = true cuts the
   // grass meshes entirely — used by saveDiorama so the exported glb stays
   // lean and the meadow rebuilds from code on load.
-  const grass = skipMeadow ? null : buildGrass(root)
+  //
+  // Honour grassRefs.activeMask: any earlier rebuildWithMask call (user
+  // upload, default-mask apply, or programmatic) stashes the current mask
+  // ImageData there. Reading it here means ANY rebuild path through
+  // buildDiorama preserves the mask automatically, not just the
+  // loadGlbDiorama swap path. Without this, a cascade rebuild (HDRI change,
+  // HMR, etc.) silently reverts to "no mask" and flattens the meadow.
+  const grass = skipMeadow ? null : buildGrass(root, {
+    maskImage:       grassRefs.activeMask ?? undefined,
+    flowerMaskImage: grassRefs.activeFlowerMask ?? undefined,
+  })
   if (grass) for (const m of grass.meshes) root.add(m)
 
   const update = (t: number) => {

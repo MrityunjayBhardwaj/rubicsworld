@@ -16,6 +16,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import type { DioramaScene } from './buildDiorama'
 import { buildGrass, grassRefs } from './buildGrass'
 import { weldCubeNetSeams } from './weldSeams'
+import { clearColliders, registerCollider } from '../world/colliderRefs'
 
 /** Collapse visually-identical materials onto a single shared instance.
  *  Fingerprint includes every property the sphere-projection onBeforeCompile
@@ -119,6 +120,37 @@ export async function loadGlbDiorama(
   // would otherwise cull edge-of-screen meshes.
   gltf.scene.traverse(c => { c.frustumCulled = false })
 
+  // Collider extraction. Blender's `rubics_collider` collection ships
+  // colliders with `userData.rubics_role === "collider"` (or
+  // `"collider_dyn"`). We hide them from render, exclude them from the
+  // walk-mode height-follow raycast (raycast = noop), and register their
+  // world AABB into colliderRefs for the player-vs-world test.
+  //
+  // Why hide instead of remove: dynamic colliders need their matrixWorld
+  // to keep updating (parent transforms / animations), which only happens
+  // while the mesh remains in the scene graph. Setting visible=false
+  // skips the render but keeps the matrix pipeline intact (P23: don't
+  // omit a mesh that consumers — here, dynamic-AABB recompute — still
+  // need to traverse).
+  //
+  // Why raycast=noop: the WalkControls height-follow raycast walks
+  // `scene.children` to find the topmost ground surface. Without the
+  // noop, an invisible cube wrapping a building would trick the player
+  // into "standing on" the cube's top face.
+  clearColliders()
+  // Pass 1 — flag colliders before render-path traversal: visible=false
+  // (skip rendering) and raycast=noop (skip the height-follow probe so a
+  // building's collider cube doesn't become a roof to stand on). Collected
+  // here, registered post-parenting in pass 2 once matrixWorld is final.
+  const colliderQueue: { mesh: THREE.Object3D; kind: 'static' | 'dynamic' }[] = []
+  gltf.scene.traverse(c => {
+    const role = (c.userData && (c.userData as { rubics_role?: string }).rubics_role) || ''
+    if (role !== 'collider' && role !== 'collider_dyn') return
+    c.visible = false
+    ;(c as THREE.Mesh).raycast = () => {}
+    colliderQueue.push({ mesh: c, kind: role === 'collider_dyn' ? 'dynamic' : 'static' })
+  })
+
   // Deduplicate materials. Blender's glTF exporter hands every mesh its own
   // material instance even when they're visually identical — a 150-mesh
   // diorama commonly comes in with 100+ unique materials. Each unique
@@ -131,6 +163,22 @@ export async function loadGlbDiorama(
   dedupeMaterials(gltf.scene)
 
   root.add(gltf.scene)
+
+  // Pass 2 — colliders: now that gltf.scene is parented to `root`, the
+  // collider meshes' matrixWorld is final. Register their world AABB into
+  // colliderRefs so WalkControls can test against them. Order matters:
+  // dedupeMaterials and weldCubeNetSeams skip mesh material/geometry on
+  // the hidden collider boxes (we don't render them), so registering here
+  // captures the un-touched flat-net AABB which is the same coordinate
+  // frame the player's flat coords live in.
+  root.updateMatrixWorld(true)
+  for (const { mesh, kind } of colliderQueue) registerCollider(mesh, kind)
+  if (import.meta.env?.DEV && colliderQueue.length > 0) {
+    const s = colliderQueue.filter(c => c.kind === 'static').length
+    const d = colliderQueue.length - s
+    // eslint-disable-next-line no-console
+    console.log(`[diorama] colliders: ${s} static, ${d} dynamic`)
+  }
 
   // Cube-net seam weld (Phase A — intra-mesh, flat-space).
   // Vertices near face-block boundary lines get snapped to exact seam
