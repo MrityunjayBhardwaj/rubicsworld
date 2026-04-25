@@ -8,7 +8,7 @@
 
 import * as THREE from 'three'
 import registryJson from './registry.json'
-import { SYNTHS } from './synth'
+import { SYNTHS, SYNTH_LOOPS, type SynthLoopHandle } from './synth'
 
 export type AnchorRef = 'world' | 'camera_motion' | `object:${string}`
 
@@ -40,8 +40,14 @@ type Modulator = () => number
 
 interface LoopRuntime {
   def: LoopDef
+  // Sample-backed loops use a THREE.Audio / PositionalAudio (whose internal
+  // gain we set via setVolume each tick).
   node: THREE.Audio | THREE.PositionalAudio | null
-  pendingAnchor: string | null  // anchor id we're waiting on
+  // Synth-backed loops bypass three.js entirely and own a raw GainNode that
+  // the bus modulates per frame.
+  synth: SynthLoopHandle | null
+  synthGain: GainNode | null
+  pendingAnchor: string | null  // anchor id we're waiting on (sample loops)
   buffer: AudioBuffer | null
 }
 
@@ -78,6 +84,8 @@ class AudioBus {
     this.sfxGain.connect(this.masterGain)
     this.masterGain.connect(ctx.destination)
     this.applyGraphGains()
+    // Boot all loops once the graph exists.
+    this.bootLoops()
   }
 
   detachListener() {
@@ -145,10 +153,10 @@ class AudioBus {
     if (!this.listener) return
     // Update loop volumes from modulators.
     for (const lr of this.loops.values()) {
-      if (!lr.node || !lr.def.modulator) continue
-      const mod = this.modulatorValue(lr.def.modulator)
+      const mod = lr.def.modulator ? this.modulatorValue(lr.def.modulator) : 1
       const finalGain = this.computeFinalGain(lr.def.key, lr.def.vol, mod)
-      lr.node.setVolume(finalGain)
+      if (lr.node) lr.node.setVolume(finalGain)
+      if (lr.synthGain) lr.synthGain.gain.value = finalGain
     }
   }
 
@@ -193,11 +201,11 @@ class AudioBus {
     }
   }
 
-  // Loop bookkeeping — buffers loaded in commit 3+.
+  // Loop bookkeeping. Idempotent — boot creates one runtime per definition.
   registerLoopRuntime(def: LoopDef): LoopRuntime {
     const existing = this.loops.get(def.key)
     if (existing) return existing
-    const lr: LoopRuntime = { def, node: null, pendingAnchor: null, buffer: null }
+    const lr: LoopRuntime = { def, node: null, synth: null, synthGain: null, pendingAnchor: null, buffer: null }
     this.loops.set(def.key, lr)
     return lr
   }
@@ -206,8 +214,63 @@ class AudioBus {
     return this.anchors.get(id)
   }
 
-  // Placeholder — fully wired when buffers exist (commits 3-4).
-  private attachLoop(_lr: LoopRuntime) { /* commit 3-4 */ }
+  private bootLoops() {
+    for (const def of REGISTRY.loops) {
+      const lr = this.registerLoopRuntime(def)
+      // Skip if already attached/synthed.
+      if (lr.node || lr.synth) continue
+      this.attachLoop(lr)
+    }
+  }
+
+  // Wire up the audio graph for one loop. For synth sources we build a
+  // WebAudio chain immediately. For sample sources (commit 4) we'd load the
+  // buffer and create a THREE.Audio / PositionalAudio.
+  private attachLoop(lr: LoopRuntime) {
+    if (!this.listener || !this.ambientGain || !this.sfxGain) return
+    const ctx = this.listener.context
+    const isAmbient = this.categoryFor(lr.def.key) === 'ambient'
+    const out = isAmbient ? this.ambientGain : this.sfxGain
+
+    if (lr.def.src.startsWith('synth:')) {
+      const fnName = lr.def.src.slice('synth:'.length)
+      const fn = SYNTH_LOOPS[fnName]
+      if (!fn) return
+
+      // For object: anchors of synth loops, pipe into a PositionalAudio so
+      // distance attenuation kicks in. For world / camera_motion, plain 2D.
+      if (lr.def.anchor.startsWith('object:')) {
+        const id = lr.def.anchor.slice('object:'.length)
+        const target = this.anchors.get(id)
+        if (!target) {
+          lr.pendingAnchor = id
+          return
+        }
+        const handle = fn(ctx)
+        const positional = new THREE.PositionalAudio(this.listener)
+        positional.setNodeSource(handle.source as AudioScheduledSourceNode)
+        if (lr.def.refDist != null) positional.setRefDistance(lr.def.refDist)
+        if (lr.def.maxDist != null) positional.setMaxDistance(lr.def.maxDist)
+        if (lr.def.rolloff != null) positional.setRolloffFactor(lr.def.rolloff)
+        positional.setDistanceModel('inverse')
+        target.add(positional)
+        lr.node = positional
+        lr.synth = handle
+        return
+      }
+
+      // 2D synth loop: source → per-loop gain → category gain → master.
+      const handle = fn(ctx)
+      const gain = ctx.createGain()
+      gain.gain.value = 0
+      handle.source.connect(gain).connect(out)
+      lr.synth = handle
+      lr.synthGain = gain
+      return
+    }
+
+    // Sample-backed loop — implementation in commit 4.
+  }
 
   // Lifecycle helper for the visibility gate (commit 5).
   context(): AudioContext | null {
