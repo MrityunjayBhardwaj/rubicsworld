@@ -151,10 +151,14 @@ class AudioBus {
   // Internal — called by a per-frame tick.
   tick() {
     if (!this.listener) return
-    // Update loop volumes from modulators.
+    // Update loop volumes from modulators. AudioParam.value rejects non-
+    // finite — guard at the assignment site so an early-frame race that
+    // produces NaN/Infinity (e.g. modulator reading an uninitialised
+    // uniform) doesn't throw.
     for (const lr of this.loops.values()) {
       const mod = lr.def.modulator ? this.modulatorValue(lr.def.modulator) : 1
-      const finalGain = this.computeFinalGain(lr.def.key, lr.def.vol, mod)
+      const raw = this.computeFinalGain(lr.def.key, lr.def.vol, mod)
+      const finalGain = Number.isFinite(raw) ? raw : 0
       if (lr.node) lr.node.setVolume(finalGain)
       if (lr.synthGain) lr.synthGain.gain.value = finalGain
     }
@@ -164,9 +168,10 @@ class AudioBus {
     if (name === 'windStrength' && this.windStrengthGetter) {
       // Wind uniform ranges 0..4 in Leva; map to 0..1 with a soft knee.
       const ws = this.windStrengthGetter()
-      return Math.min(1, ws / 2.0)
+      const v = Math.min(1, ws / 2.0)
+      return Number.isFinite(v) ? v : 0
     }
-    if (name === 'cameraOrbitSpeed') return this.cameraOrbitSpeed
+    if (name === 'cameraOrbitSpeed') return Number.isFinite(this.cameraOrbitSpeed) ? this.cameraOrbitSpeed : 0
     const fn = this.modulators.get(name)
     return fn ? fn() : 1
   }
@@ -188,9 +193,9 @@ class AudioBus {
     const masterEffective = (this.masterMute || this.categoryMute.master) ? 0 : this.masterVol * this.categoryVol.master
     const ambientEffective = this.categoryMute.ambient ? 0 : this.categoryVol.ambient
     const sfxEffective = this.categoryMute.sfx ? 0 : this.categoryVol.sfx
-    this.masterGain.gain.value = masterEffective
-    this.ambientGain.gain.value = ambientEffective
-    this.sfxGain.gain.value = sfxEffective
+    this.masterGain.gain.value = Number.isFinite(masterEffective) ? masterEffective : 0
+    this.ambientGain.gain.value = Number.isFinite(ambientEffective) ? ambientEffective : 0
+    this.sfxGain.gain.value = Number.isFinite(sfxEffective) ? sfxEffective : 0
   }
 
   private applyAllVolumes() {
