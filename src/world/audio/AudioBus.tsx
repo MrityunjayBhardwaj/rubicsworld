@@ -61,6 +61,17 @@ export function AudioBus() {
       flockAnchor.current = a
       audioBus.registerAnchor('birds_flock', a)
     }
+    // Scene-origin anchor: a virtual Object3D parked at (0,0,0). Loops can
+    // anchor here for "centre of the sphere" positional sources (ambient
+    // wind for the world, etc) so distance-based falloff is keyed off the
+    // sphere centre.
+    if (!audioBus.getAnchor('scene_center')) {
+      const c = new THREE.Object3D()
+      c.name = 'scene_center'
+      // Position is (0,0,0) by default — keep it there.
+      scene.add(c)
+      audioBus.registerAnchor('scene_center', c)
+    }
     return () => {
       // Don't detach the listener on unmount: StrictMode double-invokes
       // mount/unmount in dev, and ripping the listener off mid-session

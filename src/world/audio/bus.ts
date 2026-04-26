@@ -44,6 +44,11 @@ export interface LoopDef {
   refDist?: number
   maxDist?: number
   rolloff?: number
+  // Convenience: if `radius` is set, the bus configures the underlying
+  // PositionalAudio with refDist=0, maxDist=radius, rolloff=1 → smooth
+  // linear falloff from full gain at the source to zero at the radius.
+  // Visualised as a wireframe reach sphere by SoundVisualizer.
+  radius?: number
 }
 export interface EventDef {
   key: string
@@ -62,14 +67,21 @@ export const REGISTRY = registryJson as Registry
 
 type Modulator = () => number
 
-// Promote legacy `vol`/`modulator` shorthand to params.vol so the rest of
-// the bus only has to handle one shape. Idempotent.
+// Promote legacy `vol`/`modulator` shorthand to params.vol AND expand the
+// `radius` shorthand into refDist/maxDist/rolloff so the rest of the bus
+// only has to handle one shape. Idempotent.
 function normalizeLoopDef(def: LoopDef): LoopDef {
   const params: Record<string, ParamSpec> = { ...(def.params ?? {}) }
   if (params.vol == null && def.vol != null) {
     params.vol = { base: def.vol, modulator: def.modulator }
   }
-  return { ...def, params }
+  let { refDist, maxDist, rolloff } = def
+  if (def.radius != null) {
+    refDist = refDist ?? 0
+    maxDist = maxDist ?? def.radius
+    rolloff = rolloff ?? 1
+  }
+  return { ...def, params, refDist, maxDist, rolloff }
 }
 
 interface LoopRuntime {
@@ -81,11 +93,39 @@ interface LoopRuntime {
   // the bus modulates per frame.
   synth: SynthLoopHandle | null
   synthGain: GainNode | null
+  // Sample-backed loops can carry BiquadFilters (lowpass/highpass/bandpass)
+  // inserted between source and listener via THREE.Audio.setFilters(). Maps
+  // filter type → BiquadFilterNode so applyParams can find them by name.
+  filters: Record<string, BiquadFilterNode> | null
   pendingAnchor: string | null  // anchor id we're waiting on (sample loops)
   buffer: AudioBuffer | null
   // Last computed gain (post-modulator, post-override, post-master). Read
   // by the visualiser to draw a live level meter at each anchor.
   lastGain: number
+}
+
+// Build the BiquadFilters declared by a loop's params. Keys are the filter
+// type — a registry param named `lowpass` / `highpass` / `bandpass` becomes
+// the matching BiquadFilter, returned in a stable order so setFilters()
+// receives a deterministic chain (highpass → bandpass → lowpass = "trim
+// bottom, focus middle, trim top" in that order).
+const FILTER_NAMES = ['highpass', 'bandpass', 'lowpass'] as const
+function buildFiltersForParams(ctx: AudioContext, params: Record<string, ParamSpec> | undefined): { nodes: BiquadFilterNode[]; map: Record<string, BiquadFilterNode> } {
+  const map: Record<string, BiquadFilterNode> = {}
+  const nodes: BiquadFilterNode[] = []
+  if (!params) return { nodes, map }
+  for (const name of FILTER_NAMES) {
+    if (!params[name]) continue
+    const f = ctx.createBiquadFilter()
+    f.type = name as BiquadFilterType
+    // Sensible defaults so the filter is transparent until applyParams writes
+    // a real value (avoids a brief silence on attach if mod is mid-range).
+    f.frequency.value = name === 'lowpass' ? 22000 : name === 'highpass' ? 20 : 1000
+    f.Q.value = 0.7
+    map[name] = f
+    nodes.push(f)
+  }
+  return { nodes, map }
 }
 
 class AudioBus {
@@ -406,7 +446,15 @@ class AudioBus {
         continue
       }
 
-      // Custom param — only synth-exposed audio params can receive it.
+      // Filter params (lowpass / highpass / bandpass) — write to the
+      // sample-loop's BiquadFilter created at attach time, OR to a synth's
+      // exposed AudioParam of the same name (synth chains often expose
+      // their internal filter).
+      const filt = lr.filters?.[name]
+      if (filt) {
+        filt.frequency.value = value
+        continue
+      }
       const ap = lr.synth?.params?.[name]
       if (ap) ap.value = value
     }
@@ -473,7 +521,7 @@ class AudioBus {
   registerLoopRuntime(def: LoopDef): LoopRuntime {
     const existing = this.loops.get(def.key)
     if (existing) return existing
-    const lr: LoopRuntime = { def: normalizeLoopDef(def), node: null, synth: null, synthGain: null, pendingAnchor: null, buffer: null, lastGain: 0 }
+    const lr: LoopRuntime = { def: normalizeLoopDef(def), node: null, synth: null, synthGain: null, filters: null, pendingAnchor: null, buffer: null, lastGain: 0 }
     this.loops.set(def.key, lr)
     return lr
   }
@@ -564,6 +612,9 @@ class AudioBus {
         if (lr.def.maxDist != null) positional.setMaxDistance(lr.def.maxDist)
         if (lr.def.rolloff != null) positional.setRolloffFactor(lr.def.rolloff)
         positional.setDistanceModel('linear'); if (lr.def.rolloff == null) positional.setRolloffFactor(1)
+        const filters = buildFiltersForParams(ctx, lr.def.params)
+        if (filters.nodes.length) positional.setFilters(filters.nodes)
+        lr.filters = filters.map
         positional.setVolume(0)
         target.add(positional)
         const ovr = this.loopOverrides.get(lr.def.key)
@@ -577,6 +628,9 @@ class AudioBus {
       const a = new THREE.Audio(this.listener)
       a.setBuffer(buf)
       a.setLoop(true)
+      const filters = buildFiltersForParams(ctx, lr.def.params)
+      if (filters.nodes.length) a.setFilters(filters.nodes)
+      lr.filters = filters.map
       a.setVolume(0)
       const ovr = this.loopOverrides.get(lr.def.key)
       if (ovr?.speed != null) a.setPlaybackRate(ovr.speed)
