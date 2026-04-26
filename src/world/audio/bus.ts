@@ -67,21 +67,37 @@ export const REGISTRY = registryJson as Registry
 
 type Modulator = () => number
 
-// Per-frame `param.value = X` writes cause zipper noise — Web Audio sees
-// each frame's value as an instantaneous step (sample discontinuity) and
-// the result is the classic clicky/choppy artifact at frame boundaries.
-// setTargetAtTime queues an exponential approach to the target at the
-// audio rate; tau≈20ms tracks motion smoothly without perceptible lag
-// (one-tau ≈63% closed; ~80ms fully closed).
-const SMOOTH_TAU_GAIN  = 0.025
-const SMOOTH_TAU_RATE  = 0.05   // playback rate likes a slightly slower ramp
-const SMOOTH_TAU_FILT  = 0.04   // filter sweeps audibly chirp if too fast
-function smoothSet(param: AudioParam | undefined, target: number, ctx: AudioContext, tau = SMOOTH_TAU_GAIN) {
+// Per-frame writes need to ramp at audio rate, not step at frame rate.
+//
+// setTargetAtTime is an unbounded exponential — repeatedly cancel-and-
+// restarting it at frame boundaries fights with itself (Chromium has a
+// known issue where overlapping setTargetAtTime calls produce subtle
+// glitches). The clean pattern is:
+//
+//   cancelAndHoldAtTime(now)            ← preserve in-flight value
+//   linearRampToValueAtTime(target, now + horizon)  ← deterministic ramp
+//
+// horizon is a small lead time (~33ms) so the ramp completes by the next
+// expected frame even at 30fps. cancelAndHoldAtTime is widely supported
+// in modern browsers; cancelScheduledValues is the fallback (loses the
+// in-flight value but still better than direct .value =).
+const SMOOTH_HORIZON_GAIN = 1 / 30
+const SMOOTH_HORIZON_RATE = 1 / 20   // pitch sweeps want a touch slower
+const SMOOTH_HORIZON_FILT = 1 / 25   // filter sweeps audibly chirp if too fast
+const lastWriteCache = new WeakMap<AudioParam, number>()
+function smoothSet(param: AudioParam | undefined, target: number, ctx: AudioContext, horizon = SMOOTH_HORIZON_GAIN) {
   if (!param || !Number.isFinite(target)) return
-  // Cancel any pending automations first so a slider drag doesn't queue
-  // up overlapping ramps that fight each other.
-  try { param.cancelScheduledValues(ctx.currentTime) } catch { /* ignore */ }
-  param.setTargetAtTime(target, ctx.currentTime, tau)
+  // Web Audio doesn't deduplicate automation events — repeatedly queuing
+  // the same target floods the timeline. Skip if the change is below
+  // perceptual threshold for this param's range.
+  const last = lastWriteCache.get(param)
+  if (last != null && Math.abs(last - target) < 1e-4) return
+  lastWriteCache.set(param, target)
+  const now = ctx.currentTime
+  const p = param as AudioParam & { cancelAndHoldAtTime?: (t: number) => AudioParam }
+  if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(now)
+  else param.cancelScheduledValues(now)
+  param.linearRampToValueAtTime(target, now + horizon)
 }
 
 // Promote legacy `vol`/`modulator` shorthand to params.vol AND expand the
@@ -503,10 +519,10 @@ class AudioBus {
         // (setNodeSource path) — try/catch absorbs it.
         try {
           const src = (lr.node as unknown as { source?: { playbackRate?: AudioParam } } | null)?.source
-          if (src?.playbackRate) smoothSet(src.playbackRate, r, ctx, SMOOTH_TAU_RATE)
+          if (src?.playbackRate) smoothSet(src.playbackRate, r, ctx, SMOOTH_HORIZON_RATE)
         } catch { /* ignore */ }
         const ap = lr.synth?.params?.rate
-        if (ap) smoothSet(ap, r, ctx, SMOOTH_TAU_RATE)
+        if (ap) smoothSet(ap, r, ctx, SMOOTH_HORIZON_RATE)
         continue
       }
 
@@ -514,11 +530,11 @@ class AudioBus {
       // sample-loop's BiquadFilter, OR a synth-exposed AudioParam.
       const filt = lr.filters?.[name]
       if (filt) {
-        smoothSet(filt.frequency, value, ctx, SMOOTH_TAU_FILT)
+        smoothSet(filt.frequency, value, ctx, SMOOTH_HORIZON_FILT)
         continue
       }
       const ap = lr.synth?.params?.[name]
-      if (ap) smoothSet(ap, value, ctx, SMOOTH_TAU_FILT)
+      if (ap) smoothSet(ap, value, ctx, SMOOTH_HORIZON_FILT)
     }
   }
 
