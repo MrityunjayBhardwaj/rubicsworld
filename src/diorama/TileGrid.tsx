@@ -41,10 +41,17 @@ function registerDioramaAudioAnchors(root: THREE.Object3D) {
   const windmill = root.getObjectByName('windmill')
   const birds = root.getObjectByName('birds')
   const pond = root.getObjectByName('pond')
-  if (car) audioBus.registerAnchor('car', car)
-  if (windmill) audioBus.registerAnchor('windmill', windmill)
+  // Each group gets a centre-of-mass child Object3D so audio + visualiser
+  // sphere attach at the visual middle (Box3 centre) instead of the group's
+  // local (0,0,0). For the windmill the local origin is at the foot of the
+  // tower; for the car it's below the wheels; correcting those matters.
+  if (car) audioBus.registerAnchorAtCenter('car', car)
+  if (windmill) audioBus.registerAnchorAtCenter('windmill', windmill)
+  if (pond) audioBus.registerAnchorAtCenter('pond', pond)
+  // birds_group stays as-is — it's the parent for the boids centroid loop
+  // (each frame we average the bird-mesh world positions into the
+  // birds_flock virtual anchor). The auto-origin would distort the average.
   if (birds) audioBus.registerAnchor('birds_group', birds)
-  if (pond) audioBus.registerAnchor('pond', pond)
 }
 function unregisterDioramaAudioAnchors() {
   audioBus.unregisterAnchor('car')

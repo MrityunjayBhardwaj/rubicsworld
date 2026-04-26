@@ -213,6 +213,32 @@ class AudioBus {
     }
   }
 
+  // Register a group's center-of-mass (Box3 centre) as the audio anchor.
+  // Drops a child Object3D at the centre and registers THAT — so
+  // PositionalAudio + the visualiser sphere both attach at the visual
+  // middle of the group instead of its local-space (0,0,0) origin.
+  // Idempotent — re-registering reuses the existing centre child.
+  registerAnchorAtCenter(id: string, group: THREE.Object3D) {
+    const childName = `__audio_origin_${id}`
+    let origin = group.getObjectByName(childName) as THREE.Object3D | undefined
+    if (!origin) {
+      // Force matrices fresh so Box3 reads accurate world bounds, then
+      // convert the world centre back into the group's local frame so
+      // the child holds steady when the group's own transform animates
+      // (the car driving around the equator, for example).
+      group.updateMatrixWorld(true)
+      const box = new THREE.Box3().setFromObject(group)
+      const center = new THREE.Vector3()
+      box.getCenter(center)
+      group.worldToLocal(center)
+      origin = new THREE.Object3D()
+      origin.name = childName
+      origin.position.copy(center)
+      group.add(origin)
+    }
+    this.registerAnchor(id, origin)
+  }
+
   unregisterAnchor(id: string) {
     this.anchors.delete(id)
     // Stop and detach loops bound to this anchor; mark them pending.
