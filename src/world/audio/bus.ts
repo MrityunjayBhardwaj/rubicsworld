@@ -135,6 +135,10 @@ class AudioBus {
   // Grass-swipe intensity 0..1; cursor-on-grass × cursor speed, written
   // by the TileGrid hover-stamp loop.
   private grassSwipeIntensity = 0
+  // Car speed 0..1 — frame-to-frame world velocity of the 'car' anchor
+  // normalised to the car loop's nominal CAR_SPEED. Drives the engine's
+  // oscFreq + lowpass via param bindings.
+  private carSpeed = 0
 
   attachListener(camera: THREE.Camera) {
     if (this.listener && this.listener.parent === camera) return
@@ -207,6 +211,10 @@ class AudioBus {
 
   setGrassSwipeIntensity(v: number) {
     this.grassSwipeIntensity = Math.max(0, Math.min(1, v))
+  }
+
+  setCarSpeed(v: number) {
+    this.carSpeed = Math.max(0, Math.min(1, v))
   }
 
   // ── Per-sound overrides ─────────────────────────────────────────────
@@ -424,6 +432,7 @@ class AudioBus {
     if (name === 'themeWalkDuck') return Number.isFinite(this.themeWalkDuck) ? this.themeWalkDuck : 1
     if (name === 'awayFromPond') return 1 - 0.7 * (Number.isFinite(this.pondProximity) ? this.pondProximity : 0)
     if (name === 'grassSwipeIntensity') return Number.isFinite(this.grassSwipeIntensity) ? this.grassSwipeIntensity : 0
+    if (name === 'carSpeed') return Number.isFinite(this.carSpeed) ? this.carSpeed : 0
     const fn = this.modulators.get(name)
     return fn ? fn() : 1
   }
