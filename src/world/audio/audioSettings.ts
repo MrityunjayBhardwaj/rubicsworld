@@ -11,7 +11,8 @@ export interface AudioSettings {
   ambient: { mute: boolean; vol: number }
   sfx:     { mute: boolean; vol: number }
   showVisualizer: boolean
-  loops:   Record<string, { mute: boolean; vol: number; speed: number }>
+  // Loops carry an optional radius (meters) for positional loops.
+  loops:   Record<string, { mute: boolean; vol: number; speed: number; radius?: number }>
   events:  Record<string, { mute: boolean; vol: number; speed: number }>
 }
 
@@ -22,11 +23,13 @@ type LevaValues = Record<string, boolean | number>
 export function serialize(v: LevaValues): AudioSettings {
   const loops: AudioSettings['loops'] = {}
   for (const def of REGISTRY.loops) {
-    loops[def.key] = {
+    const row: AudioSettings['loops'][string] = {
       mute:  Boolean(v[`${def.key}__mute`]),
       vol:   Number(v[`${def.key}__vol`]   ?? 1),
       speed: Number(v[`${def.key}__speed`] ?? 1),
     }
+    if (v[`${def.key}__radius`] != null) row.radius = Number(v[`${def.key}__radius`])
+    loops[def.key] = row
   }
   const events: AudioSettings['events'] = {}
   for (const def of REGISTRY.events) {
@@ -69,6 +72,7 @@ export function flatten(s: AudioSettings): LevaValues {
     out[`${key}__mute`]  = row.mute
     out[`${key}__vol`]   = row.vol
     out[`${key}__speed`] = row.speed
+    if (row.radius != null) out[`${key}__radius`] = row.radius
   }
   for (const [key, row] of Object.entries(s.events)) {
     if (!live.has(key)) continue
@@ -151,6 +155,10 @@ export function defaultsFlat(): LevaValues {
     out[`${def.key}__mute`]  = false
     out[`${def.key}__vol`]   = 1.0
     out[`${def.key}__speed`] = 1.0
+    const baseRadius = def.radius ?? def.maxDist
+    if (def.anchor.startsWith('object:') && baseRadius != null) {
+      out[`${def.key}__radius`] = baseRadius
+    }
   }
   for (const def of REGISTRY.events) {
     out[`${def.key}__mute`]  = false

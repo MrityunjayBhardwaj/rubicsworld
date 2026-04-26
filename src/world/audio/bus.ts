@@ -155,10 +155,11 @@ class AudioBus {
   private cameraOrbitSpeed = 0
   private windStrengthGetter: (() => number) | null = null
 
-  // Per-sound user overrides driven by the Audio panel. Each value is a
-  // multiplier applied on top of the registry's base vol / a 1.0 default
-  // playbackRate. mute=true forces gain to 0 regardless of vol.
-  private loopOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean }>()
+  // Per-sound user overrides driven by the Audio panel. vol/speed are
+  // multipliers on top of the registry base; mute forces 0; radius (meters)
+  // overrides the registry's `radius`/`maxDist` directly so user can drag
+  // the reach in real time.
+  private loopOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean; radius?: number }>()
   private eventOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean }>()
   // Slice-rotation rumble: target (0|1) is set by subscriptions.ts when
   // drag||anim transitions; tick() smooths the actual value with separate
@@ -258,15 +259,19 @@ class AudioBus {
   }
 
   // ── Per-sound overrides ─────────────────────────────────────────────
-  setLoopOverride(key: string, override: { vol?: number; speed?: number; mute?: boolean }) {
+  setLoopOverride(key: string, override: { vol?: number; speed?: number; mute?: boolean; radius?: number }) {
     const prev = this.loopOverrides.get(key) ?? {}
     const next = { ...prev, ...override }
     this.loopOverrides.set(key, next)
-    // Speed change must be pushed to the live source NOW (sample loops
-    // continue playing — there's no per-tick step that re-applies it).
+    // Push speed + radius to the live source NOW. Speed: setPlaybackRate
+    // (sample loops only). Radius: setMaxDistance on PositionalAudio so the
+    // reach edge moves immediately as the slider drags.
     const lr = this.loops.get(key)
     if (lr?.node && next.speed != null) {
       try { lr.node.setPlaybackRate(next.speed) } catch { /* ignore */ }
+    }
+    if (next.radius != null && lr?.node && lr.node instanceof THREE.PositionalAudio) {
+      try { lr.node.setMaxDistance(next.radius) } catch { /* ignore */ }
     }
   }
   setEventOverride(key: string, override: { vol?: number; speed?: number; mute?: boolean }) {
@@ -279,6 +284,16 @@ class AudioBus {
   getLastLoopGain(key: string): number {
     const lr = this.loops.get(key)
     return lr?.lastGain ?? 0
+  }
+
+  // Effective reach radius — override wins, then registry radius/maxDist,
+  // else 0 (non-positional). ReachSphere reads this so the wireframe
+  // tracks the panel slider.
+  getEffectiveRadius(key: string): number {
+    const ovr = this.loopOverrides.get(key)
+    if (ovr?.radius != null) return ovr.radius
+    const lr = this.loops.get(key)
+    return lr?.def.radius ?? lr?.def.maxDist ?? 0
   }
 
   // Diagnostic: dump every active loop's runtime state. Used from devtools
