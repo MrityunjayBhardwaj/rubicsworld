@@ -6,7 +6,7 @@
 // element (cheap, crisp text, no font asset). Position + gain bar update
 // each frame via refs — no per-frame React state churn.
 
-import { useRef, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, type CSSProperties } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { Html } from '@react-three/drei'
 import * as THREE from 'three'
@@ -63,8 +63,65 @@ export function SoundVisualizer() {
       {REGISTRY.loops.map(def => (
         <SoundMarker key={def.key} def={def} worldXOffset={worldXOffset[def.key] ?? 0} />
       ))}
+      {REGISTRY.loops.map(def => (
+        (def.anchor.startsWith('object:') && (def.maxDist != null || def.radius != null))
+          ? <ReachSphere key={`reach-${def.key}`} def={def} />
+          : null
+      ))}
     </group>
   )
+}
+
+// Wireframe sphere parented to the anchor showing the sound's effective
+// reach. Re-parents on anchor change. Opacity pulses with live gain so an
+// idle sound has a faint outline and an audible one glows. Lives in the
+// same Scene as the anchor (which may be the diorama dScene, not the
+// main R3F scene) — that way the sphere occludes correctly with whatever
+// rendered around the anchor.
+function ReachSphere({ def }: { def: LoopDef }) {
+  const mesh = useMemo(() => {
+    const geom = new THREE.SphereGeometry(1, 28, 18)
+    const mat = new THREE.MeshBasicMaterial({
+      wireframe: true,
+      transparent: true,
+      opacity: 0.16,
+      color: '#7af6c8',
+      depthWrite: false,
+    })
+    const m = new THREE.Mesh(geom, mat)
+    m.name = `reach_${def.key}`
+    m.frustumCulled = false
+    return m
+  }, [def.key])
+
+  const parentRef = useRef<THREE.Object3D | null>(null)
+
+  useEffect(() => {
+    return () => {
+      mesh.parent?.remove(mesh)
+      mesh.geometry.dispose()
+      ;(mesh.material as THREE.Material).dispose()
+    }
+  }, [mesh])
+
+  useFrame(() => {
+    const radius = def.radius ?? def.maxDist ?? 0
+    if (radius <= 0) return
+    const id = def.anchor.slice('object:'.length)
+    const target = audioBus.getAnchor(id) ?? null
+    if (target !== parentRef.current) {
+      if (parentRef.current === mesh.parent) parentRef.current?.remove(mesh)
+      if (target) target.add(mesh)
+      parentRef.current = target
+    }
+    if (!target) return
+    mesh.scale.setScalar(radius)
+    const g = audioBus.getLastLoopGain(def.key)
+    const mat = mesh.material as THREE.MeshBasicMaterial
+    mat.opacity = 0.08 + Math.min(1, g) * 0.35
+  })
+
+  return null
 }
 
 function SoundMarker({ def, worldXOffset }: { def: LoopDef; worldXOffset: number }) {
