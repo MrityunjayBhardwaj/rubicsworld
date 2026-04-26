@@ -117,6 +117,10 @@ function makeNoiseBuffer(ctx: AudioContext, seconds = 4): AudioBuffer {
 
 // Outdoor ambient wind — soft, low-shelved noise with slow gain LFO so the
 // layer breathes rather than droning at constant level.
+//
+// Exposed params:
+//   `lowpass`  — filter cutoff Hz (open as wind strength rises)
+//   `lfoFreq`  — breathing rate Hz
 const windAmbient: SynthLoopFn = (ctx) => {
   const src = ctx.createBufferSource()
   src.buffer = makeNoiseBuffer(ctx, 5)
@@ -127,7 +131,6 @@ const windAmbient: SynthLoopFn = (ctx) => {
   filt.Q.value = 0.4
   const breathe = ctx.createGain()
   breathe.gain.value = 1.0
-  // LFO: 0.07 Hz with ±0.3 amplitude around 1.0.
   const lfo = ctx.createOscillator()
   lfo.frequency.value = 0.07
   const lfoGain = ctx.createGain()
@@ -139,11 +142,17 @@ const windAmbient: SynthLoopFn = (ctx) => {
   return {
     source: breathe,
     stop: () => { try { src.stop() } catch { /* ignore */ } try { lfo.stop() } catch { /* ignore */ } },
+    params: { lowpass: filt.frequency, lfoFreq: lfo.frequency },
   }
 }
 
 // Wind-cutting layer — narrower band, brighter, modulator-driven. Volume is
 // near 0 at rest; the bus ramps it up as cameraOrbitSpeed climbs.
+//
+// Exposed params:
+//   `bandpass` — bandpass center Hz (pitch up with camera speed for the
+//                "wind in your ears" effect)
+//   `highpass` — bottom-end roll-off
 const windCut: SynthLoopFn = (ctx) => {
   const src = ctx.createBufferSource()
   src.buffer = makeNoiseBuffer(ctx, 4)
@@ -160,24 +169,45 @@ const windCut: SynthLoopFn = (ctx) => {
   return {
     source: bp,
     stop: () => { try { src.stop() } catch { /* ignore */ } },
+    params: { bandpass: bp.frequency, highpass: hp.frequency },
   }
 }
 
-// Toy-car engine — stylised, looping low square + sub. Ramps slightly with
-// PositionalAudio distance falloff handled by the bus.
+// Toy-car engine — stylised, looping low square + sub. PositionalAudio
+// handles distance falloff. Engine pitch tracks RPM via the `oscFreq`
+// param; sub2 is locked at 1.5× via detune to keep the chord stable as
+// the fundamental moves.
+//
+// Exposed params:
+//   `oscFreq`  — fundamental frequency Hz (engine RPM)
+//   `lowpass`  — filter cutoff (open up as the engine works harder)
+//   `lfoFreq`  — detune-wobble rate
 const carEngine: SynthLoopFn = (ctx) => {
+  // Master pitch lives on a ConstantSource so both oscillators track one
+  // value when the bus writes `oscFreq`. sub plays at fundamental Hz; sub2
+  // plays at fundamental × 1.5 (perfect fifth) for a chunky engine chord.
+  const fundamental = ctx.createConstantSource()
+  fundamental.offset.value = 70
+
   const sub = ctx.createOscillator()
   sub.type = 'square'
-  sub.frequency.value = 70
+  sub.frequency.value = 0  // additive — receives all freq from fundamental
+  fundamental.connect(sub.frequency)
+
   const sub2 = ctx.createOscillator()
   sub2.type = 'sawtooth'
-  sub2.frequency.value = 105
+  sub2.frequency.value = 0
+  const fifthScale = ctx.createGain()
+  fifthScale.gain.value = 1.5
+  fundamental.connect(fifthScale).connect(sub2.frequency)
+
   // Slow detune wobble so it doesn't sit perfectly still.
   const lfo = ctx.createOscillator()
   lfo.frequency.value = 4.5
   const lfoGain = ctx.createGain()
   lfoGain.gain.value = 6
   lfo.connect(lfoGain).connect(sub2.detune)
+
   const filt = ctx.createBiquadFilter()
   filt.type = 'lowpass'
   filt.frequency.value = 600
@@ -186,6 +216,8 @@ const carEngine: SynthLoopFn = (ctx) => {
   mix.gain.value = 0.5
   sub.connect(filt).connect(mix)
   sub2.connect(filt)
+
+  fundamental.start()
   sub.start()
   sub2.start()
   lfo.start()
@@ -195,13 +227,20 @@ const carEngine: SynthLoopFn = (ctx) => {
       try { sub.stop() } catch { /* ignore */ }
       try { sub2.stop() } catch { /* ignore */ }
       try { lfo.stop() } catch { /* ignore */ }
+      try { fundamental.stop() } catch { /* ignore */ }
     },
+    params: { oscFreq: fundamental.offset, lowpass: filt.frequency, lfoFreq: lfo.frequency },
   }
 }
 
 // Windmill whoosh — bandpass-filtered noise modulated by a slow LFO that
 // matches the blade-pass cadence (4 blades × ω/2π Hz with ω≈0.8 rad/s ⇒
 // ~0.5 Hz). The result reads as a soft rhythmic "whoosh-whoosh".
+//
+// Exposed params:
+//   `lfoFreq`  — whoosh rate Hz (tracks blade rotation if you want it
+//                to vary; current windmill spins at constant 0.8 rad/s)
+//   `bandpass` — color of the whoosh
 const windmillWhoosh: SynthLoopFn = (ctx) => {
   const src = ctx.createBufferSource()
   src.buffer = makeNoiseBuffer(ctx, 4)
@@ -224,6 +263,35 @@ const windmillWhoosh: SynthLoopFn = (ctx) => {
   return {
     source: am,
     stop: () => { try { src.stop() } catch { /* ignore */ } try { lfo.stop() } catch { /* ignore */ } },
+    params: { lfoFreq: lfo.frequency, bandpass: bp.frequency },
+  }
+}
+
+// Grass swipe — soft pink noise through a bandpass that opens with cursor
+// speed. At rest the layer is muted via vol; when intensity rises the
+// bandpass sweeps up so the timbre brightens with the gesture rather than
+// just getting louder.
+//
+// Exposed params:
+//   `bandpass` — center freq Hz (sweep up with cursor velocity)
+//   `lowpass`  — top-end roll-off
+const grassSwipe: SynthLoopFn = (ctx) => {
+  const src = ctx.createBufferSource()
+  src.buffer = makeNoiseBuffer(ctx, 3)
+  src.loop = true
+  const bp = ctx.createBiquadFilter()
+  bp.type = 'bandpass'
+  bp.frequency.value = 1500
+  bp.Q.value = 1.6
+  const lp = ctx.createBiquadFilter()
+  lp.type = 'lowpass'
+  lp.frequency.value = 4000
+  src.connect(bp).connect(lp)
+  src.start()
+  return {
+    source: lp,
+    stop: () => { try { src.stop() } catch { /* ignore */ } },
+    params: { bandpass: bp.frequency, lowpass: lp.frequency },
   }
 }
 
@@ -276,4 +344,5 @@ export const SYNTH_LOOPS: Record<string, SynthLoopFn> = {
   carEngine,
   windmillWhoosh,
   birdsFlock,
+  grassSwipe,
 }
