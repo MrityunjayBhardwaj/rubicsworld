@@ -12,14 +12,34 @@ import { SYNTHS, SYNTH_LOOPS, type SynthLoopHandle } from './synth'
 
 export type AnchorRef = 'world' | 'camera_motion' | `object:${string}`
 
+// Per-param binding spec. `base × modulator` is the simple knob (volume,
+// playbackRate). `min`/`max` enables remapping the modulator's 0..1 range
+// to absolute values (e.g. mapping `cameraOrbitSpeed` 0..1 to lowpass
+// 800..22000 Hz). `invert: true` flips the mapping (modulator=1 maps to
+// min, modulator=0 maps to max — useful for filters that should *close*
+// as a metric drops).
+export interface ParamSpec {
+  base?: number
+  modulator?: string | string[]
+  min?: number
+  max?: number
+  invert?: boolean
+}
+
 export interface LoopDef {
   key: string
   anchor: AnchorRef
   src: string
-  vol: number
-  // One named modulator OR a list combined multiplicatively. e.g.
-  // `['windStrength', 'awayFromPond']` makes the ambient wind fade in two
-  // dimensions: dialled-down wind strength AND player proximity to water.
+  // New shape: per-param bindings. Common keys:
+  //   `vol`     — volume (sample loops via setVolume; synth 2D via synthGain;
+  //               synth POSITIONAL via positional setVolume)
+  //   `rate`    — playbackRate for sample loops; OR synth's exposed AudioParam
+  //               named `rate` if defined by the synth handle
+  //   any other — must match a name in synth handle's exposed params
+  //               (e.g. `oscFreq`, `lowpass`, `bandpass`)
+  params?: Record<string, ParamSpec>
+  // Legacy shorthand: vol + modulator are auto-promoted to params.vol on load.
+  vol?: number
   modulator?: string | string[]
   refDist?: number
   maxDist?: number
@@ -41,6 +61,16 @@ export type Category = 'master' | 'ambient' | 'sfx'
 export const REGISTRY = registryJson as Registry
 
 type Modulator = () => number
+
+// Promote legacy `vol`/`modulator` shorthand to params.vol so the rest of
+// the bus only has to handle one shape. Idempotent.
+function normalizeLoopDef(def: LoopDef): LoopDef {
+  const params: Record<string, ParamSpec> = { ...(def.params ?? {}) }
+  if (params.vol == null && def.vol != null) {
+    params.vol = { base: def.vol, modulator: def.modulator }
+  }
+  return { ...def, params }
+}
 
 interface LoopRuntime {
   def: LoopDef
@@ -320,15 +350,57 @@ class AudioBus {
     // produces NaN/Infinity (e.g. modulator reading an uninitialised
     // uniform) doesn't throw.
     for (const lr of this.loops.values()) {
-      const ovr = this.loopOverrides.get(lr.def.key)
-      const baseVol = lr.def.vol * (ovr?.vol ?? 1)
-      const muted = ovr?.mute === true
-      const mod = this.combinedModulator(lr.def.modulator)
-      const raw = muted ? 0 : this.computeFinalGain(lr.def.key, baseVol, mod)
-      const finalGain = Number.isFinite(raw) ? raw : 0
-      lr.lastGain = finalGain
-      if (lr.node) lr.node.setVolume(finalGain)
-      if (lr.synthGain) lr.synthGain.gain.value = finalGain
+      this.applyParams(lr)
+    }
+  }
+
+  // Compute and write every param binding for one loop.
+  //   `vol`  → master/category-aware setVolume / synthGain.gain
+  //   `rate` → setPlaybackRate (samples) AND/OR handle.params.rate.value (synth)
+  //   any other → handle.params[name].value (synth-exposed AudioParams only)
+  private applyParams(lr: LoopRuntime) {
+    const ovr = this.loopOverrides.get(lr.def.key)
+    const muted = ovr?.mute === true
+    const params = lr.def.params ?? {}
+
+    for (const [name, spec] of Object.entries(params)) {
+      const mod = this.combinedModulator(spec.modulator)
+      // Two mapping shapes:
+      //   1. base × mod  (default — typical for vol)
+      //   2. min..max remap of mod  (for absolute audio params like Hz)
+      let value: number
+      if (spec.min != null && spec.max != null) {
+        const t = spec.invert ? (1 - mod) : mod
+        value = spec.min + t * (spec.max - spec.min)
+      } else {
+        value = (spec.base ?? 1) * mod
+      }
+
+      if (name === 'vol') {
+        const userVol = ovr?.vol ?? 1
+        const raw = muted ? 0 : this.computeFinalGain(lr.def.key, value * userVol, 1)
+        const finalGain = Number.isFinite(raw) ? raw : 0
+        lr.lastGain = finalGain
+        if (lr.node) lr.node.setVolume(finalGain)
+        if (lr.synthGain) lr.synthGain.gain.value = finalGain
+        continue
+      }
+
+      if (!Number.isFinite(value)) continue
+      if (name === 'rate') {
+        const speedMul = ovr?.speed ?? 1
+        const r = value * speedMul
+        if (lr.node) {
+          try { lr.node.setPlaybackRate(r) } catch { /* synth-backed positional has no rate */ }
+        }
+        const ap = lr.synth?.params?.rate
+        if (ap) ap.value = r
+        continue
+      }
+
+      // Custom param — only synth-exposed audio params can receive it.
+      const ap = lr.synth?.params?.[name]
+      if (ap) ap.value = value
     }
   }
 
@@ -385,21 +457,14 @@ class AudioBus {
   }
 
   private applyAllVolumes() {
-    for (const lr of this.loops.values()) {
-      if (!lr.node) continue
-      const ovr = this.loopOverrides.get(lr.def.key)
-      const baseVol = lr.def.vol * (ovr?.vol ?? 1)
-      const muted = ovr?.mute === true
-      const mod = this.combinedModulator(lr.def.modulator)
-      lr.node.setVolume(muted ? 0 : this.computeFinalGain(lr.def.key, baseVol, mod))
-    }
+    for (const lr of this.loops.values()) this.applyParams(lr)
   }
 
   // Loop bookkeeping. Idempotent — boot creates one runtime per definition.
   registerLoopRuntime(def: LoopDef): LoopRuntime {
     const existing = this.loops.get(def.key)
     if (existing) return existing
-    const lr: LoopRuntime = { def, node: null, synth: null, synthGain: null, pendingAnchor: null, buffer: null, lastGain: 0 }
+    const lr: LoopRuntime = { def: normalizeLoopDef(def), node: null, synth: null, synthGain: null, pendingAnchor: null, buffer: null, lastGain: 0 }
     this.loops.set(def.key, lr)
     return lr
   }

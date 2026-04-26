@@ -8,6 +8,10 @@ type SynthFn = (ctx: AudioContext, out: AudioNode) => void
 export interface SynthLoopHandle {
   source: AudioNode  // node to connect to a downstream gain (loop's per-loop gain)
   stop: () => void
+  // Optional named AudioParams the bus can modulate from registry param
+  // bindings. Common keys: `oscFreq` (oscillator frequency), `bandpass`
+  // / `lowpass` / `highpass` (filter cutoffs), `lfoFreq` (modulator rate).
+  params?: Record<string, AudioParam>
 }
 export type SynthLoopFn = (ctx: AudioContext) => SynthLoopHandle
 
