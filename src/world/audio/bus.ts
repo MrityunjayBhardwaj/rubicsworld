@@ -67,6 +67,23 @@ export const REGISTRY = registryJson as Registry
 
 type Modulator = () => number
 
+// Per-frame `param.value = X` writes cause zipper noise — Web Audio sees
+// each frame's value as an instantaneous step (sample discontinuity) and
+// the result is the classic clicky/choppy artifact at frame boundaries.
+// setTargetAtTime queues an exponential approach to the target at the
+// audio rate; tau≈20ms tracks motion smoothly without perceptible lag
+// (one-tau ≈63% closed; ~80ms fully closed).
+const SMOOTH_TAU_GAIN  = 0.025
+const SMOOTH_TAU_RATE  = 0.05   // playback rate likes a slightly slower ramp
+const SMOOTH_TAU_FILT  = 0.04   // filter sweeps audibly chirp if too fast
+function smoothSet(param: AudioParam | undefined, target: number, ctx: AudioContext, tau = SMOOTH_TAU_GAIN) {
+  if (!param || !Number.isFinite(target)) return
+  // Cancel any pending automations first so a slider drag doesn't queue
+  // up overlapping ramps that fight each other.
+  try { param.cancelScheduledValues(ctx.currentTime) } catch { /* ignore */ }
+  param.setTargetAtTime(target, ctx.currentTime, tau)
+}
+
 // Promote legacy `vol`/`modulator` shorthand to params.vol AND expand the
 // `radius` shorthand into refDist/maxDist/rolloff so the rest of the bus
 // only has to handle one shape. Idempotent.
@@ -448,15 +465,14 @@ class AudioBus {
   //   `rate` → setPlaybackRate (samples) AND/OR handle.params.rate.value (synth)
   //   any other → handle.params[name].value (synth-exposed AudioParams only)
   private applyParams(lr: LoopRuntime) {
+    if (!this.listener) return
+    const ctx = this.listener.context
     const ovr = this.loopOverrides.get(lr.def.key)
     const muted = ovr?.mute === true
     const params = lr.def.params ?? {}
 
     for (const [name, spec] of Object.entries(params)) {
       const mod = this.combinedModulator(spec.modulator)
-      // Two mapping shapes:
-      //   1. base × mod  (default — typical for vol)
-      //   2. min..max remap of mod  (for absolute audio params like Hz)
       let value: number
       if (spec.min != null && spec.max != null) {
         const t = spec.invert ? (1 - mod) : mod
@@ -470,8 +486,11 @@ class AudioBus {
         const raw = muted ? 0 : this.computeFinalGain(lr.def.key, value * userVol, 1)
         const finalGain = Number.isFinite(raw) ? raw : 0
         lr.lastGain = finalGain
-        if (lr.node) lr.node.setVolume(finalGain)
-        if (lr.synthGain) lr.synthGain.gain.value = finalGain
+        // Bypass THREE.Audio.setVolume / direct .value writes — those step
+        // sample-discontinuously and zipper at frame boundaries. Smooth via
+        // the underlying gain AudioParam.
+        if (lr.node) smoothSet(lr.node.gain.gain, finalGain, ctx)
+        if (lr.synthGain) smoothSet(lr.synthGain.gain, finalGain, ctx)
         continue
       }
 
@@ -479,25 +498,27 @@ class AudioBus {
       if (name === 'rate') {
         const speedMul = ovr?.speed ?? 1
         const r = value * speedMul
-        if (lr.node) {
-          try { lr.node.setPlaybackRate(r) } catch { /* synth-backed positional has no rate */ }
-        }
+        // For samples: ramp the BufferSource's playbackRate AudioParam.
+        // For synth-backed nodes, lr.node.source isn't a BufferSource
+        // (setNodeSource path) — try/catch absorbs it.
+        try {
+          const src = (lr.node as unknown as { source?: { playbackRate?: AudioParam } } | null)?.source
+          if (src?.playbackRate) smoothSet(src.playbackRate, r, ctx, SMOOTH_TAU_RATE)
+        } catch { /* ignore */ }
         const ap = lr.synth?.params?.rate
-        if (ap) ap.value = r
+        if (ap) smoothSet(ap, r, ctx, SMOOTH_TAU_RATE)
         continue
       }
 
-      // Filter params (lowpass / highpass / bandpass) — write to the
-      // sample-loop's BiquadFilter created at attach time, OR to a synth's
-      // exposed AudioParam of the same name (synth chains often expose
-      // their internal filter).
+      // Filter params (lowpass / highpass / bandpass) — smooth-sweep the
+      // sample-loop's BiquadFilter, OR a synth-exposed AudioParam.
       const filt = lr.filters?.[name]
       if (filt) {
-        filt.frequency.value = value
+        smoothSet(filt.frequency, value, ctx, SMOOTH_TAU_FILT)
         continue
       }
       const ap = lr.synth?.params?.[name]
-      if (ap) ap.value = value
+      if (ap) smoothSet(ap, value, ctx, SMOOTH_TAU_FILT)
     }
   }
 
@@ -539,19 +560,20 @@ class AudioBus {
   }
 
   private applyGraphGains() {
-    if (!this.masterGain || !this.ambientGain || !this.sfxGain) return
+    if (!this.masterGain || !this.ambientGain || !this.sfxGain || !this.listener) return
+    const ctx = this.listener.context
     const masterEffective = (this.masterMute || this.categoryMute.master) ? 0 : this.masterVol * this.categoryVol.master
     const ambientEffective = this.categoryMute.ambient ? 0 : this.categoryVol.ambient
     const sfxEffective = this.categoryMute.sfx ? 0 : this.categoryVol.sfx
-    this.masterGain.gain.value = Number.isFinite(masterEffective) ? masterEffective : 0
-    this.ambientGain.gain.value = Number.isFinite(ambientEffective) ? ambientEffective : 0
-    this.sfxGain.gain.value = Number.isFinite(sfxEffective) ? sfxEffective : 0
+    smoothSet(this.masterGain.gain,  masterEffective,  ctx)
+    smoothSet(this.ambientGain.gain, ambientEffective, ctx)
+    smoothSet(this.sfxGain.gain,     sfxEffective,     ctx)
     // Belt-and-suspenders: slave THREE.AudioListener's own master gain to
     // master mute too. THREE.Audio / PositionalAudio bypass our masterGain
     // graph (they route through the listener directly), so without this
     // any source whose per-node setVolume() is briefly stale would still
-    // be audible. The listener's master gain is the global cut-off.
-    if (this.listener) this.listener.setMasterVolume(masterEffective)
+    // be audible.
+    smoothSet(this.listener.gain.gain, masterEffective, ctx)
   }
 
   private applyAllVolumes() {
