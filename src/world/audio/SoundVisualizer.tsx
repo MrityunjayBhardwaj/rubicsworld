@@ -105,7 +105,9 @@ function ReachSphere({ def }: { def: LoopDef }) {
   }, [mesh])
 
   useFrame(() => {
-    const radius = def.radius ?? def.maxDist ?? 0
+    // getEffectiveRadius returns the override (panel slider) when set,
+    // otherwise falls back to the registry value.
+    const radius = audioBus.getEffectiveRadius(def.key)
     if (radius <= 0) return
     const id = def.anchor.slice('object:'.length)
     const target = audioBus.getAnchor(id) ?? null

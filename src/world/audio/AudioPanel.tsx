@@ -26,6 +26,12 @@ function buildLoopRows() {
     rows[`${def.key}__mute`]  = { value: false, label: `${def.key} mute` }
     rows[`${def.key}__vol`]   = { value: 1.0, min: 0, max: 1.0, step: 0.01, label: `${def.key} vol` }
     rows[`${def.key}__speed`] = { value: 1.0, min: 0.5, max: 2.0, step: 0.01, label: `${def.key} speed` }
+    // Radius slider only for positional loops where a reach is defined.
+    // World/camera_motion anchors have no spatial extent.
+    const baseRadius = def.radius ?? def.maxDist
+    if (def.anchor.startsWith('object:') && baseRadius != null) {
+      rows[`${def.key}__radius`] = { value: baseRadius, min: 0, max: 50, step: 0.5, label: `${def.key} radius` }
+    }
   }
   return rows
 }
@@ -106,10 +112,13 @@ export function AudioPanel() {
   // to localStorage so a reload restores the panel state.
   useEffect(() => {
     for (const def of REGISTRY.loops) {
+      const baseRadius = def.radius ?? def.maxDist
+      const hasRadiusRow = def.anchor.startsWith('object:') && baseRadius != null
       audioBus.setLoopOverride(def.key, {
         mute:  values[`${def.key}__mute`]  as boolean,
         vol:   values[`${def.key}__vol`]   as number,
         speed: values[`${def.key}__speed`] as number,
+        ...(hasRadiusRow ? { radius: values[`${def.key}__radius`] as number } : {}),
       })
     }
     for (const def of REGISTRY.events) {
