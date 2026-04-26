@@ -1,14 +1,67 @@
 {
   "loops": [
-    { "key": "theme_music",     "anchor": "world",              "src": "audio/theme.ogg",            "vol": 0.22, "modulator": "themeWalkDuck" },
-    { "key": "ambient_world",   "anchor": "world",              "src": "audio/windy_grass.ogg",      "vol": 0.45, "modulator": ["windStrength", "awayFromPond"] },
-    { "key": "wind_cutting",    "anchor": "camera_motion",      "src": "audio/wind_cutting.ogg",     "vol": 0.55, "modulator": "cameraOrbitSpeed" },
-    { "key": "axis_rotation",   "anchor": "world",              "src": "audio/axis_rotation.ogg",    "vol": 0.7,  "modulator": "sliceRotationActive" },
-    { "key": "grass_swipe",     "anchor": "world",              "src": "audio/grass_swipe.ogg",      "vol": 0.6,  "modulator": "grassSwipeIntensity" },
-    { "key": "birds_flock",     "anchor": "object:birds_flock", "src": "audio/birds.ogg",            "vol": 0.85, "refDist": 4,   "maxDist": 25, "rolloff": 1.4 },
-    { "key": "car_engine",      "anchor": "object:car",         "src": "audio/car.ogg",              "vol": 0.7,  "refDist": 2,   "maxDist": 15, "rolloff": 1.6 },
-    { "key": "pond_water",      "anchor": "object:pond",        "src": "audio/pond.ogg",             "vol": 0.6,  "refDist": 1.5, "maxDist": 10, "rolloff": 1.8 },
-    { "key": "windmill_whoosh", "anchor": "object:windmill",    "src": "synth:windmillWhoosh",       "vol": 0.5,  "refDist": 2,   "maxDist": 18, "rolloff": 1.6 }
+    {
+      "key": "theme_music", "anchor": "world", "src": "audio/theme.ogg",
+      "params": {
+        "vol":  { "base": 0.22, "modulator": "themeWalkDuck" }
+      }
+    },
+    {
+      "key": "ambient_world", "anchor": "world", "src": "synth:windAmbient",
+      "params": {
+        "vol":     { "base": 0.18, "modulator": ["windStrength", "awayFromPond"] },
+        "lowpass": { "modulator": "windStrength", "min": 400, "max": 1200 }
+      }
+    },
+    {
+      "key": "wind_cutting", "anchor": "camera_motion", "src": "synth:windCut",
+      "params": {
+        "vol":      { "base": 0.45, "modulator": "cameraOrbitSpeed" },
+        "bandpass": { "modulator": "cameraOrbitSpeed", "min": 800, "max": 2400 }
+      }
+    },
+    {
+      "key": "axis_rotation", "anchor": "world", "src": "audio/axis_rotation.ogg",
+      "params": {
+        "vol":  { "base": 0.7, "modulator": "sliceRotationActive" },
+        "rate": { "base": 1.0, "modulator": "sliceRotationActive", "min": 0.85, "max": 1.15 }
+      }
+    },
+    {
+      "key": "grass_swipe", "anchor": "world", "src": "synth:grassSwipe",
+      "params": {
+        "vol":      { "base": 0.5, "modulator": "grassSwipeIntensity" },
+        "bandpass": { "modulator": "grassSwipeIntensity", "min": 800, "max": 3000 }
+      }
+    },
+    {
+      "key": "birds_flock", "anchor": "object:birds_flock", "src": "audio/birds.ogg",
+      "refDist": 4, "maxDist": 25, "rolloff": 1.4,
+      "params": { "vol": { "base": 0.85 } }
+    },
+    {
+      "key": "car_engine", "anchor": "object:car", "src": "synth:carEngine",
+      "refDist": 2, "maxDist": 15, "rolloff": 1.6,
+      "params": {
+        "vol":     { "base": 0.6 },
+        "oscFreq": { "modulator": "carSpeed", "min": 55, "max": 110 },
+        "lowpass": { "modulator": "carSpeed", "min": 500, "max": 1200 }
+      }
+    },
+    {
+      "key": "pond_water", "anchor": "object:pond", "src": "audio/pond.ogg",
+      "refDist": 1.5, "maxDist": 10, "rolloff": 1.8,
+      "params": { "vol": { "base": 0.6 } }
+    },
+    {
+      "key": "windmill_whoosh", "anchor": "object:windmill", "src": "synth:windmillWhoosh",
+      "refDist": 2, "maxDist": 18, "rolloff": 1.6,
+      "params": {
+        "vol":     { "base": 0.5 },
+        "lfoFreq": { "modulator": "windStrength", "min": 0.35, "max": 0.85 },
+        "bandpass":{ "modulator": "windStrength", "min": 500, "max": 1100 }
+      }
+    }
   ],
   "events": [
     { "key": "footstep", "anchor": "object:player", "src": "audio/footstep_grass.ogg", "pitchJitter": 0.08 },

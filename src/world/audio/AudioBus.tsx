@@ -17,6 +17,10 @@ export function AudioBus() {
   const flockAnchor = useRef<THREE.Object3D | null>(null)
   const flockScratch = useRef(new THREE.Vector3())
   const pondScratch = useRef(new THREE.Vector3())
+  const carScratch = useRef(new THREE.Vector3())
+  const carPrev = useRef(new THREE.Vector3())
+  const carInited = useRef(false)
+  const carSpeedSmooth = useRef(0)
 
   useEffect(() => {
     audioBus.attachListener(camera)
@@ -118,6 +122,24 @@ export function AudioBus() {
       audioBus.setPondProximity(proximity)
     } else {
       audioBus.setPondProximity(0)
+    }
+
+    // Car speed metric — derived from frame-to-frame world position delta
+    // of the 'car' anchor. Normalised to the diorama's CAR_SPEED constant
+    // (~0.55 u/s); engine pitch + filter open up as it moves faster.
+    const car = audioBus.getAnchor('car')
+    if (car && dt > 1e-4) {
+      car.getWorldPosition(carScratch.current)
+      if (carInited.current) {
+        const v = carScratch.current.distanceTo(carPrev.current) / dt
+        const target = Math.min(1, v / 0.55)
+        carSpeedSmooth.current += (target - carSpeedSmooth.current) * Math.min(1, dt * 8)
+      }
+      carPrev.current.copy(carScratch.current)
+      carInited.current = true
+      audioBus.setCarSpeed(carSpeedSmooth.current)
+    } else {
+      audioBus.setCarSpeed(0)
     }
 
     // Update flock centroid each frame. TileGrid registers the live 'birds'
