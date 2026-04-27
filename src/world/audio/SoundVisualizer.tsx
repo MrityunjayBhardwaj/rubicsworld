@@ -6,11 +6,11 @@
 // element (cheap, crisp text, no font asset). Position + gain bar update
 // each frame via refs — no per-frame React state churn.
 
-import { useEffect, useMemo, useRef, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { Html } from '@react-three/drei'
 import * as THREE from 'three'
-import { audioBus, REGISTRY, type LoopDef } from './bus'
+import { audioBus, type LoopDef } from './bus'
 import { useAudioUi } from './audioUiStore'
 
 const WORLD_BASE_HEIGHT = 1.8       // y of world-anchor markers above origin
@@ -49,10 +49,20 @@ const barFillStyle: CSSProperties = {
 
 export function SoundVisualizer() {
   const show = useAudioUi(s => s.showVisualizer)
+  // Re-poll the bus's combined loop list every frame so glb-imported loops
+  // (added at runtime via KHR_audio_emitter) appear/disappear automatically
+  // without remounting this component on Live-Mode swaps.
+  const [allLoops, setAllLoops] = useState<LoopDef[]>(() => audioBus.getAllLoopDefs())
+  useFrame(() => {
+    const next = audioBus.getAllLoopDefs()
+    if (next.length !== allLoops.length || next.some((d, i) => d !== allLoops[i])) {
+      setAllLoops(next)
+    }
+  })
+
   if (!show) return null
 
-  // Pre-compute per-key world-marker x offsets so they don't stack at origin.
-  const worldKeys = REGISTRY.loops.filter(l => l.anchor === 'world').map(l => l.key)
+  const worldKeys = allLoops.filter(l => l.anchor === 'world').map(l => l.key)
   const worldXOffset: Record<string, number> = {}
   worldKeys.forEach((k, i) => {
     worldXOffset[k] = (i - (worldKeys.length - 1) / 2) * WORLD_SPREAD
@@ -60,10 +70,10 @@ export function SoundVisualizer() {
 
   return (
     <group>
-      {REGISTRY.loops.map(def => (
+      {allLoops.map(def => (
         <SoundMarker key={def.key} def={def} worldXOffset={worldXOffset[def.key] ?? 0} />
       ))}
-      {REGISTRY.loops.map(def => (
+      {allLoops.map(def => (
         (def.anchor.startsWith('object:') && (def.maxDist != null || def.radius != null))
           ? <ReachSphere key={`reach-${def.key}`} def={def} />
           : null
