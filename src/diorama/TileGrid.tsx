@@ -41,6 +41,7 @@ import { buildGrass, grassRefs } from './buildGrass'
 import { loadGlbDiorama } from './loadGlbDiorama'
 import { audioBus } from '../world/audio/bus'
 import { buildSphereVisibility, applySphereVisibility, restoreSphereVisibility, type SphereVisibility } from './sphereVisibility'
+import { buildBatchedDiorama, applyBatchVisibility, restoreBatchVisibility, type DioramaBatch } from './buildBatchedDiorama'
 
 // Register named diorama groups as audio anchors so PositionalAudio nodes
 // follow car / windmill / bird-flock through space. Idempotent — running
@@ -463,12 +464,16 @@ function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUnifor
     shader.vertexShader = shader.vertexShader.replace(
       '#include <project_vertex>',
       `
-      // For InstancedMesh, fold the per-instance matrix into object-space
-      // position first — without this, every instance ends up at the first
-      // instance's sphere-projected position (silent failure: grass blades
-      // collapse onto one point, invisible). Three.js auto-declares
-      // \`instanceMatrix\` when USE_INSTANCING is defined.
-      #ifdef USE_INSTANCING
+      // For InstancedMesh / BatchedMesh, fold the per-instance / per-batch
+      // matrix into object-space position first — without this, every
+      // instance ends up at the first instance's sphere-projected position
+      // (silent failure: grass blades collapse onto one point, invisible;
+      // batched static props all draw at instance-0's home position).
+      // batchingMatrix is set up by <batching_vertex> chunk before
+      // <project_vertex> runs; instanceMatrix is auto-declared on USE_INSTANCING.
+      #ifdef USE_BATCHING
+        vec4 _osPos = batchingMatrix * vec4(transformed, 1.0);
+      #elif defined(USE_INSTANCING)
         vec4 _osPos = instanceMatrix * vec4(transformed, 1.0);
       #else
         vec4 _osPos = vec4(transformed, 1.0);
@@ -548,6 +553,7 @@ export function TileGrid({ mode = 'split', bezier }: {
   const bz = bezier ?? { cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 }
   const dioramaRef = useRef<DioramaScene | null>(null)
   const sphereVisRef = useRef<SphereVisibility | null>(null)
+  const dioramaBatchRef = useRef<DioramaBatch | null>(null)
   const dioramaSceneRef = useRef<THREE.Scene | null>(null)
   const cellsRef = useRef<CellDef[]>([])
   const overlaySceneRef = useRef<THREE.Scene | null>(null)
@@ -737,6 +743,17 @@ export function TileGrid({ mode = 'split', bezier }: {
       // tiles' 1×1 patches it overlaps. Animated subtrees + InstancedMesh
       // (grass) bypass tile gating via the alwaysVisible set.
       sphereVisRef.current = buildSphereVisibility(diorama.root, diorama.animations ?? [])
+      // /optimize/ — fold static, single-material, non-animated meshes
+      // into per-material BatchedMeshes. Originals stay in tree as
+      // visible=false placeholders (P23: traversal-based consumers
+      // — audio anchors, mixer track binding, grass groundMesh —
+      // still resolve them by name). Batches inherit per-pass
+      // root.quaternion automatically since they're added under root.
+      const optimizeBuild = (typeof window !== 'undefined') &&
+        Boolean((window as unknown as { __rwOptimize?: boolean }).__rwOptimize)
+      if (optimizeBuild && sphereVisRef.current) {
+        dioramaBatchRef.current = buildBatchedDiorama(diorama.root, sphereVisRef.current)
+      }
     }
 
     // Overlay lines (only for dev modes, not sphere/planet)
@@ -774,6 +791,14 @@ export function TileGrid({ mode = 'split', bezier }: {
           // the loop's anchor (now in the prev tree) to stop the node, so
           // run while the tree is still intact.
           prev.dispose?.()
+          // Detach previous BatchedMeshes BEFORE disposing prev.root —
+          // the batch shares its material reference with originals, and
+          // its internal merged geometry buffer is independent of the
+          // prev meshes' geometries (BatchedMesh.addGeometry copies). The
+          // dispose() call below is a no-op double-dispose for the
+          // shared material; harmless.
+          dioramaBatchRef.current?.dispose()
+          dioramaBatchRef.current = null
           dScene.remove(prev.root)
           prev.root.traverse(c => {
             const m = c as THREE.Mesh
@@ -792,6 +817,11 @@ export function TileGrid({ mode = 'split', bezier }: {
           // Recompute per-tile visibility for the new tree — old map's
           // mesh refs are stale (point at the disposed prev.root).
           sphereVisRef.current = buildSphereVisibility(next.root, next.animations ?? [])
+          const optimizeBuild = (typeof window !== 'undefined') &&
+            Boolean((window as unknown as { __rwOptimize?: boolean }).__rwOptimize)
+          if (optimizeBuild && sphereVisRef.current) {
+            dioramaBatchRef.current = buildBatchedDiorama(next.root, sphereVisRef.current)
+          }
         }
         diorama = next
         dioramaRef.current = next
@@ -1116,6 +1146,13 @@ export function TileGrid({ mode = 'split', bezier }: {
       // Run the live diorama's own dispose hook (KHR_audio_emitter loop
       // unregistration etc.) BEFORE we tear the GPU resources down.
       live.dispose?.()
+      // Detach + dispose batched meshes before traversing root for
+      // geometry/material disposal — the batch holds an independent
+      // copy of merged buffers, so the traversal's per-mesh disposal
+      // doesn't touch them, but we still want them out of the tree
+      // before disposal so the traverse doesn't visit them as Meshes.
+      dioramaBatchRef.current?.dispose()
+      dioramaBatchRef.current = null
       live.root.traverse(child => {
         if ((child as THREE.Mesh).isMesh) {
           ;(child as THREE.Mesh).geometry?.dispose()
@@ -1507,6 +1544,13 @@ export function TileGrid({ mode = 'split', bezier }: {
         if (optimize && sphereVisRef.current) {
           const homeIdx = tile.homeFace * 4 + tile.homeV * 2 + tile.homeU
           applySphereVisibility(sphereVisRef.current, homeIdx)
+          // Per-tile cull on BatchedMesh instances. Same tile-mask logic
+          // as the per-mesh path, but flips visibility on per-instance
+          // slots inside each batch instead of on the original Mesh
+          // (which is now permanently invisible — see __batched flag).
+          if (dioramaBatchRef.current) {
+            applyBatchVisibility(dioramaBatchRef.current, homeIdx)
+          }
           // Per-tile grass shader cull: blades whose iTileIdx differs
           // from this tile collapse to a degenerate point in the vertex
           // shader, skipping the heavy bend / hover-trail math. Grass
@@ -1534,9 +1578,15 @@ export function TileGrid({ mode = 'split', bezier }: {
       // After the per-tile pass: restore everything to .visible = true so
       // post-frame consumers (audio anchor traversal on swap, grass
       // groundMesh lookup, animation track binding refresh) see the
-      // full scene tree on their next walk. P23 mitigation.
+      // full scene tree on their next walk. P23 mitigation. Batched
+      // originals stay visible=false (the batch is the renderer); the
+      // helper itself skips them. Batch instances all get re-visible
+      // so any non-24-pass render path sees the full set.
       if (optimize && sphereVisRef.current) {
         restoreSphereVisibility(sphereVisRef.current)
+      }
+      if (optimize && dioramaBatchRef.current) {
+        restoreBatchVisibility(dioramaBatchRef.current)
       }
       // Reset grass per-tile cull to "render all blades" so any non-
       // 24-pass render path (preview modes, future single-render hooks)

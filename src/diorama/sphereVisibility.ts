@@ -92,9 +92,9 @@ export function buildSphereVisibility(
       const parsed = THREE.PropertyBinding.parseTrackName(track.name)
       const nodeName = parsed.nodeName
       if (!nodeName) continue
-      const node = THREE.PropertyBinding.findNode(root, nodeName)
+      const node = THREE.PropertyBinding.findNode(root, nodeName) as THREE.Object3D | undefined
       if (!node) continue
-      node.traverse(o => {
+      node.traverse((o: THREE.Object3D) => {
         if ((o as THREE.Mesh).isMesh) alwaysVisible.add(o as THREE.Mesh)
       })
     }
@@ -160,17 +160,40 @@ export function buildSphereVisibility(
 }
 
 /** Apply visibility for the given home tile index. Caller is responsible
- *  for restoring at end-of-frame via `restoreSphereVisibility`. */
+ *  for restoring at end-of-frame via `restoreSphereVisibility`.
+ *
+ *  Skips meshes tagged `userData.__batched = true` — those are folded
+ *  into a BatchedMesh by `buildBatchedDiorama` and must stay
+ *  `visible = false` permanently so the batch is the sole renderer.
+ *  Re-showing them here would double-draw the geometry. The batch's
+ *  own per-tile cull (applyBatchVisibility) handles the per-pass
+ *  visibility for batched instances. */
 export function applySphereVisibility(vis: SphereVisibility, homeTileIdx: number): void {
-  for (const m of vis.allMeshes) m.visible = false
-  for (const m of vis.alwaysVisible) m.visible = true
+  for (const m of vis.allMeshes) {
+    if ((m.userData as { __batched?: boolean }).__batched) continue
+    m.visible = false
+  }
+  for (const m of vis.alwaysVisible) {
+    if ((m.userData as { __batched?: boolean }).__batched) continue
+    m.visible = true
+  }
   const list = vis.homeTileMeshes[homeTileIdx]
-  if (list) for (const m of list) m.visible = true
+  if (list) {
+    for (const m of list) {
+      if ((m.userData as { __batched?: boolean }).__batched) continue
+      m.visible = true
+    }
+  }
 }
 
-/** End-of-loop restore: every mesh visible again so traversal-based
- *  consumers (audio anchors, grass lookup) see the full tree on the next
- *  scene scan. */
+/** End-of-loop restore: every non-batched mesh visible again so
+ *  traversal-based consumers (audio anchors, grass lookup) see the full
+ *  tree on the next scene scan. Batched originals keep visible=false —
+ *  graph consumers still find them by name/track binding (the tree is
+ *  intact), but they don't render. */
 export function restoreSphereVisibility(vis: SphereVisibility): void {
-  for (const m of vis.allMeshes) m.visible = true
+  for (const m of vis.allMeshes) {
+    if ((m.userData as { __batched?: boolean }).__batched) continue
+    m.visible = true
+  }
 }
