@@ -116,8 +116,8 @@ WHY: This boundary is where a private custom render path (24 per-tile renders to
 HOW:
 - Every offscreen-to-main composite MUST write both color AND depth. For the sphere composite quad: sample `sphereTarget.depthTexture` and assign to `gl_FragDepth`; set `depthWrite:true`, `depthTest:false` (we own the value). Check at review time: if a composite shader omits depth write, block the PR.
 - Every optimization that "removes a mesh from the tree because it's drawn elsewhere" MUST separate presence from visibility. Keep the mesh in the tree (introspecting consumers find it); toggle `.visible=false` (renderer skips draw). Rule of thumb: if you're about to write `if (condition) root.add(mesh)`, ask "does any non-renderer consumer traverse this root?" If yes, always add and use `.visible` instead.
-- AO passes on this boundary: prefer explicit-normal-pass effects (SSAO) over depth-derived normal reconstruction (N8AO) while sphere projection is active.
-**REF:** UNGROUNDED — canonical diagnosis in `src/world/PostFx.tsx` (dual N8AO + SSAO exposure); `src/diorama/TileGrid.tsx:500-527` (composite quad with gl_FragDepth write); `src/diorama/TileGrid.tsx:hideFlatTerrainInSphereMode` (presence-vs-visibility helper for buildGrass).
+- AO passes on this boundary: prefer explicit-normal-pass effects (SSAO) over depth-derived normal reconstruction (N8AO) while sphere projection is active. (Historical: both N8AO and SSAO have since been stripped from the chain — only DoF + Bloom + ToneMapping + minor effects remain. Rule still applies if AO is reintroduced.)
+**REF:** UNGROUNDED — canonical diagnosis at `src/diorama/TileGrid.tsx:500-527` (composite quad with gl_FragDepth write); `src/diorama/TileGrid.tsx:hideFlatTerrainInSphereMode` (presence-vs-visibility helper for buildGrass). PostFx.tsx no longer carries AO passes (stripped 2026-Q1, see file header comment).
 
 **Silent-failure modes:**
 - N8AO AO-only debug renders pure white (finalAo=1 everywhere; P8) — depth-derived normal reconstruction fails on displaced geometry.
