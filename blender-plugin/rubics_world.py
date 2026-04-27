@@ -1,10 +1,15 @@
 bl_info = {
-    "name": "Rubic's World",
+    "name": "Rubic's World (v2)",
     "author": "Rubic's World",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Rubic's World",
-    "description": "Round-trip diorama.glb between Blender and the Rubic's World app",
+    "description": (
+        "Round-trip diorama.glb between Blender and the Rubic's World app. "
+        "v2 adds KHR_audio_emitter export — author Speaker objects in Blender "
+        "and they ship in the .glb as positional audio emitters with "
+        "rubics-private modulator metadata in extras."
+    ),
     "category": "Import-Export",
 }
 
@@ -321,12 +326,308 @@ def _with_isolate(context):
                 pass
 
 
+# ── KHR_audio_emitter post-export patcher ─────────────────────────────────
+#
+# Blender's Khronos glTF exporter (io_scene_gltf2) skips Speaker objects —
+# they're not Mesh / Camera / Light / Empty so they never reach the node
+# graph. To get them into the .glb, we post-process: read the .glb, locate
+# its JSON chunk, inject `audio[]`, `audioSources[]`, `audioEmitters[]`
+# arrays under `extensions.KHR_audio_emitter`, append a node per Speaker to
+# `nodes[]`, parent it under the matching Blender parent (by name) or to
+# the scene root, and re-pack.
+#
+# Supported Speaker custom properties:
+#   rubics_audio_key       — override the loop key (default: speaker.name)
+#   rubics_audio_params    — JSON string of LoopDef.params (verbatim shape
+#                            from registry.json — vol/rate/lowpass/etc with
+#                            base/modulator/min/max/invert)
+#   rubics_audio_modulator — modulator name (string or comma-separated list)
+#   rubics_audio_vol       — base volume (overrides speaker.volume if set)
+#
+# The audio file itself is referenced by URI relative to public/audio/. The
+# Blender Speaker.sound.filepath is expected to point at <project>/public/
+# audio/<file>.ogg — we extract just the basename and prefix with `audio/`.
+
+import struct
+import json
+import re
+
+GLB_MAGIC = 0x46546C67  # 'glTF'
+GLB_VERSION = 2
+CHUNK_JSON = 0x4E4F534A  # 'JSON'
+CHUNK_BIN = 0x004E4942   # 'BIN\0'
+
+
+def _zup_translation_to_yup(v) -> tuple[float, float, float]:
+    """Mirror the export_yup=True axis swap the glTF exporter applies.
+    Z-up → Y-up: (x, y, z) → (x, z, -y).
+    """
+    return (float(v[0]), float(v[2]), -float(v[1]))
+
+
+def _zup_quaternion_to_yup(q) -> tuple[float, float, float, float]:
+    """Compose the Z-up to Y-up rotation onto an arbitrary quaternion. The
+    swap is a -90° rotation around X (mathutils encodes as (x,y,z,w)).
+    """
+    import mathutils
+    swap = mathutils.Quaternion((1, 0, 0), -1.5707963267948966)  # -π/2 around X
+    out = swap @ q
+    return (out.x, out.y, out.z, out.w)
+
+
+def _audio_uri_for_speaker(spk) -> str | None:
+    """Resolve the speaker's referenced sound file to a path of the form
+    `audio/<file>.ogg` — relative to the project's public/ directory, which
+    is where the runtime fetches assets from.
+    """
+    sound = spk.data.sound if spk and spk.data else None
+    if not sound or not sound.filepath:
+        return None
+    abs_path = bpy.path.abspath(sound.filepath)
+    base = os.path.basename(abs_path)
+    if not base:
+        return None
+    return f"audio/{base}"
+
+
+def _sample_speaker_volume_envelope(spk_data, scene) -> dict | None:
+    """If the Speaker datablock has volume keyframes (or is driven by an
+    fcurve), sample the value across [scene.frame_start, scene.frame_end]
+    and return an envelope dict consumed by the runtime audio bus.
+
+    Format: { fps, samples: [vol_at_frame_0, vol_at_frame_1, ...] }
+    The runtime multiplies these values into the loop's base gain on each
+    frame, with `fps` letting it map mixer.time → sample index.
+    """
+    anim = getattr(spk_data, 'animation_data', None)
+    action = anim.action if anim else None
+    fcurves = action.fcurves if action else None
+    has_volume_curve = False
+    if fcurves:
+        for fc in fcurves:
+            if fc.data_path == 'volume':
+                has_volume_curve = True
+                break
+    if not has_volume_curve:
+        return None
+    f0, f1 = int(scene.frame_start), int(scene.frame_end)
+    if f1 < f0: return None
+    fps = scene.render.fps / max(1.0, scene.render.fps_base)
+    # Save + restore the playhead so the export doesn't permanently move
+    # the user's frame cursor as a side-effect of sampling.
+    saved_frame = scene.frame_current
+    samples = []
+    try:
+        for f in range(f0, f1 + 1):
+            scene.frame_set(f)
+            v = float(spk_data.volume)
+            samples.append(max(0.0, min(1.0, v)))
+    finally:
+        scene.frame_set(saved_frame)
+    return {'fps': fps, 'samples': samples}
+
+
+def _collect_speakers(scene) -> list[dict]:
+    """Walk scene Speaker objects and produce a normalised description of
+    each one. Records local (parent-relative) transform when parented,
+    world transform otherwise. Skips muted speakers (use Blender's mute
+    toggle to author audio that won't ship)."""
+    out = []
+    for obj in scene.objects:
+        if obj.type != 'SPEAKER':
+            continue
+        spk = obj.data
+        if not spk or spk.muted:
+            continue
+        uri = _audio_uri_for_speaker(obj)
+        if not uri:
+            print(f"[rubics-audio] skipping {obj.name}: no sound file")
+            continue
+        # Use parent's name as the join key — patcher matches by node name in
+        # the exported glb.
+        parent_name = obj.parent.name if obj.parent else None
+        # Local transform if parented; else world.
+        if obj.parent:
+            mat = obj.matrix_local
+        else:
+            mat = obj.matrix_world
+        loc, rot, _scale = mat.decompose()
+        translation = _zup_translation_to_yup(loc)
+        rotation = _zup_quaternion_to_yup(rot)
+
+        params_json = obj.get('rubics_audio_params', '')
+        params = None
+        if params_json:
+            try:
+                params = json.loads(params_json) if isinstance(params_json, str) else dict(params_json)
+            except Exception as e:
+                print(f"[rubics-audio] {obj.name}: malformed rubics_audio_params: {e}")
+        modulator = obj.get('rubics_audio_modulator', None)
+        if isinstance(modulator, str) and ',' in modulator:
+            modulator = [m.strip() for m in modulator.split(',') if m.strip()]
+        rubics_extras = {}
+        if params: rubics_extras['params'] = params
+        if modulator: rubics_extras['modulator'] = modulator
+        rubics_vol = obj.get('rubics_audio_vol', None)
+        if rubics_vol is not None: rubics_extras['vol'] = float(rubics_vol)
+        rubics_key = obj.get('rubics_audio_key', None)
+        if rubics_key: rubics_extras['key'] = str(rubics_key)
+        # WYSIWYG: keyframed Speaker.volume → baked envelope. Runtime
+        # multiplies the envelope into the loop's base gain so authored
+        # volume animations replay verbatim. Skipped if Speaker volume
+        # has no fcurves.
+        envelope = _sample_speaker_volume_envelope(spk, scene)
+        if envelope: rubics_extras['envelope'] = envelope
+
+        # Volume — clamp to [0,1] so we hand the runtime a sane value.
+        gain = max(0.0, min(1.0, float(spk.volume)))
+
+        out.append({
+            'name': str(rubics_key) if rubics_key else obj.name,
+            'parent_name': parent_name,
+            'translation': list(translation),
+            'rotation': list(rotation),
+            'uri': uri,
+            'gain': gain,
+            'refDistance': float(spk.distance_reference),
+            'maxDistance': float(spk.distance_max) if spk.distance_max < 1e6 else 25.0,
+            # Blender's `attenuation` ≈ Web Audio's `rolloffFactor`. 1.0 is
+            # the project's standard "linear from full to silent across the
+            # ref→max band."
+            'rolloffFactor': float(spk.attenuation) if spk.attenuation > 0 else 1.0,
+            'coneInnerAngle': float(spk.cone_angle_inner),
+            'coneOuterAngle': float(spk.cone_angle_outer),
+            'extras_rubics': rubics_extras or None,
+        })
+    return out
+
+
+def _patch_glb_with_audio(path: str, speakers: list[dict]) -> bool:
+    """Inject KHR_audio_emitter into the .glb at `path`. No-op (returns
+    True) when there are no speakers. Returns False on parse error.
+    """
+    if not speakers:
+        return True
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+        # Header: 'glTF' (4) + version (4) + total length (4) = 12 bytes.
+        if len(data) < 12:
+            print("[rubics-audio] glb too small")
+            return False
+        magic, version, total = struct.unpack('<III', data[:12])
+        if magic != GLB_MAGIC or version != GLB_VERSION:
+            print(f"[rubics-audio] glb bad magic/version: {magic:x}, {version}")
+            return False
+        # Chunk 0 must be JSON.
+        chunk0_len, chunk0_type = struct.unpack('<II', data[12:20])
+        if chunk0_type != CHUNK_JSON:
+            print("[rubics-audio] first glb chunk not JSON")
+            return False
+        json_bytes = data[20:20 + chunk0_len]
+        gltf = json.loads(json_bytes.rstrip(b' ').decode('utf-8'))
+        rest = data[20 + chunk0_len:]  # all remaining chunks (BIN + any others)
+
+        # Ensure the buckets exist.
+        nodes = gltf.setdefault('nodes', [])
+        scenes = gltf.setdefault('scenes', [{'nodes': []}])
+        scene = scenes[gltf.get('scene', 0)]
+        scene_nodes = scene.setdefault('nodes', [])
+        ext_used = gltf.setdefault('extensionsUsed', [])
+        if 'KHR_audio_emitter' not in ext_used:
+            ext_used.append('KHR_audio_emitter')
+
+        # Build name → node-index map for parent lookup.
+        name_to_idx = {n.get('name'): i for i, n in enumerate(nodes) if n.get('name')}
+
+        # Top-level extension structure: audio + audioSources + audioEmitters.
+        audio_arr = []
+        sources_arr = []
+        emitters_arr = []
+
+        # Reuse audio entries by URI so two emitters pointing at the same
+        # file share one audio block.
+        uri_to_audio_idx: dict[str, int] = {}
+
+        for spk in speakers:
+            uri = spk['uri']
+            audio_idx = uri_to_audio_idx.get(uri)
+            if audio_idx is None:
+                audio_idx = len(audio_arr)
+                audio_arr.append({'uri': uri, 'mimeType': 'audio/ogg' if uri.endswith('.ogg') else 'audio/mpeg'})
+                uri_to_audio_idx[uri] = audio_idx
+            source_idx = len(sources_arr)
+            sources_arr.append({'audio': audio_idx, 'gain': 1.0, 'loop': True, 'autoPlay': True})
+            emitter = {
+                'type': 'positional',
+                'name': spk['name'],
+                'gain': spk['gain'],
+                'sources': [source_idx],
+                'positional': {
+                    'refDistance': spk['refDistance'],
+                    'maxDistance': spk['maxDistance'],
+                    'rolloffFactor': spk['rolloffFactor'],
+                    'coneInnerAngle': spk['coneInnerAngle'],
+                    'coneOuterAngle': spk['coneOuterAngle'],
+                    'distanceModel': 'linear',
+                },
+            }
+            if spk['extras_rubics']:
+                emitter['extras'] = {'rubics': spk['extras_rubics']}
+            emitter_idx = len(emitters_arr)
+            emitters_arr.append(emitter)
+
+            # Add a node carrying this emitter. Parent it to the matching
+            # named node if present, else attach to scene root.
+            new_node = {
+                'name': f"audio:{spk['name']}",
+                'translation': spk['translation'],
+                'rotation': spk['rotation'],
+                'extensions': {'KHR_audio_emitter': {'emitter': emitter_idx}},
+            }
+            new_node_idx = len(nodes)
+            nodes.append(new_node)
+            parent_idx = name_to_idx.get(spk['parent_name']) if spk['parent_name'] else None
+            if parent_idx is not None:
+                parent = nodes[parent_idx]
+                parent.setdefault('children', []).append(new_node_idx)
+            else:
+                scene_nodes.append(new_node_idx)
+
+        gltf.setdefault('extensions', {})['KHR_audio_emitter'] = {
+            'audio': audio_arr,
+            'audioSources': sources_arr,
+            'audioEmitters': emitters_arr,
+        }
+
+        # Re-serialize JSON chunk — pad to 4-byte alignment with spaces (per
+        # glb spec; trailing spaces are a no-op for JSON parsers).
+        new_json = json.dumps(gltf, separators=(',', ':')).encode('utf-8')
+        pad = (-len(new_json)) % 4
+        if pad: new_json += b' ' * pad
+        new_total = 12 + 8 + len(new_json) + len(rest)
+        with open(path, 'wb') as f:
+            f.write(struct.pack('<III', GLB_MAGIC, GLB_VERSION, new_total))
+            f.write(struct.pack('<II', len(new_json), CHUNK_JSON))
+            f.write(new_json)
+            f.write(rest)
+        print(f"[rubics-audio] injected {len(emitters_arr)} emitter(s) into {os.path.basename(path)}")
+        return True
+    except Exception as e:
+        print(f"[rubics-audio] glb patch failed: {e}")
+        return False
+
+
 def _do_export_current(path: str) -> tuple[bool, int]:
     """Run the glTF exporter with the pipeline flags. Returns (ok, size).
     Safe to call from a timer — doesn't touch the active operator's stack.
     """
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # v2: snapshot speakers BEFORE the export's _with_isolate strips
+        # invisible objects. Speakers are SPEAKER type, not MESH, so the
+        # exporter ignores them — we patch them in post.
+        speakers = _collect_speakers(bpy.context.scene)
         # Stack both context managers: isolate strips rubics-guide-* /
         # outside-block meshes, collider-tag stamps rubics_role so the
         # loader can split colliders from renderable diorama on the other
@@ -345,7 +646,26 @@ def _do_export_current(path: str) -> tuple[bool, int]:
                 export_lights=False,
                 use_visible=True,
                 export_extras=True,
+                # WYSIWYG animation pipeline (v0.2.0):
+                # - force_sampling: bake DRIVERS and CONSTRAINTS to keyframes.
+                #   Without this, a windmill spun by a Python driver
+                #   `#frame * 0.1` exports as a static mesh (driver doesn't
+                #   translate to glTF). With this, every frame in the scene
+                #   range is sampled into the action.
+                # - optimize_animation_size=False: keep ALL sampled keyframes.
+                #   The optimizer drops "redundant" frames when motion is
+                #   nearly constant — fine for hero animations, but it
+                #   silently flattens subtle in-between motion (the kind
+                #   that makes diorama loops feel alive).
+                # - frame_step=1: sample every frame (matches scene fps).
+                export_force_sampling=True,
+                export_optimize_animation_size=False,
+                export_frame_step=1,
             )
+        # Post-process: inject KHR_audio_emitter into the freshly-written glb.
+        # Failure is non-fatal — geometry export still succeeded.
+        if speakers:
+            _patch_glb_with_audio(path, speakers)
         size = os.path.getsize(path) if os.path.exists(path) else 0
         return True, size
     except Exception as e:
@@ -1110,6 +1430,72 @@ class RUBICS_OT_LiveToggle(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RUBICS_OT_BakeAnimations(bpy.types.Operator):
+    bl_idname = "rubics.bake_animations"
+    bl_label = "Bake Animations"
+    bl_description = (
+        "Bake every constraint, driver, and procedural animation on the "
+        "selected objects (or all objects if nothing selected) into "
+        "explicit keyframes across the scene frame range. Run this when "
+        "Live Mode/Export shows static motion in the runtime — drivers "
+        "and constraints can't ride through glTF without sampling."
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    only_selected: bpy.props.BoolProperty(  # type: ignore[valid-type]
+        name="Only Selected",
+        description="Bake only currently-selected objects. Off → all objects.",
+        default=False,
+    )
+
+    def execute(self, context):
+        scene = context.scene
+        objs = list(context.selected_objects) if self.only_selected else [
+            o for o in scene.objects if o.type in {'MESH', 'EMPTY', 'ARMATURE'}
+        ]
+        if not objs:
+            self.report({'WARNING'}, "No objects to bake")
+            return {'CANCELLED'}
+        # Save selection so the user's working state survives the bake.
+        prev_active = context.view_layer.objects.active
+        prev_sel = [o for o in context.selected_objects]
+        for o in context.selected_objects: o.select_set(False)
+        baked = 0
+        try:
+            for obj in objs:
+                # Skip objects with neither drivers, constraints, nor animation
+                # — bake_action would still write empty keyframes which the
+                # exporter then has to filter out.
+                anim = obj.animation_data
+                has_drivers = bool(anim and anim.drivers and len(anim.drivers))
+                has_constraints = bool(obj.constraints and len(obj.constraints))
+                has_action = bool(anim and anim.action)
+                if not (has_drivers or has_constraints or has_action):
+                    continue
+                obj.select_set(True)
+                context.view_layer.objects.active = obj
+                try:
+                    bpy.ops.nla.bake(
+                        frame_start=int(scene.frame_start),
+                        frame_end=int(scene.frame_end),
+                        only_selected=True,
+                        visual_keying=True,
+                        clear_constraints=False,  # keep so re-bake is idempotent
+                        clear_parents=False,
+                        use_current_action=True,
+                        bake_types={'OBJECT', 'POSE'} if obj.type == 'ARMATURE' else {'OBJECT'},
+                    )
+                    baked += 1
+                except Exception as e:
+                    print(f"[rubics-bake] {obj.name}: {e}")
+                obj.select_set(False)
+        finally:
+            for o in prev_sel: o.select_set(True)
+            context.view_layer.objects.active = prev_active
+        self.report({'INFO'}, f"Baked {baked} object(s)")
+        return {'FINISHED'}
+
+
 class RUBICS_OT_RemoveGuides(bpy.types.Operator):
     bl_idname = "rubics.remove_guides"
     bl_label = "Remove Guides"
@@ -1191,6 +1577,11 @@ class RUBICS_PT_Panel(bpy.types.Panel):
 
         layout.separator()
         col = layout.column(align=True)
+        col.label(text="Animations:")
+        col.operator(RUBICS_OT_BakeAnimations.bl_idname, icon='ACTION')
+
+        layout.separator()
+        col = layout.column(align=True)
         col.label(text="Reference guides:")
         col.operator(RUBICS_OT_AddGuides.bl_idname,    icon='GRID')
         col.operator(RUBICS_OT_RemoveGuides.bl_idname, icon='X')
@@ -1216,6 +1607,7 @@ CLASSES = [
     RUBICS_OT_EnsureDensityLayers,
     RUBICS_OT_EnsureCollections,
     RUBICS_OT_AddCollider,
+    RUBICS_OT_BakeAnimations,
     RUBICS_PT_Panel,
 ]
 

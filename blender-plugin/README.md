@@ -1,7 +1,105 @@
-# Rubic's World — Blender addon
+# Rubic's World — Blender addon (v0.2.0 / "plugin v2")
 
 Round-trip the diorama.glb between Blender and the live app. One panel in
 the N-sidebar, one preference (project path), three main buttons.
+
+**v2 adds KHR_audio_emitter export** — author Speaker objects in Blender,
+they ship in the .glb as positional audio emitters with per-emitter
+gain / refDistance / maxDistance / rolloff. See `Audio (KHR_audio_emitter)`
+section below.
+
+**v2 also makes animation export WYSIWYG** — drivers and constraints get
+sampled to keyframes on export, Speaker.volume keyframes round-trip as
+baked envelopes, and clips honor a `_once` naming convention for
+play-once-and-hold semantics. See `Animations` section below.
+
+## Animations (WYSIWYG)
+
+What you see playing in Blender is what plays in the runtime.
+
+**What round-trips automatically:**
+- Object TRS keyframes — translate / rotate / scale across the timeline
+- Armature pose actions
+- Shape keys / morph targets
+- **Drivers** (Python-expression-driven values like `#frame * 0.1`)
+- **Constraints** (Track To, Follow Path, Copy Rotation, etc.)
+- **Procedural animation** sourced from constraints + drivers
+
+The export does this via `export_force_sampling=True` — every frame in the
+scene range is sampled and written as an explicit keyframe. Without this,
+drivers and constraints would silently flatten on the runtime side
+(glTF can't represent expressions, only keyframes).
+
+**Naming convention for clip behaviour:**
+- Action ending in `_once` or `_oneshot` (e.g. `intro_once`) → plays once
+  and clamps to the last frame in the runtime. Use for one-shot beats
+  (intros, scripted reveals, single-fire animations).
+- Anything else → loops infinitely. Default for ambient cycle anims
+  (windmill spin, car drive cycle, bird flapping).
+
+**Speaker.volume keyframes** — animate a Speaker's `Volume` property in
+Blender (right-click the field → Insert Keyframe), and the addon samples
+the curve across the scene frame range and bakes it into the emitter's
+`extras.rubics.envelope`. The runtime multiplies envelope[time] into the
+loop's gain on every tick, so authored volume curves replay verbatim.
+
+**The "Bake Animations" button** flattens all drivers and constraints on
+selected objects (or all objects) into explicit keyframes BEFORE export.
+You don't normally need this — `export_force_sampling=True` handles it
+during export — but use it when you want to:
+- Inspect the baked output in Blender (see the keyframes appear in the
+  graph editor)
+- Hand a "clean" .blend to another author with no driver setup
+- Lock down scripted motion that you don't want re-evaluated at export
+  time
+
+**What does NOT round-trip:**
+- Geometry node animations beyond what `export_apply` can flatten
+- Particle systems (use simulated/baked alembic + import)
+- Shader / material animations (project uses its own sphere-projection
+  shader anyway — author lighting via PBR property values, not Cycles
+  node trees)
+
+## Audio (KHR_audio_emitter)
+
+Author sound emitters using Blender's native **Speaker** object
+(Object → Add → Speaker). Properties map to KHR_audio_emitter on export.
+
+**Workflow:**
+
+1. **Add a Speaker.** Object → Add → Speaker. Drag it where the sound
+   should originate, or **parent it to an animated object** (the windmill,
+   the car) — animation propagates via standard scene-graph parenting.
+2. **Set the sound file.** In the Speaker's data properties (the speaker
+   icon), set `Sound` to a file inside `<project>/public/audio/` (e.g.
+   `windy_grass.ogg`). The exporter writes the basename and prefixes with
+   `audio/` automatically.
+3. **Set the falloff.** Speaker properties:
+   - `Distance > Reference` → `refDistance` (full-volume inner radius)
+   - `Distance > Maximum`   → `maxDistance` (silence beyond this)
+   - `Attenuation`          → rolloff factor (1.0 = standard linear)
+   - `Volume`               → emitter gain (clamped 0..1)
+4. **Optional: project-private modulator metadata** (custom properties
+   on the Speaker object — Object Properties → Custom Properties):
+   - `rubics_audio_key` (string) — override the loop key
+   - `rubics_audio_params` (string, JSON) — full LoopDef.params shape
+     (e.g. `{"vol":{"base":0.5,"modulator":"windStrength"}}`)
+   - `rubics_audio_modulator` (string) — modulator name(s),
+     comma-separated for a list
+   - `rubics_audio_vol` (float) — base volume override
+5. **Export.** Standard Export Diorama / Live Mode does it. The exporter
+   walks Speakers, post-patches the .glb with `KHR_audio_emitter` data.
+6. **Mute a Speaker** → it's skipped from export (Blender's Mute toggle
+   on the Speaker datablock).
+
+Animations on the parent flow through automatically (the speaker rides
+the parent's TRS). Animated `speaker.volume` keyframes are NOT
+round-tripped in this version — modulators (project's runtime gain
+sources) are the recommended path for dynamic gain.
+
+The runtime is sphere-projection aware: emitters anchored anywhere inside
+the cube-net are projected onto the visible sphere position before audio
+distance is computed (so "inside the zone" matches what the user sees).
 
 ## Install
 
