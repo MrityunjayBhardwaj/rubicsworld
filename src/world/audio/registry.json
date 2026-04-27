@@ -30,7 +30,8 @@
       }
     },
     {
-      "key": "grass_swipe", "anchor": "world", "src": "audio/grass_swipe.ogg",
+      "key": "grass_swipe", "anchor": "object:scene_center", "src": "audio/grass_swipe.ogg",
+      "radius": 14,
       "params": {
         "vol":      { "base": 0.6, "modulator": "grassSwipeIntensity" },
         "rate":     { "modulator": "grassSwipeIntensity", "min": 0.9, "max": 1.4 },

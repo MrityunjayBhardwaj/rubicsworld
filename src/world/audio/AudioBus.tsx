@@ -24,6 +24,7 @@ export function AudioBus() {
 
   useEffect(() => {
     audioBus.attachListener(camera)
+    audioBus.attachSphereScene(scene)
     installAudioSubscriptions()
 
     // First-gesture unlock — browsers auto-suspend the AudioContext until a
@@ -51,16 +52,12 @@ export function AudioBus() {
     // Wind-strength source: read directly from the grass shader's wind
     // uniform so audio tracks whatever the user dialled in Leva.
     audioBus.setWindStrengthSource(() => grassUniforms.uWindStrength.value)
-    // Virtual anchor for the boids flock: we update its world position to
-    // the centroid of the 'birds' group's child meshes each frame. Lives
-    // for the lifetime of the AudioBus mount.
-    if (!flockAnchor.current) {
-      const a = new THREE.Object3D()
-      a.name = 'birds_flock_anchor'
-      scene.add(a)
-      flockAnchor.current = a
-      audioBus.registerAnchor('birds_flock', a)
-    }
+    // Virtual SOURCE for the boids flock — a dScene-local Object3D parented
+    // to the birds group. We write the centroid (in birds-group local) to
+    // its `position` each frame; the bus then projects flat→sphere and
+    // pushes the result to the matching tracker in main scene. Source is
+    // created lazily once birds_group is registered.
+    flockAnchor.current = null
     // Scene-origin anchor: a virtual Object3D parked at (0,0,0). Loops can
     // anchor here for "centre of the sphere" positional sources (ambient
     // wind for the world, etc) so distance-based falloff is keyed off the
@@ -154,19 +151,43 @@ export function AudioBus() {
     }
 
     // Update flock centroid each frame. TileGrid registers the live 'birds'
-    // group as anchor 'birds_group' — pull it from the bus, average child
-    // positions, and route through localToWorld (birds children live in
-    // diorama-root space, which itself sits inside dScene; localToWorld
-    // walks the parent chain regardless of which Scene the group is in).
+    // group as anchor 'birds_group'. We keep a SOURCE Object3D parented to
+    // birds_group whose local `position` is the centroid of its sibling
+    // bird meshes — staying inside birds-group local space avoids walking
+    // through diorama.root (which gets clobbered every frame by the per-tile
+    // render loop). The bus's updateSphereTrackers projects flat→sphere and
+    // pushes to the main-scene tracker.
     const birdsGroup = audioBus.getAnchor('birds_group')
-    if (birdsGroup && flockAnchor.current && birdsGroup.children.length > 0) {
-      const c = flockScratch.current.set(0, 0, 0)
-      const kids = birdsGroup.children
-      for (const child of kids) c.add(child.position)
-      c.multiplyScalar(1 / kids.length)
-      birdsGroup.localToWorld(c)
-      flockAnchor.current.position.copy(c)
+    if (birdsGroup) {
+      let src = flockAnchor.current
+      if (!src || src.parent !== birdsGroup) {
+        src = new THREE.Object3D()
+        src.name = '__audio_origin_birds_flock'
+        birdsGroup.add(src)
+        flockAnchor.current = src
+        audioBus.registerDioramaSource('birds_flock', src)
+      }
+      if (birdsGroup.children.length > 1) {
+        // Average sibling positions (ignore the source itself) in birds-group
+        // local space. Source's local position becomes the local centroid.
+        const c = flockScratch.current.set(0, 0, 0)
+        let n = 0
+        for (const child of birdsGroup.children) {
+          if (child === src) continue
+          c.add(child.position)
+          n++
+        }
+        if (n > 0) {
+          c.multiplyScalar(1 / n)
+          src.position.copy(c)
+        }
+      }
     }
+
+    // Project all diorama sources flat→sphere into their main-scene trackers.
+    // Must run BEFORE audioBus.tick so any modulator/observation that depends
+    // on tracker world position sees the current frame's value.
+    audioBus.updateSphereTrackers()
 
     audioBus.tick(dt)
   })

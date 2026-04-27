@@ -9,6 +9,7 @@
 import * as THREE from 'three'
 import registryJson from './registry.json'
 import { SYNTHS, SYNTH_LOOPS, type SynthLoopHandle } from './synth'
+import { cubeNetToSphere } from './sphereProject'
 
 export type AnchorRef = 'world' | 'camera_motion' | `object:${string}`
 
@@ -24,6 +25,19 @@ export interface ParamSpec {
   min?: number
   max?: number
   invert?: boolean
+}
+
+/**
+ * Volume envelope baked from a Blender Speaker's keyframed `.volume`
+ * property. The runtime samples it per frame against an external clock —
+ * usually the diorama's AnimationMixer time so audio stays sync'd with
+ * visual animation. fps lets the runtime convert clock seconds → sample
+ * index. Looped against `samples.length / fps` (so a 3 s envelope at 60 fps
+ * holds 180 entries and loops every 3 s).
+ */
+export interface VolumeEnvelope {
+  fps: number
+  samples: number[]
 }
 
 export interface LoopDef {
@@ -49,6 +63,10 @@ export interface LoopDef {
   // linear falloff from full gain at the source to zero at the radius.
   // Visualised as a wireframe reach sphere by SoundVisualizer.
   radius?: number
+  // Baked Speaker.volume animation. When present, the runtime multiplies
+  // envelope[time] into the loop's gain on each tick. Authored entirely
+  // in Blender; not present for non-glb-imported loops.
+  envelope?: VolumeEnvelope
 }
 export interface EventDef {
   key: string
@@ -98,6 +116,26 @@ function smoothSet(param: AudioParam | undefined, target: number, ctx: AudioCont
   if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(now)
   else param.cancelScheduledValues(now)
   param.linearRampToValueAtTime(target, now + horizon)
+}
+
+/**
+ * Sample a baked Speaker volume envelope at the given clock time, with
+ * linear interpolation between adjacent samples and modulo wrap so the
+ * envelope loops cleanly. Defaults to 1.0 (silent transparent) for empty
+ * or malformed envelopes.
+ */
+function sampleEnvelope(env: { fps: number; samples: number[] }, t: number): number {
+  const n = env.samples.length
+  if (n === 0 || env.fps <= 0) return 1
+  if (n === 1) return env.samples[0]
+  const len = n / env.fps
+  const tMod = ((t % len) + len) % len
+  const idx = tMod * env.fps
+  const i0 = Math.floor(idx) % n
+  const i1 = (i0 + 1) % n
+  const frac = idx - Math.floor(idx)
+  const v = env.samples[i0] * (1 - frac) + env.samples[i1] * frac
+  return Number.isFinite(v) ? v : 1
 }
 
 // Promote legacy `vol`/`modulator` shorthand to params.vol AND expand the
@@ -214,6 +252,22 @@ class AudioBus {
   // oscFreq + lowpass via param bindings.
   private carSpeed = 0
 
+  // Sphere-projection plumbing. Diorama anchors (car/windmill/pond/birds_flock)
+  // live in dScene's flat 4×6 cube-net coord space; the GPU folds it onto the
+  // sphere at render time. The audio listener is in main-scene world space
+  // (orbiting at sphere radius). To put PositionalAudio at the same point the
+  // user *sees*, we project each diorama source flat→sphere on the CPU each
+  // frame and write the result to a tracker Object3D in main scene. The
+  // PositionalAudio attaches to the tracker, not the source.
+  private dioramaSources = new Map<string, THREE.Object3D>()
+  private dioramaTrackers = new Map<string, THREE.Object3D>()
+  private trackerScene: THREE.Scene | null = null
+  private dioramaRoot: THREE.Object3D | null = null
+  private _trackerScratchFlat = new THREE.Vector3()
+  private _trackerScratchSphere = new THREE.Vector3()
+  private _savedRootPos = new THREE.Vector3()
+  private _savedRootQuat = new THREE.Quaternion()
+
   attachListener(camera: THREE.Camera) {
     if (this.listener && this.listener.parent === camera) return
     if (this.listener) this.listener.parent?.remove(this.listener)
@@ -251,6 +305,11 @@ class AudioBus {
   // PositionalAudio + the visualiser sphere both attach at the visual
   // middle of the group instead of its local-space (0,0,0) origin.
   // Idempotent — re-registering reuses the existing centre child.
+  //
+  // The COM child lives in dScene (flat cube-net space). When sphere
+  // projection is wired (`attachSphereScene` + `setDioramaRoot` both called),
+  // we register a tracker Object3D in main scene as the actual audio anchor
+  // and treat the COM child as the source for per-frame projection.
   registerAnchorAtCenter(id: string, group: THREE.Object3D) {
     const childName = `__audio_origin_${id}`
     let origin = group.getObjectByName(childName) as THREE.Object3D | undefined
@@ -269,11 +328,107 @@ class AudioBus {
       origin.position.copy(center)
       group.add(origin)
     }
-    this.registerAnchor(id, origin)
+    this.registerDioramaSource(id, origin)
+  }
+
+  // Like registerAnchorAtCenter but the caller supplies a pre-built source
+  // Object3D living in dScene (used for dynamic sources like the birds-flock
+  // centroid where COM doesn't apply — the source's local position is
+  // updated each frame by the producer).
+  registerDioramaSource(id: string, source: THREE.Object3D) {
+    this.dioramaSources.set(id, source)
+    if (this.trackerScene) {
+      const tracker = this.ensureTracker(id)
+      this.registerAnchor(id, tracker)
+    } else {
+      // Sphere projection not wired (preview modes, tests). Fall back to
+      // attaching audio directly to the source — wrong-coord-space, but
+      // matches old behaviour.
+      this.registerAnchor(id, source)
+    }
+  }
+
+  private ensureTracker(id: string): THREE.Object3D {
+    let tracker = this.dioramaTrackers.get(id)
+    if (!tracker) {
+      tracker = new THREE.Object3D()
+      tracker.name = `__audio_sphere_tracker_${id}`
+      this.dioramaTrackers.set(id, tracker)
+    }
+    if (this.trackerScene && tracker.parent !== this.trackerScene) {
+      tracker.parent?.remove(tracker)
+      this.trackerScene.add(tracker)
+    }
+    return tracker
+  }
+
+  // Wire the main R3F scene used to host trackers. Called once by AudioBus.tsx.
+  attachSphereScene(scene: THREE.Scene) {
+    if (this.trackerScene === scene) return
+    this.trackerScene = scene
+    // Retroactively migrate already-registered diorama sources to trackers.
+    // Reparents any PositionalAudio nodes already attached under the source —
+    // without this, registerAnchor only updates the lookup map, leaving live
+    // audio nodes stranded under the dScene COM (= chop never gets fixed).
+    for (const [id, source] of this.dioramaSources) {
+      const tracker = this.ensureTracker(id)
+      if (this.anchors.get(id) === source) {
+        this.anchors.set(id, tracker)
+      }
+      for (const lr of this.loops.values()) {
+        if (lr.def.anchor !== `object:${id}` || !lr.node) continue
+        if (lr.node.parent === tracker) continue
+        lr.node.parent?.remove(lr.node)
+        tracker.add(lr.node)
+      }
+    }
+  }
+
+  // Wire the diorama root for the temp-reset trick during projection. Called
+  // by TileGrid each time it builds (or hot-replaces) the diorama.
+  setDioramaRoot(root: THREE.Object3D | null) {
+    this.dioramaRoot = root
+  }
+
+  // Per-frame: project every diorama source from cube-net flat space onto the
+  // sphere surface and write the result to its tracker. Resets diorama.root
+  // to identity around the read so source.getWorldPosition() returns
+  // dScene-local coords (TileGrid leaves the root at the last-tile transform
+  // after rendering — reading without resetting yields garbage).
+  updateSphereTrackers() {
+    const root = this.dioramaRoot
+    if (!root || !this.trackerScene || this.dioramaSources.size === 0) return
+
+    this._savedRootPos.copy(root.position)
+    this._savedRootQuat.copy(root.quaternion)
+    root.position.set(0, 0, 0)
+    root.quaternion.identity()
+    root.updateMatrix()
+    root.updateMatrixWorld(true)
+
+    for (const [id, source] of this.dioramaSources) {
+      const tracker = this.dioramaTrackers.get(id)
+      if (!tracker) continue
+      source.getWorldPosition(this._trackerScratchFlat)
+      if (cubeNetToSphere(this._trackerScratchFlat, this._trackerScratchSphere)) {
+        tracker.position.copy(this._trackerScratchSphere)
+      }
+    }
+
+    root.position.copy(this._savedRootPos)
+    root.quaternion.copy(this._savedRootQuat)
+    root.updateMatrix()
+    root.updateMatrixWorld(true)
   }
 
   unregisterAnchor(id: string) {
     this.anchors.delete(id)
+    this.dioramaSources.delete(id)
+    const tracker = this.dioramaTrackers.get(id)
+    if (tracker) {
+      tracker.parent?.remove(tracker)
+      this.dioramaTrackers.delete(id)
+    }
     // Stop and detach loops bound to this anchor; mark them pending.
     for (const lr of this.loops.values()) {
       if (lr.def.anchor === `object:${id}` && lr.node) {
@@ -499,7 +654,13 @@ class AudioBus {
 
       if (name === 'vol') {
         const userVol = ovr?.vol ?? 1
-        const raw = muted ? 0 : this.computeFinalGain(lr.def.key, value * userVol, 1)
+        // WYSIWYG envelope: a Speaker.volume keyframe curve baked in
+        // Blender. Loops independently against AudioContext currentTime
+        // (no visual-mixer sync — the envelope length is the authored
+        // loop length).
+        const env = lr.def.envelope
+        const envMul = env ? sampleEnvelope(env, ctx.currentTime) : 1
+        const raw = muted ? 0 : this.computeFinalGain(lr.def.key, value * userVol * envMul, 1)
         const finalGain = Number.isFinite(raw) ? raw : 0
         lr.lastGain = finalGain
         // Bypass THREE.Audio.setVolume / direct .value writes — those step
@@ -609,8 +770,90 @@ class AudioBus {
     return this.anchors.get(id)
   }
 
+  // Runtime loop registry — entries added at runtime (e.g. from a glb's
+  // KHR_audio_emitter import) live here, separate from the static REGISTRY.
+  // Visualizer + any UI that wants the full picture should use getAllLoopDefs.
+  private runtimeLoops = new Map<string, LoopDef>()
+
+  /**
+   * Add a loop at runtime. Idempotent on key — re-registering with the same
+   * key replaces the prior runtime def. If the loop is already attached, the
+   * existing audio node is torn down and rebuilt with the new def. Used by
+   * the KHR_audio_emitter importer (glb-driven audio) and Live-Mode swaps.
+   */
+  registerLoop(def: LoopDef) {
+    const normalized = normalizeLoopDef(def)
+    const existing = this.loops.get(def.key)
+    if (existing) {
+      // Tear down existing node so the new def takes effect (radius / src /
+      // params may have changed).
+      this.detachLoopNode(existing)
+      existing.def = normalized
+    } else {
+      this.runtimeLoops.set(def.key, normalized)
+      this.registerLoopRuntime(normalized)
+    }
+    // Bus may be pre-listener (boot deferred) — attachLoop short-circuits
+    // until the listener is available.
+    const lr = this.loops.get(def.key)
+    if (lr && this.listener) this.attachLoop(lr)
+  }
+
+  /**
+   * Remove a runtime loop. Fades the audio node down briefly to avoid pops,
+   * then detaches and stops it. No-op if the key isn't a runtime loop (we
+   * don't allow yanking REGISTRY entries — those are static).
+   */
+  unregisterLoop(key: string) {
+    if (!this.runtimeLoops.has(key)) return
+    const lr = this.loops.get(key)
+    if (lr) {
+      this.detachLoopNode(lr)
+      this.loops.delete(key)
+    }
+    this.runtimeLoops.delete(key)
+  }
+
+  /** REGISTRY.loops + runtimeLoops, in registration order. */
+  getAllLoopDefs(): LoopDef[] {
+    return [...REGISTRY.loops, ...this.runtimeLoops.values()]
+  }
+
+  /**
+   * Tear down an attached loop's audio node + filters. Source nodes can't
+   * be restarted once stopped, so the runtime entry's `node`/`synth` slots
+   * are nulled — attachLoop rebuilds from `def` on next call.
+   */
+  private detachLoopNode(lr: LoopRuntime) {
+    const ctx = this.listener?.context ?? null
+    if (lr.node) {
+      // Brief fade to avoid pops on swap.
+      try {
+        if (ctx) {
+          const g = lr.node.gain.gain
+          smoothSet(g, 0, ctx, 0.05)
+        }
+      } catch { /* ignore */ }
+      try { lr.node.stop() } catch { /* ignore */ }
+      lr.node.parent?.remove(lr.node)
+      lr.node = null
+    }
+    if (lr.synth) {
+      try { lr.synth.source.stop?.() } catch { /* ignore */ }
+      lr.synth = null
+    }
+    if (lr.synthGain) {
+      try { lr.synthGain.disconnect() } catch { /* ignore */ }
+      lr.synthGain = null
+    }
+    lr.filters = null
+    lr.buffer = null
+    lr.pendingAnchor = null
+    lr.lastGain = 0
+  }
+
   private bootLoops() {
-    for (const def of REGISTRY.loops) {
+    for (const def of this.getAllLoopDefs()) {
       const lr = this.registerLoopRuntime(def)
       // Skip if already attached/synthed.
       if (lr.node || lr.synth) continue
