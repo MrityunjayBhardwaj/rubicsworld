@@ -17,6 +17,8 @@ import type { DioramaScene } from './buildDiorama'
 import { buildGrass, grassRefs } from './buildGrass'
 import { weldCubeNetSeams } from './weldSeams'
 import { clearColliders, registerCollider } from '../world/colliderRefs'
+import { createKhrAudioEmitterPlugin, type KhrImportResult } from '../world/audio/khrAudioEmitter'
+import { audioBus } from '../world/audio/bus'
 
 /** Collapse visually-identical materials onto a single shared instance.
  *  Fingerprint includes every property the sphere-projection onBeforeCompile
@@ -93,6 +95,12 @@ export async function loadGlbDiorama(
 ): Promise<DioramaScene | null> {
   const { includeMeadow = true } = opts
   const loader = new GLTFLoader()
+  // Register the KHR_audio_emitter parser plugin BEFORE load so emitter
+  // afterRoot fires on the loaded GLTF. baseUrl resolves audio.uri relative
+  // to the glb's location (typically /diorama.glb → audio at /audio/foo.ogg).
+  let absoluteBase: string | undefined
+  try { absoluteBase = new URL(url, window.location.href).href } catch { /* ignore */ }
+  loader.register(createKhrAudioEmitterPlugin(absoluteBase))
   let gltf: Awaited<ReturnType<GLTFLoader['loadAsync']>>
   try {
     gltf = await loader.loadAsync(url)
@@ -228,15 +236,34 @@ export async function loadGlbDiorama(
     }
   }
 
-  // Animation mixer drives every clip the exporter baked in. Plays on loop;
-  // individual actions can be gated via mixer.clipAction(clip).setLoop(...)
-  // if that becomes needed.
+  // Animation mixer drives every clip the exporter baked in. WYSIWYG
+  // naming convention:
+  //   - Clip name ends with `_once` or `_oneshot` → play once, clamp to
+  //     the last frame (hold). Use this for intro flourishes, scripted
+  //     beats, anything that should fire and stop.
+  //   - Default → loop infinitely. Most diorama loops fall here (windmill
+  //     spin, car drive cycle, ambient flapping).
+  // Authored in Blender as Action names ('myAction_once' etc.) — those
+  // names round-trip through gltf.animations[].name.
   const mixer = gltf.animations.length ? new THREE.AnimationMixer(gltf.scene) : null
   if (mixer) {
     for (const clip of gltf.animations) {
       const action = mixer.clipAction(clip)
-      action.setLoop(THREE.LoopRepeat, Infinity)
+      const name = (clip.name ?? '').toLowerCase()
+      const oneShot = name.endsWith('_once') || name.endsWith('_oneshot')
+      if (oneShot) {
+        action.setLoop(THREE.LoopOnce, 1)
+        action.clampWhenFinished = true
+      } else {
+        action.setLoop(THREE.LoopRepeat, Infinity)
+      }
       action.play()
+    }
+    if (import.meta.env?.DEV) {
+      const oneShotCount = gltf.animations.filter(c =>
+        (c.name ?? '').toLowerCase().match(/_(once|oneshot)$/)).length
+      // eslint-disable-next-line no-console
+      console.log(`[diorama] animations: ${gltf.animations.length} clip(s), ${oneShotCount} one-shot, ${gltf.animations.length - oneShotCount} looping`)
     }
   }
 
@@ -263,5 +290,15 @@ export async function loadGlbDiorama(
     grass?.update(elapsed)
   }
 
-  return { root, update }
+  // Pull KHR_audio_emitter import receipt so the caller can clean up loops
+  // on diorama swap. Audio nodes registered by the importer plugin live on
+  // the audio bus, NOT on the diorama subtree — removing the diorama from
+  // dScene doesn't unregister them.
+  const audioImport = gltf.scene.userData?.KHR_audio_emitter as KhrImportResult | undefined
+  const registeredAudioKeys = audioImport?.registeredKeys ?? []
+  const dispose = registeredAudioKeys.length > 0
+    ? () => { for (const k of registeredAudioKeys) audioBus.unregisterLoop(k) }
+    : undefined
+
+  return { root, update, dispose, animations: gltf.animations }
 }

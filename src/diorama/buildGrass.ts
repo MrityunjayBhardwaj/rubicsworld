@@ -94,6 +94,12 @@ export interface GrassUniforms {
   uTrailPos:      { value: Float32Array }  // length 3 * TRAIL_N
   uTrailTime:     { value: Float32Array }  // length TRAIL_N
   uTrailDecay:    { value: number }        // seconds
+  /** Per-tile shader cull. -1 = render all blades (default, identical to
+   *  pre-optimization). [0, 23] = only blades whose home-tile index
+   *  matches survive; the rest collapse to a degenerate point in the
+   *  vertex shader before the heavy bend / hover math runs. TileGrid's
+   *  per-tile loop sets this each pass on /optimize/. */
+  uActiveTileIdx: { value: number }
 }
 
 /** Number of cursor stamps in the trail ring buffer. Must match the
@@ -104,6 +110,8 @@ export const GRASS_TRAIL_N = 32
 // Defaults sourced from settings/defaults.json — single source of truth.
 // Mirror `new` / wrap into three.js types where needed.
 import { settings } from '../settings'
+import { CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
+import { HALF_W, HALF_H } from './buildDiorama'
 
 /** Module-scoped uniforms shared by grass + flowers (wind, lighting-ish). */
 export const grassUniforms: GrassUniforms = {
@@ -125,6 +133,7 @@ export const grassUniforms: GrassUniforms = {
   uTrailPos:      { value: new Float32Array(GRASS_TRAIL_N * 3) },
   uTrailTime:     { value: new Float32Array(GRASS_TRAIL_N).fill(-1e6) },
   uTrailDecay:    { value: settings.grass.trailDecay },
+  uActiveTileIdx: { value: -1 },
 }
 
 /** Per-flower-colour uniforms — one vec3 per flower type, written by Leva. */
@@ -205,30 +214,61 @@ export const grassDebug: { data: GrassDebugData | null } = { data: null }
 
 // ── Geometry helpers ───────────────────────────────────────────────────────
 
-/** Tapered grass blade — two crossed quads. Narrow, procedural taper in shader. */
-export function buildBladeGeometry(width: number, height: number): THREE.BufferGeometry {
+/** Tapered blade. Two construction modes:
+ *  - `loopCuts=0` (default) — two crossed quads, billboard-style. Each
+ *    blade looks the same from any side. Used for flowers (the
+ *    fragment shader needs symmetric coverage to draw the blossom).
+ *  - `loopCuts>=1` — single quad in the XY plane, sliced by N
+ *    horizontal cuts. 2 cuts → 4 rows of verts → 6 triangles. Each
+ *    blade is a SINGLE strand (one plane, not crossed) and the extra
+ *    mid-height vertices let the wind bend curve smoothly instead of
+ *    pivoting at the tip alone. Per-instance random yaw (built into
+ *    `instanceMatrix`) is what gives the meadow visual variety —
+ *    without crossed quads, the strand's facing direction matters,
+ *    and the random yaw covers all angles statistically. */
+export function buildBladeGeometry(
+  width: number,
+  height: number,
+  loopCuts = 0,
+): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry()
   const w = width / 2
   const positions: number[] = []
   const uvs: number[] = []
   const normals: number[] = []
   const indices: number[] = []
-  const quads = [
-    { ax: 1, az: 0, nx: 0, nz: 1 },
-    { ax: 0, az: 1, nx: 1, nz: 0 },
-  ]
-  for (let q = 0; q < 2; q++) {
-    const base = q * 4
-    const { ax, az, nx, nz } = quads[q]
-    positions.push(
-      -w * ax, 0,       -w * az,
-      +w * ax, 0,       +w * az,
-      +w * ax, height,  +w * az,
-      -w * ax, height,  -w * az,
-    )
-    uvs.push(0, 0,  1, 0,  1, 1,  0, 1)
-    for (let i = 0; i < 4; i++) normals.push(nx, 0, nz)
-    indices.push(base, base + 1, base + 2, base, base + 2, base + 3)
+
+  if (loopCuts <= 0) {
+    const quads = [
+      { ax: 1, az: 0, nx: 0, nz: 1 },
+      { ax: 0, az: 1, nx: 1, nz: 0 },
+    ]
+    for (let q = 0; q < 2; q++) {
+      const base = q * 4
+      const { ax, az, nx, nz } = quads[q]
+      positions.push(
+        -w * ax, 0,       -w * az,
+        +w * ax, 0,       +w * az,
+        +w * ax, height,  +w * az,
+        -w * ax, height,  -w * az,
+      )
+      uvs.push(0, 0,  1, 0,  1, 1,  0, 1)
+      for (let i = 0; i < 4; i++) normals.push(nx, 0, nz)
+      indices.push(base, base + 1, base + 2, base, base + 2, base + 3)
+    }
+  } else {
+    const rows = loopCuts + 2  // bottom + N cuts + top
+    for (let r = 0; r < rows; r++) {
+      const t = r / (rows - 1)
+      const y = t * height
+      positions.push(-w, y, 0,  +w, y, 0)
+      uvs.push(0, t,  1, t)
+      normals.push(0, 0, 1,  0, 0, 1)
+    }
+    for (let r = 0; r < rows - 1; r++) {
+      const a = r * 2
+      indices.push(a, a + 1, a + 3,  a, a + 3, a + 2)
+    }
   }
   g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
   g.setAttribute('uv',       new THREE.Float32BufferAttribute(uvs, 2))
@@ -264,12 +304,28 @@ const VERTEX_COMMON = /* glsl */`
   uniform vec3  uTrailPos[TRAIL_N];
   uniform float uTrailTime[TRAIL_N];
   uniform float uTrailDecay;
+  attribute float iTileIdx;
+  uniform float uActiveTileIdx;
 `
 
 const VERTEX_BEGIN = /* glsl */`
   vec3 transformed = vec3(position);
   vGrassUv = uv;
   vHue = iHue;
+
+  // Per-tile shader cull. uActiveTileIdx == -1 → render every blade
+  // (default + non-/optimize/ path, identical to old behaviour).
+  // uActiveTileIdx in [0,23] → only blades whose home-tile index
+  // matches survive; the rest collapse to the instance origin (8 verts
+  // per blade map to one point → degenerate triangles → no fragments)
+  // AND skip the heavy bend / hover-trail math below. Big win because
+  // the bend + trail loop is the costliest part of the grass shader,
+  // and 23 of every 24 tile passes are looking at "the wrong tile" for
+  // most blades.
+  bool _gCulled = (uActiveTileIdx >= 0.0) && (abs(iTileIdx - uActiveTileIdx) > 0.5);
+  if (_gCulled) {
+    transformed = vec3(0.0);
+  } else {
 
   vec3 instOrigin = vec3(instanceMatrix[3].xyz);
   vec3 worldWind3 = normalize(vec3(uWindDir.x, 0.0, uWindDir.y) + vec3(1e-4));
@@ -352,6 +408,7 @@ const VERTEX_BEGIN = /* glsl */`
     mat3 worldToRoot = transpose(mat3(modelMatrix));
     transformed += transpose(iRot) * worldToRoot * accumOffset;
   }
+  } // end of !_gCulled branch
 `
 
 const GRASS_FRAG_COMMON = /* glsl */`
@@ -434,6 +491,7 @@ export function createGrassMaterial(): THREE.MeshStandardMaterial {
     shader.uniforms.uTrailPos      = grassUniforms.uTrailPos
     shader.uniforms.uTrailTime     = grassUniforms.uTrailTime
     shader.uniforms.uTrailDecay    = grassUniforms.uTrailDecay
+    shader.uniforms.uActiveTileIdx = grassUniforms.uActiveTileIdx
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', VERTEX_COMMON)
       .replace('#include <begin_vertex>', VERTEX_BEGIN)
@@ -476,6 +534,7 @@ export function createFlowerMaterial(color: { value: THREE.Color }): THREE.MeshS
     shader.uniforms.uTrailPos      = grassUniforms.uTrailPos
     shader.uniforms.uTrailTime     = grassUniforms.uTrailTime
     shader.uniforms.uTrailDecay    = grassUniforms.uTrailDecay
+    shader.uniforms.uActiveTileIdx = grassUniforms.uActiveTileIdx
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', VERTEX_COMMON)
       .replace('#include <begin_vertex>', VERTEX_BEGIN)
@@ -831,8 +890,13 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     hues: number[]
     yaws: number[]
     scales: number[]
+    /** Per-blade home-tile index (0..23) computed from (flatX, flatZ).
+     *  Consumed by the per-tile shader cull (uActiveTileIdx). -1 if the
+     *  blade fell outside the cube-net cross (shouldn't happen because
+     *  it'd fail the gate, but be permissive). */
+    tileIdxs: number[]
   }
-  const emptyPer = (): Per => ({ positions: [], positions2D: [], normals: [], hues: [], yaws: [], scales: [] })
+  const emptyPer = (): Per => ({ positions: [], positions2D: [], normals: [], hues: [], yaws: [], scales: [], tileIdxs: [] })
   const per: Record<Bucket, Per> = {
     grass:  emptyPer(),
     pink:   emptyPer(),
@@ -896,6 +960,23 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
     bp.hues.push(Math.random())
     bp.yaws.push(Math.random() * Math.PI * 2)
     bp.scales.push(0.75 + Math.random() * 0.5)
+    // Map (flatX, flatZ) → home-tile index (face*4 + v*2 + u). cellFace
+    // returns -1 for cells outside the cross — keep -1 so the shader
+    // cull treats them as "always render" (matches `uActiveTileIdx == -1`
+    // sentinel; any clamped float comparison falls through harmlessly).
+    {
+      const col = Math.floor((flatX + HALF_W) / CELL)
+      const row = Math.floor((flatZ + HALF_H) / CELL)
+      const face = cellFace(col, row)
+      if (face < 0) {
+        bp.tileIdxs.push(-1)
+      } else {
+        const tl = FACE_TO_BLOCK_TL[face]
+        const u = Math.max(0, Math.min(1, col - tl[0]))
+        const v = Math.max(0, Math.min(1, row - tl[1]))
+        bp.tileIdxs.push(face * 4 + v * 2 + u)
+      }
+    }
     debugFlat.push(flatX, flatZ)
   }
 
@@ -916,13 +997,23 @@ export function buildGrass(dioramaRoot: THREE.Object3D, opts: GrassOpts = {}): G
       const t = perm[i]; perm[i] = perm[j]; perm[j] = t
     }
     const shuffledHues = new Float32Array(n)
-    for (let i = 0; i < n; i++) shuffledHues[i] = bp.hues[perm[i]]
+    const shuffledTileIdx = new Float32Array(n)
+    for (let i = 0; i < n; i++) {
+      shuffledHues[i] = bp.hues[perm[i]]
+      shuffledTileIdx[i] = bp.tileIdxs[perm[i]] ?? -1
+    }
 
     const isGrass = bucket === 'grass'
+    // Grass: single strand (one plane) with 2 horizontal loop cuts so
+    // the wind bend curves smoothly across midheights instead of
+    // hinging at the tip. Flowers stay on the legacy crossed-quad
+    // billboard so the shader's circular blossom looks the same from
+    // any angle.
     const geom = isGrass
-      ? buildBladeGeometry(bladeWidth, bladeHeight)
+      ? buildBladeGeometry(bladeWidth, bladeHeight, 2)
       : buildBladeGeometry(flowerWidth, flowerHeight)
     geom.setAttribute('iHue', new THREE.InstancedBufferAttribute(shuffledHues, 1))
+    geom.setAttribute('iTileIdx', new THREE.InstancedBufferAttribute(shuffledTileIdx, 1))
 
     const material = isGrass
       ? createGrassMaterial()
