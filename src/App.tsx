@@ -8,6 +8,7 @@ import { Interaction } from './world/Interaction'
 import { WalkControls } from './world/WalkControls'
 import { IntroCinematic } from './world/IntroCinematic'
 import { TutorialHint, TutorialChrome } from './world/TutorialOverlay'
+import { FpsMeter } from './world/FpsMeter'
 import { AiSeed } from './world/AiSeed'
 import { PostFx } from './world/PostFx'
 import { TileLabels, TileLabelsLegend } from './world/TileLabels'
@@ -137,6 +138,7 @@ export default function App() {
       {!preview && <GrassPanel />}
       {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <TutorialChrome />
+      <FpsMeter />
       <Canvas
         camera={{
           position: isTopDownPreview ? [0, 22, 0.1] : isRubik ? [3.2, 2.2, 3.2] : [2.4, 1.6, 2.8],
@@ -149,7 +151,11 @@ export default function App() {
         // SSGI/TRAA) can later take full control of MSAA. toneMapping moved
         // to the renderer (ACES Filmic) so effect passes receive linear input.
         gl={{ antialias: false, stencil: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.35 }}
-        dpr={[1, 2]}
+        // Cap pixel ratio at 1.5: on 2x retina the FB shrinks from ~5.8M
+        // pixels to ~3.3M (~56%), big fragment-shading win for the 24-pass
+        // sphere render + DoF blur with negligible visual cost. SMAA in
+        // the PostFx chain handles edge AA at any DPR.
+        dpr={[1, 1.5]}
       >
         <color attach="background" args={['#0a0d12']} />
         <DevSceneExpose />

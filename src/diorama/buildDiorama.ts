@@ -571,6 +571,11 @@ function buildWindmill(px: number, pz: number) {
   g.add(cap)
 
   const blades = new THREE.Group()
+  // Named so the bake harness's per-node TRS sampler picks it up. Without
+  // a name the blade-spin animation gets dropped from the .glb (BakeRoute
+  // skips unnamed nodes — KeyframeTrack paths must match a node name on
+  // import).
+  blades.name = 'windmill_wings'
   blades.position.set(0, 0.7, 0.14)
   for (let i = 0; i < 4; i++) {
     const blade = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.44, 0.01), mat({ color: '#d4c8a0', roughness: 0.7 }))
@@ -737,6 +742,7 @@ function buildSmoke(px: number, pz: number) {
       roughness: 1.0, metalness: 0,  // soft diffuse — smoke is a participating medium fake
     })
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 6, 6), m)
+    mesh.name = `smoke_puff_${i}`
     mesh.scale.setScalar(0.016)
     g.add(mesh)
     particles.push({ offset: i * 0.4, xBase: Math.sin(i * 3.7) * 0.02, mat: m })
@@ -1064,8 +1070,12 @@ function wingGeometry(side: 1 | -1): THREE.BufferGeometry {
   return g
 }
 
-function buildBirdMesh(mat: THREE.MeshStandardMaterial) {
+function buildBirdMesh(mat: THREE.MeshStandardMaterial, idx: number) {
   const g = new THREE.Group()
+  // Per-bird unique names so the bake harness writes one set of TRS tracks
+  // per bird (paths must be unique within a clip — KeyframeTrack target
+  // resolves by name, no namespacing).
+  g.name = `bird_${idx}`
 
   // Body — cone pointing −Z (forward direction for lookAt). Tiny, ~1/10 of
   // a cell so a real starling silhouette at diorama scale.
@@ -1074,8 +1084,10 @@ function buildBirdMesh(mat: THREE.MeshStandardMaterial) {
   g.add(body)
 
   const rightWing = new THREE.Mesh(wingGeometry(+1), mat)
+  rightWing.name = `bird_${idx}_rwing`
   g.add(rightWing)
   const leftWing  = new THREE.Mesh(wingGeometry(-1), mat)
+  leftWing.name = `bird_${idx}_lwing`
   g.add(leftWing)
 
   return { group: g, leftWing, rightWing }
@@ -1128,7 +1140,7 @@ function buildBirds() {
   for (let f = 0; f < FLOCKS_INIT.length; f++) {
     const { center, vel: seedVel } = FLOCKS_INIT[f]
     for (let k = 0; k < PER_FLOCK; k++) {
-      const { group: bm, leftWing, rightWing } = buildBirdMesh(birdMat)
+      const { group: bm, leftWing, rightWing } = buildBirdMesh(birdMat, f * PER_FLOCK + k)
       // Tight clump around the flock centre (~0.1 radius).
       const pos = new THREE.Vector3(
         center.x + Math.sin(k * 2.7 + f * 1.3) * 0.10,
@@ -1282,6 +1294,15 @@ function buildRocks(): THREE.Group {
 export interface DioramaScene {
   root: THREE.Group
   update: (elapsed: number) => void
+  /** Optional cleanup hook for resources owned by this diorama instance —
+   *  e.g. KHR_audio_emitter loops registered with the audio bus on glb load
+   *  must be unregistered when the diorama is swapped out, otherwise hot-
+   *  reload accumulates ghost audio loops. */
+  dispose?: () => void
+  /** Mixer clips driving this scene, so consumers (e.g. sphereVisibility)
+   *  can resolve which subtrees animate per frame and bypass tile gating
+   *  for them. Empty array for the imperative path (no glb animations). */
+  animations?: THREE.AnimationClip[]
 }
 
 export interface BuildDioramaOpts {
