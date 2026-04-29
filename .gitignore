@@ -27,3 +27,19 @@ dist-ssr
 blender-plugin/__pycache__/
 public/diorama2.glb
 public/tree*.glb
+# Block all .glb binaries in public/ by default — already-tracked ones (diorama.glb,
+# test-audio-fixture.glb) stay tracked; this only stops new binary scratch files
+# (diorama copy.glb, fluid.glb, etc.) from being staged.
+public/*.glb
+!public/diorama.glb
+!public/test-audio-fixture.glb
+
+# Audio raws — encoded outputs in public/audio/ are committed instead.
+# Re-encode any time via: bash scripts/encode-audio.sh
+src/sfx/
+
+# Local debug helpers + bake backups + anvi session state
+aud.mjs
+audio-check.mjs
+public/diorama.glb.before-bake
+.anvi/sessions/

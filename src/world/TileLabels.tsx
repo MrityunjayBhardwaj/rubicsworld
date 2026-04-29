@@ -24,7 +24,7 @@ const ROTATE_MS = 380
 // maps to FACES index 0..5. The index-within-face (1..4) runs u fastest,
 // then v, so A1 = +X (u=0, v=0), A2 = +X (u=1, v=0), A3 = (u=0, v=1), A4 = (u=1, v=1).
 const FACE_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'] as const
-const FACE_NAMES = ['+X', '-X', '+Y (top)', '-Y (bottom)', '+Z (front)', '-Z (back)'] as const
+const FACE_NAMES = ['+X', '-X', '-Y (bottom — C swapped)', '+Y (top — D swapped)', '+Z (front)', '-Z (back)'] as const
 export const FACE_LABEL_COLORS = [
   '#9ec78a', // A  +X
   '#6fb3a8', // B  -X
@@ -34,11 +34,11 @@ export const FACE_LABEL_COLORS = [
   '#7a8aa0', // F  -Z
 ] as const
 
-// Index within a face. User-requested convention: 3, 4 on top row of each
-// face, 1, 2 on bottom row. v=0 is physical top (+face.up), so 3, 4 are
-// assigned to v=0 and 1, 2 to v=1.
+// Index within a face. Convention: 3, 4 on top row of each face, 1, 2 on
+// bottom row. v=1 is physical top (+face.up) under the unified convention,
+// so 3, 4 are assigned to v=1 and 1, 2 to v=0.
 function labelFor(face: number, u: number, v: number): string {
-  const idx = (1 - v) * 2 + u + 1
+  const idx = v * 2 + u + 1
   return `${FACE_LETTERS[face]}${idx}`
 }
 
@@ -72,8 +72,9 @@ function FlatLabels({ split }: { split: boolean }) {
       const face = cellFace(col, row)
       if (face < 0) continue
       const u = col % 2
-      // Upper flat row of each face-block is v=0 (top) in the new convention.
-      const v = 1 - (row % 2)
+      // Unified convention: v=0 → bottom of face, v=1 → top. Flat row 0 of
+      // each block (lower flat row) maps to v=0; flat row 1 (upper) → v=1.
+      const v = row % 2
       const homeX = -HALF_W + (col + 0.5) * CELL
       const homeZ = -HALF_H + (row + 0.5) * CELL
       const gapX = split ? (col - (COLS - 1) / 2) * gap : 0
@@ -100,8 +101,9 @@ function CubeLabels() {
       if (faceIdx < 0) continue
       const face = FACES[faceIdx]
       const u = col % 2
-      // Cube view swaps rows per face: use raw row-parity for v and the
-      // matching vOff sign so content and labels stay aligned.
+      // Unified convention: v=0 → +face.up (top), v=1 → -face.up (bottom).
+      // Labels 1,2 (v=0) sit at cube top; 3,4 (v=1) at cube bottom — reading
+      // order matches labelFor's 1,2,3,4 numbering.
       const v = row % 2
       const uOff = (u - 0.5) * CELL
       const vOff = (0.5 - v) * CELL

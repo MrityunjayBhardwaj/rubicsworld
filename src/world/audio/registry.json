@@ -1,0 +1,74 @@
+{
+  "loops": [
+    {
+      "key": "theme_music", "anchor": "world", "src": "audio/theme.ogg",
+      "params": {
+        "vol":  { "base": 0.22, "modulator": "themeWalkDuck" }
+      }
+    },
+    {
+      "key": "ambient_world", "anchor": "object:scene_center", "src": "audio/windy_grass.ogg",
+      "radius": 12,
+      "params": {
+        "vol":     { "base": 0.55, "modulator": "windStrength" },
+        "lowpass": { "modulator": "windStrength", "min": 800, "max": 6000 }
+      }
+    },
+    {
+      "key": "wind_cutting", "anchor": "camera_motion", "src": "audio/wind_cutting.ogg",
+      "params": {
+        "vol":      { "base": 0.55, "modulator": "cameraOrbitSpeed" },
+        "rate":     { "modulator": "cameraOrbitSpeed", "min": 0.85, "max": 1.25 },
+        "bandpass": { "modulator": "cameraOrbitSpeed", "min": 600, "max": 2400 }
+      }
+    },
+    {
+      "key": "axis_rotation", "anchor": "world", "src": "audio/axis_rotation.ogg",
+      "params": {
+        "vol":  { "base": 0.7, "modulator": "sliceRotationActive" },
+        "rate": { "modulator": "sliceRotationActive", "min": 0.85, "max": 1.15 }
+      }
+    },
+    {
+      "key": "grass_swipe", "anchor": "object:scene_center", "src": "audio/grass_swipe.ogg",
+      "radius": 14,
+      "params": {
+        "vol":      { "base": 0.6, "modulator": "grassSwipeIntensity" },
+        "rate":     { "modulator": "grassSwipeIntensity", "min": 0.9, "max": 1.4 },
+        "bandpass": { "modulator": "grassSwipeIntensity", "min": 800, "max": 4000 }
+      }
+    },
+    {
+      "key": "birds_flock", "anchor": "object:birds_flock", "src": "audio/birds.ogg",
+      "radius": 25,
+      "params": { "vol": { "base": 0.85 } }
+    },
+    {
+      "key": "car_engine", "anchor": "object:car", "src": "audio/car.ogg",
+      "radius": 15,
+      "params": {
+        "vol":     { "base": 0.7 },
+        "rate":    { "modulator": "carSpeed", "min": 0.7, "max": 1.4 },
+        "lowpass": { "modulator": "carSpeed", "min": 600, "max": 4000 }
+      }
+    },
+    {
+      "key": "pond_water", "anchor": "object:pond", "src": "audio/pond.ogg",
+      "radius": 10,
+      "params": { "vol": { "base": 0.6 } }
+    },
+    {
+      "key": "windmill_whoosh", "anchor": "object:windmill", "src": "synth:windmillWhoosh",
+      "radius": 18,
+      "params": {
+        "vol":     { "base": 0.5 },
+        "lfoFreq": { "modulator": "windStrength", "min": 0.35, "max": 0.85 },
+        "bandpass":{ "modulator": "windStrength", "min": 500, "max": 1100 }
+      }
+    }
+  ],
+  "events": [
+    { "key": "footstep", "anchor": "object:player", "src": "audio/footstep_grass.ogg", "pitchJitter": 0.08 },
+    { "key": "jump",     "anchor": "world",         "src": "audio/jump_grass.ogg" }
+  ]
+}

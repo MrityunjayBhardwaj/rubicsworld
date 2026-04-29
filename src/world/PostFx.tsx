@@ -155,7 +155,7 @@ export function PostFx() {
       // for DoF (tap counts are hardcoded at 64+16). 0.5 default ≈ 4× cheaper
       // than 1.0 full-res. Pushed via `resolution.scale` runtime setter so
       // the effect isn't reinstantiated on every slider tick.
-      dofResolutionScale: { value: 0.5, min: 0.25, max: 1.0, step: 0.05, label: 'bokeh res scale' },
+      dofResolutionScale: { value: 0.35, min: 0.25, max: 1.0, step: 0.05, label: 'bokeh res scale' },
       // Screen-space aperture. CoC shader is patched to
       //   magnitude = max(depthCoC, smoothstep(sharpR, blurR, screenDist))
       // so a tack-sharp *circle* appears around the projected dofTarget, and

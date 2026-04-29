@@ -26,8 +26,56 @@ let grassTrailLastY = 1e9
 let grassTrailLastZ = 1e9
 const GRASS_STAMP_MIN_INTERVAL = 0.02
 const GRASS_STAMP_MIN_DIST = 0.008
+// Smoothed grass-swipe intensity for the audio loop. Writes from the
+// stamp loop where stampActive + dd are already in scope.
+let grassSwipeSmooth = 0
+
+// /optimize/ route scratch — module-scoped so the cull path doesn't
+// allocate per frame. Only read/written from inside useFrame.
+const optFrustumInst = new THREE.Frustum()
+const optVec3a = new THREE.Vector3()
+const optMat4 = new THREE.Matrix4()
+const optSphere = new THREE.Sphere()
+let optLogLast = 0
 import { buildGrass, grassRefs } from './buildGrass'
 import { loadGlbDiorama } from './loadGlbDiorama'
+import { audioBus } from '../world/audio/bus'
+import { buildSphereVisibility, applySphereVisibility, restoreSphereVisibility, type SphereVisibility } from './sphereVisibility'
+import { buildBatchedDiorama, applyBatchVisibility, restoreBatchVisibility, type DioramaBatch } from './buildBatchedDiorama'
+
+// Register named diorama groups as audio anchors so PositionalAudio nodes
+// follow car / windmill / bird-flock through space. Idempotent — running
+// twice just overwrites the same key. Called after each diorama (re)build.
+function registerDioramaAudioAnchors(root: THREE.Object3D) {
+  // Wire the diorama root for the bus's sphere-projection reset trick.
+  // Audio anchors live in dScene's flat cube-net space; the bus needs the
+  // root reference so it can momentarily zero the per-tile transform when
+  // reading source positions each frame.
+  audioBus.setDioramaRoot(root)
+  const car = root.getObjectByName('car')
+  const windmill = root.getObjectByName('windmill')
+  const birds = root.getObjectByName('birds')
+  const pond = root.getObjectByName('pond')
+  // Each group gets a centre-of-mass child Object3D so audio + visualiser
+  // sphere attach at the visual middle (Box3 centre) instead of the group's
+  // local (0,0,0). For the windmill the local origin is at the foot of the
+  // tower; for the car it's below the wheels; correcting those matters.
+  if (car) audioBus.registerAnchorAtCenter('car', car)
+  if (windmill) audioBus.registerAnchorAtCenter('windmill', windmill)
+  if (pond) audioBus.registerAnchorAtCenter('pond', pond)
+  // birds_group stays as-is — it's the parent for the boids centroid loop
+  // (each frame AudioBus.tsx writes the centroid to a child source which the
+  // bus then sphere-projects).
+  if (birds) audioBus.registerAnchor('birds_group', birds)
+}
+function unregisterDioramaAudioAnchors() {
+  audioBus.unregisterAnchor('car')
+  audioBus.unregisterAnchor('windmill')
+  audioBus.unregisterAnchor('birds_group')
+  audioBus.unregisterAnchor('birds_flock')
+  audioBus.unregisterAnchor('pond')
+  audioBus.setDioramaRoot(null)
+}
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { COLS, ROWS, CELL, cellFace, FACE_TO_BLOCK_TL } from './DioramaGrid'
 import { FACES, type FaceIndex } from '../world/faces'
@@ -84,11 +132,13 @@ interface CellDef {
 // the sphere renderer agree on every home cell.
 
 /** Convert store tile home position to grid (col, row) → diorama homeX/homeZ.
- *  Sphere/cube parity: cube view puts lower flat row content at the physical
- *  top of each face (see cubeCellRender's row swap). Mirror that here so the
- *  sphere renders the same content at each physical position as cube view —
- *  tile with v=0 (physical top under the v-flip convention) now pulls content
- *  from flat row = blockRow, matching the cube view's localV = 1 mapping. */
+ *  Convention (matches tileCentroid in rotation.ts + labelFor):
+ *    homeV=0 → lower flat row of the block (south on the cube net) → renders
+ *              at the cube face's PHYSICAL TOP (label 1,2 at v=0 = top).
+ *    homeV=1 → upper flat row of the block → cube face's physical bottom
+ *              (label 3,4 at v=1 = bottom).
+ *  This swaps each block's halves vs. natural unfold — lets the within-face
+ *  label numbering 1,2,3,4 read top-down left-right on every face. */
 function tileToHome(homeFace: FaceIndex, homeU: number, homeV: number) {
   const [blockCol, blockRow] = FACE_TO_BLOCK_TL[homeFace]
   const col = blockCol + homeU
@@ -106,7 +156,9 @@ function storeTileCubeRender(tile: Tile, gap: number): CellRender {
   const currentFace = FACES[tile.face]
   const halfCell = (CELL - gap) / 2
 
-  // Current position on cube
+  // Current position on cube. Convention: localV=0 → +face.up (top of
+  // face), localV=1 → -face.up (bottom). Matches tileCentroid in rotation.ts
+  // and labelFor (1,2 at v=0 = top; 3,4 at v=1 = bottom).
   const localU = tile.u
   const localV = tile.v
   const uOff = (localU - 0.5) * CELL
@@ -168,9 +220,11 @@ function buildCellDefs(): CellDef[] {
         col, row,
         face,
         localU: col % 2,
-        // v=0 is physical top of face; in the cross net, upper flat rows
-        // map to cube top after the fold, so flip row%2.
-        localV: 1 - (row % 2),
+        // Convention: localV=0 → physical bottom of face, localV=1 → top.
+        // Lower flat row (row%2 = 0) is the south side of the block and folds
+        // to the cube face's bottom; upper flat row (row%2 = 1) folds to the
+        // top. Direct row%2 mapping — natural-fold orientation.
+        localV: row % 2,
         homeX: -HALF_W + (col + 0.5) * CELL,
         homeZ: -HALF_H + (row + 0.5) * CELL,
       })
@@ -236,13 +290,14 @@ function cubeCellRender(cell: CellDef, gap: number): CellRender {
   const face = FACES[cell.face]
   const halfCell = (CELL - gap) / 2
 
-  // Cell center on cube face.
-  // Cube view uses the raw row-parity for v (not the globally-flipped
-  // convention) so each folded face's rows read the same as in the net:
-  // lower flat row at physical top, upper flat row at bottom. This is the
-  // user-requested "swap rows in each face" for the cube view.
+  // Cell center on cube face. Convention (matches tileCentroid + labelFor):
+  // localV=0 → +face.up (physical top), localV=1 → -face.up (bottom). Tiles
+  // labelled 1,2 sit at v=0 (cube top); 3,4 at v=1 (cube bottom). The
+  // flat-net's lower row of each block (localV=0 via `row % 2` in
+  // buildCellDefs) folds to the cube face's TOP — the convention swaps the
+  // halves vs. natural unfold so within-face label reading stays 1,2,3,4.
   const uOff = (cell.localU - 0.5) * CELL
-  const vOff = (cell.localV - 0.5) * CELL
+  const vOff = (0.5 - cell.localV) * CELL
   const cubePos = face.normal.clone()
     .addScaledVector(face.right, uOff)
     .addScaledVector(face.up, vOff)
@@ -292,12 +347,10 @@ function buildOverlayLines(cells: CellDef[], mode: TileMode): THREE.LineSegments
 
     if (mode === 'cube' || mode === 'sphere') {
       const uOff = (cell.localU - 0.5) * CELL
-      // Cube overlay uses row-swapped vOff so gridlines line up with the
-      // rotated cubeCellRender placement; sphere overlay (unused) would use
-      // the global convention.
-      const vOff = mode === 'cube'
-        ? (cell.localV - 0.5) * CELL
-        : (0.5 - cell.localV) * CELL
+      // Both cube and sphere overlays follow the unified convention:
+      // localV=0 → +face.up (top), localV=1 → -face.up (bottom). Matches the
+      // rendered placement in cubeCellRender / storeTileCubeRender.
+      const vOff = (0.5 - cell.localV) * CELL
       const center = face.normal.clone()
         .addScaledVector(face.right, uOff)
         .addScaledVector(face.up, vOff)
@@ -416,12 +469,16 @@ function patchMaterialForSphere(material: THREE.Material, uniforms: SphereUnifor
     shader.vertexShader = shader.vertexShader.replace(
       '#include <project_vertex>',
       `
-      // For InstancedMesh, fold the per-instance matrix into object-space
-      // position first — without this, every instance ends up at the first
-      // instance's sphere-projected position (silent failure: grass blades
-      // collapse onto one point, invisible). Three.js auto-declares
-      // \`instanceMatrix\` when USE_INSTANCING is defined.
-      #ifdef USE_INSTANCING
+      // For InstancedMesh / BatchedMesh, fold the per-instance / per-batch
+      // matrix into object-space position first — without this, every
+      // instance ends up at the first instance's sphere-projected position
+      // (silent failure: grass blades collapse onto one point, invisible;
+      // batched static props all draw at instance-0's home position).
+      // batchingMatrix is set up by <batching_vertex> chunk before
+      // <project_vertex> runs; instanceMatrix is auto-declared on USE_INSTANCING.
+      #ifdef USE_BATCHING
+        vec4 _osPos = batchingMatrix * vec4(transformed, 1.0);
+      #elif defined(USE_INSTANCING)
         vec4 _osPos = instanceMatrix * vec4(transformed, 1.0);
       #else
         vec4 _osPos = vec4(transformed, 1.0);
@@ -500,6 +557,8 @@ export function TileGrid({ mode = 'split', bezier }: {
   const { gl, scene, camera } = useThree()
   const bz = bezier ?? { cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 }
   const dioramaRef = useRef<DioramaScene | null>(null)
+  const sphereVisRef = useRef<SphereVisibility | null>(null)
+  const dioramaBatchRef = useRef<DioramaBatch | null>(null)
   const dioramaSceneRef = useRef<THREE.Scene | null>(null)
   const cellsRef = useRef<CellDef[]>([])
   const overlaySceneRef = useRef<THREE.Scene | null>(null)
@@ -591,6 +650,7 @@ export function TileGrid({ mode = 'split', bezier }: {
       : buildDiorama({ includeTerrain: true })
     if (!glbPath) hideFlatTerrainInSphereMode(diorama.root, mode)
     dioramaRef.current = diorama
+    if (!glbPath) registerDioramaAudioAnchors(diorama.root)
 
     // Disable frustum culling — the sphere projection shader moves vertices
     // to positions that differ from the bounding sphere Three.js computes
@@ -683,6 +743,22 @@ export function TileGrid({ mode = 'split', bezier }: {
       const su = createSphereUniforms()
       sphereUniformsRef.current = su
       patchSceneForSphere(diorama.root, su)
+      // Build per-tile visibility map after patching. Uses each mesh's
+      // current AABB in cube-net coords to decide which of the 24 home
+      // tiles' 1×1 patches it overlaps. Animated subtrees + InstancedMesh
+      // (grass) bypass tile gating via the alwaysVisible set.
+      sphereVisRef.current = buildSphereVisibility(diorama.root, diorama.animations ?? [])
+      // /optimize/ — fold static, single-material, non-animated meshes
+      // into per-material BatchedMeshes. Originals stay in tree as
+      // visible=false placeholders (P23: traversal-based consumers
+      // — audio anchors, mixer track binding, grass groundMesh —
+      // still resolve them by name). Batches inherit per-pass
+      // root.quaternion automatically since they're added under root.
+      const optimizeBuild = (typeof window !== 'undefined') &&
+        Boolean((window as unknown as { __rwOptimize?: boolean }).__rwOptimize)
+      if (optimizeBuild && sphereVisRef.current) {
+        dioramaBatchRef.current = buildBatchedDiorama(diorama.root, sphereVisRef.current)
+      }
     }
 
     // Overlay lines (only for dev modes, not sphere/planet)
@@ -716,6 +792,18 @@ export function TileGrid({ mode = 'split', bezier }: {
         if (!next) return  // keep current scene on failed reload
         const prev = dioramaRef.current
         if (prev) {
+          // Audio cleanup BEFORE GPU dispose — bus's unregisterLoop reads
+          // the loop's anchor (now in the prev tree) to stop the node, so
+          // run while the tree is still intact.
+          prev.dispose?.()
+          // Detach previous BatchedMeshes BEFORE disposing prev.root —
+          // the batch shares its material reference with originals, and
+          // its internal merged geometry buffer is independent of the
+          // prev meshes' geometries (BatchedMesh.addGeometry copies). The
+          // dispose() call below is a no-op double-dispose for the
+          // shared material; harmless.
+          dioramaBatchRef.current?.dispose()
+          dioramaBatchRef.current = null
           dScene.remove(prev.root)
           prev.root.traverse(c => {
             const m = c as THREE.Mesh
@@ -731,9 +819,18 @@ export function TileGrid({ mode = 'split', bezier }: {
         dScene.add(next.root)
         if (mode === 'sphere' && sphereUniformsRef.current) {
           patchSceneForSphere(next.root, sphereUniformsRef.current)
+          // Recompute per-tile visibility for the new tree — old map's
+          // mesh refs are stale (point at the disposed prev.root).
+          sphereVisRef.current = buildSphereVisibility(next.root, next.animations ?? [])
+          const optimizeBuild = (typeof window !== 'undefined') &&
+            Boolean((window as unknown as { __rwOptimize?: boolean }).__rwOptimize)
+          if (optimizeBuild && sphereVisRef.current) {
+            dioramaBatchRef.current = buildBatchedDiorama(next.root, sphereVisRef.current)
+          }
         }
         diorama = next
         dioramaRef.current = next
+        registerDioramaAudioAnchors(next.root)
         // Re-apply the Leva panel's current values to the fresh meadow so
         // density / flower split / colours / wind survive the hot reload.
         // buildGrass defaults mesh.count to 50% otherwise, which would read
@@ -1045,11 +1142,22 @@ export function TileGrid({ mode = 'split', bezier }: {
       grassRefs.rebuildWithMask = null
       grassRefs.rebuildWithFlowerMask = null
       grassRefs.saveDiorama = null
+      unregisterDioramaAudioAnchors()
       ;(dioramaRef as unknown as { _cancelSwap?: () => void })._cancelSwap?.()
       ;(dioramaRef as unknown as { _offHmr?: () => void })._offHmr?.()
       // Dispose whatever root is LIVE in the ref (may be the stub, the
       // imperative fallback, or the loaded glb — all same disposal shape).
       const live = dioramaRef.current ?? diorama
+      // Run the live diorama's own dispose hook (KHR_audio_emitter loop
+      // unregistration etc.) BEFORE we tear the GPU resources down.
+      live.dispose?.()
+      // Detach + dispose batched meshes before traversing root for
+      // geometry/material disposal — the batch holds an independent
+      // copy of merged buffers, so the traversal's per-mesh disposal
+      // doesn't touch them, but we still want them out of the tree
+      // before disposal so the traverse doesn't visit them as Meshes.
+      dioramaBatchRef.current?.dispose()
+      dioramaBatchRef.current = null
       live.root.traverse(child => {
         if ((child as THREE.Mesh).isMesh) {
           ;(child as THREE.Mesh).geometry?.dispose()
@@ -1207,6 +1315,7 @@ export function TileGrid({ mode = 'split', bezier }: {
       stampActive = 1
     }
     grassUniforms.uHoverActive.value = stampActive
+    let grassSwipeTarget = 0
     if (stampActive > 0.5) {
       const dt = now - grassTrailLastT
       const dx = stampX - grassTrailLastX
@@ -1226,7 +1335,23 @@ export function TileGrid({ mode = 'split', bezier }: {
         grassTrailLastY = stampY
         grassTrailLastZ = stampZ
       }
+      // Grass-swipe intensity for the audio loop: cursor speed (m/s) on
+      // the planet, normalised so a leisurely sweep (~1.5 m/s) maxes out.
+      // dt is wall-clock seconds since the last STAMP, not last frame —
+      // it goes large during pauses, which we want (intensity drops).
+      const speed = dt > 1e-3 ? dd / dt : 0
+      grassSwipeTarget = Math.max(0, Math.min(1, speed / 1.5))
     }
+    // Smooth toward target: 100ms attack, 250ms release. Frame dt is
+    // approximated at 60Hz here — the smoothing tau dominates and audio
+    // gain doesn't need sub-frame precision.
+    {
+      const tau = grassSwipeTarget > grassSwipeSmooth ? 0.10 : 0.25
+      const k = Math.min(1, (1 / 60) / tau)
+      grassSwipeSmooth += (grassSwipeTarget - grassSwipeSmooth) * k
+      if (!Number.isFinite(grassSwipeSmooth)) grassSwipeSmooth = 0
+    }
+    audioBus.setGrassSwipeIntensity(grassSwipeSmooth)
 
     diorama.update(clock.elapsedTime)
 
@@ -1342,6 +1467,36 @@ export function TileGrid({ mode = 'split', bezier }: {
         gl.render(terrainScene, camera)
       }
 
+      // /optimize/ route: skip per-tile renders that can't contribute to
+      // the framebuffer — back-face (planet's far hemisphere) and
+      // out-of-frustum tiles. Terrain already covers the whole sphere
+      // with depth + color, so culling the diorama overlay leaves no
+      // hole. Animation tick + audio anchor traversal already ran above
+      // (P23 — keep mesh tree intact, only skip the gl.render call).
+      const optimize = (typeof window !== 'undefined') &&
+        Boolean((window as unknown as { __rwOptimize?: boolean }).__rwOptimize)
+      let optFrustum: THREE.Frustum | null = null
+      const optCamDir = optVec3a
+      let optTilesRendered = 0
+      let optTilesCulled = 0
+      if (optimize) {
+        // View direction = camera position normalized (planet at origin).
+        // Cull ONLY the strictly-opposite face. On a sphere the four
+        // "side" faces remain quite visible from any viewing angle —
+        // their content bulges past the limb. So we want a threshold
+        // that only fires for tiles whose face normal points roughly
+        // antipodal to the camera. -0.6 is the "back hemisphere" slice
+        // (≥126° from view dir): for axis-aligned camera the only face
+        // that qualifies is the opposite face; at corner-views (camera
+        // near a +++ vertex) the three rear-axis faces (each at
+        // facing≈-0.577) just barely escape the cull, which is correct
+        // because they're at the silhouette where bulge keeps them
+        // visible. Pre-fix value was -0.25, which was over-aggressive.
+        optCamDir.copy(camera.position).normalize()
+        optMat4.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+        optFrustum = optFrustumInst.setFromProjectionMatrix(optMat4)
+      }
+
       for (const tile of tiles) {
         const r = storeTileCubeRender(tile, SPHERE_GAP)
         let position = r.position
@@ -1363,6 +1518,58 @@ export function TileGrid({ mode = 'split', bezier }: {
           faceNormal = faceNormal.clone().applyQuaternion(sliceQuat)
         }
 
+        let cullGrassThisTile = false
+        if (optimize && optFrustum) {
+          // Back-face: face-normal vs view-dir. Threshold is intentionally
+          // strict (only ~back hemisphere) — sphere-projected side tiles
+          // bulge well past the cube's silhouette and are visible from
+          // most viewing angles. See setup comment above for the math.
+          //
+          // Action on back-face: skip GRASS only, NOT the diorama models.
+          // Models are cheap and the user wants them rendered everywhere.
+          // Grass is the heavy thousands-of-blades instanced pass —
+          // skipping it on the hidden hemisphere is the actual win.
+          const facing = faceNormal.dot(optCamDir)
+          if (facing < -0.6) { cullGrassThisTile = true; optTilesCulled++ }
+          // Frustum: tile's projected sphere centre is faceNormal direction
+          // (the tile spans ~half a face → ~0.5 rad on the unit sphere;
+          // bound radius 0.7 in world units gives slack for tall meshes).
+          optSphere.center.copy(faceNormal).multiplyScalar(1.0)
+          optSphere.radius = 0.75
+          if (!optFrustum.intersectsSphere(optSphere)) { cullGrassThisTile = true; optTilesCulled++ }
+          if (!cullGrassThisTile) optTilesRendered++
+        }
+
+        // /optimize/ — per-tile mesh visibility. Hide every diorama mesh
+        // whose AABB doesn't overlap THIS tile's home patch; show meshes
+        // that do, plus the always-visible set (animated subtrees +
+        // InstancedMesh grass). Three.js's render path skips invisible
+        // meshes — pure perf win, output identical because the hidden
+        // meshes would have been clipped out anyway by the 8 clip planes.
+        if (optimize && sphereVisRef.current) {
+          const homeIdx = tile.homeFace * 4 + tile.homeV * 2 + tile.homeU
+          applySphereVisibility(sphereVisRef.current, homeIdx)
+          // Per-tile cull on BatchedMesh instances. Same tile-mask logic
+          // as the per-mesh path, but flips visibility on per-instance
+          // slots inside each batch instead of on the original Mesh
+          // (which is now permanently invisible — see __batched flag).
+          if (dioramaBatchRef.current) {
+            applyBatchVisibility(dioramaBatchRef.current, homeIdx)
+          }
+          // Per-tile grass shader cull: blades whose iTileIdx differs
+          // from this tile collapse to a degenerate point in the vertex
+          // shader, skipping the heavy bend / hover-trail math. Grass
+          // mesh stays visible (one big InstancedMesh covers all tiles)
+          // but renders only blades that belong to THIS tile per pass.
+          grassUniforms.uActiveTileIdx.value = homeIdx
+          // Back-face / out-of-frustum tile: hide grass + flower
+          // instanced meshes specifically (overrides the alwaysVisible
+          // flag set by applySphereVisibility). Diorama models stay on.
+          if (cullGrassThisTile) {
+            for (const m of sphereVisRef.current.grassMeshes) m.visible = false
+          }
+        }
+
         gl.clippingPlanes = clipPlanes
         if (su) su.uFaceNormal.value.copy(faceNormal)
 
@@ -1371,6 +1578,33 @@ export function TileGrid({ mode = 'split', bezier }: {
         diorama.root.updateMatrix()
         diorama.root.updateMatrixWorld(true)
         gl.render(dScene, camera)
+      }
+
+      // After the per-tile pass: restore everything to .visible = true so
+      // post-frame consumers (audio anchor traversal on swap, grass
+      // groundMesh lookup, animation track binding refresh) see the
+      // full scene tree on their next walk. P23 mitigation. Batched
+      // originals stay visible=false (the batch is the renderer); the
+      // helper itself skips them. Batch instances all get re-visible
+      // so any non-24-pass render path sees the full set.
+      if (optimize && sphereVisRef.current) {
+        restoreSphereVisibility(sphereVisRef.current)
+      }
+      if (optimize && dioramaBatchRef.current) {
+        restoreBatchVisibility(dioramaBatchRef.current)
+      }
+      // Reset grass per-tile cull to "render all blades" so any non-
+      // 24-pass render path (preview modes, future single-render hooks)
+      // sees a fully-populated meadow. -1 is the disabled sentinel.
+      if (optimize) grassUniforms.uActiveTileIdx.value = -1
+
+      if (optimize && import.meta.env.DEV) {
+        const nowS = clock.elapsedTime
+        if (nowS - optLogLast > 1) {
+          optLogLast = nowS
+          // eslint-disable-next-line no-console
+          console.log(`[optimize] tiles withGrass=${optTilesRendered} grassSuppressed=${optTilesCulled}`)
+        }
       }
     } else {
       // Static modes (split, cube) — use pre-computed renders
