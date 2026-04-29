@@ -132,11 +132,13 @@ interface CellDef {
 // the sphere renderer agree on every home cell.
 
 /** Convert store tile home position to grid (col, row) → diorama homeX/homeZ.
- *  Sphere/cube parity: cube view puts lower flat row content at the physical
- *  top of each face (see cubeCellRender's row swap). Mirror that here so the
- *  sphere renders the same content at each physical position as cube view —
- *  tile with v=0 (physical top under the v-flip convention) now pulls content
- *  from flat row = blockRow, matching the cube view's localV = 1 mapping. */
+ *  Convention (matches tileCentroid in rotation.ts + labelFor):
+ *    homeV=0 → lower flat row of the block (south on the cube net) → renders
+ *              at the cube face's PHYSICAL TOP (label 1,2 at v=0 = top).
+ *    homeV=1 → upper flat row of the block → cube face's physical bottom
+ *              (label 3,4 at v=1 = bottom).
+ *  This swaps each block's halves vs. natural unfold — lets the within-face
+ *  label numbering 1,2,3,4 read top-down left-right on every face. */
 function tileToHome(homeFace: FaceIndex, homeU: number, homeV: number) {
   const [blockCol, blockRow] = FACE_TO_BLOCK_TL[homeFace]
   const col = blockCol + homeU
@@ -154,7 +156,9 @@ function storeTileCubeRender(tile: Tile, gap: number): CellRender {
   const currentFace = FACES[tile.face]
   const halfCell = (CELL - gap) / 2
 
-  // Current position on cube
+  // Current position on cube. Convention: localV=0 → +face.up (top of
+  // face), localV=1 → -face.up (bottom). Matches tileCentroid in rotation.ts
+  // and labelFor (1,2 at v=0 = top; 3,4 at v=1 = bottom).
   const localU = tile.u
   const localV = tile.v
   const uOff = (localU - 0.5) * CELL
@@ -216,9 +220,11 @@ function buildCellDefs(): CellDef[] {
         col, row,
         face,
         localU: col % 2,
-        // v=0 is physical top of face; in the cross net, upper flat rows
-        // map to cube top after the fold, so flip row%2.
-        localV: 1 - (row % 2),
+        // Convention: localV=0 → physical bottom of face, localV=1 → top.
+        // Lower flat row (row%2 = 0) is the south side of the block and folds
+        // to the cube face's bottom; upper flat row (row%2 = 1) folds to the
+        // top. Direct row%2 mapping — natural-fold orientation.
+        localV: row % 2,
         homeX: -HALF_W + (col + 0.5) * CELL,
         homeZ: -HALF_H + (row + 0.5) * CELL,
       })
@@ -284,13 +290,14 @@ function cubeCellRender(cell: CellDef, gap: number): CellRender {
   const face = FACES[cell.face]
   const halfCell = (CELL - gap) / 2
 
-  // Cell center on cube face.
-  // Cube view uses the raw row-parity for v (not the globally-flipped
-  // convention) so each folded face's rows read the same as in the net:
-  // lower flat row at physical top, upper flat row at bottom. This is the
-  // user-requested "swap rows in each face" for the cube view.
+  // Cell center on cube face. Convention (matches tileCentroid + labelFor):
+  // localV=0 → +face.up (physical top), localV=1 → -face.up (bottom). Tiles
+  // labelled 1,2 sit at v=0 (cube top); 3,4 at v=1 (cube bottom). The
+  // flat-net's lower row of each block (localV=0 via `row % 2` in
+  // buildCellDefs) folds to the cube face's TOP — the convention swaps the
+  // halves vs. natural unfold so within-face label reading stays 1,2,3,4.
   const uOff = (cell.localU - 0.5) * CELL
-  const vOff = (cell.localV - 0.5) * CELL
+  const vOff = (0.5 - cell.localV) * CELL
   const cubePos = face.normal.clone()
     .addScaledVector(face.right, uOff)
     .addScaledVector(face.up, vOff)
@@ -340,12 +347,10 @@ function buildOverlayLines(cells: CellDef[], mode: TileMode): THREE.LineSegments
 
     if (mode === 'cube' || mode === 'sphere') {
       const uOff = (cell.localU - 0.5) * CELL
-      // Cube overlay uses row-swapped vOff so gridlines line up with the
-      // rotated cubeCellRender placement; sphere overlay (unused) would use
-      // the global convention.
-      const vOff = mode === 'cube'
-        ? (cell.localV - 0.5) * CELL
-        : (0.5 - cell.localV) * CELL
+      // Both cube and sphere overlays follow the unified convention:
+      // localV=0 → +face.up (top), localV=1 → -face.up (bottom). Matches the
+      // rendered placement in cubeCellRender / storeTileCubeRender.
+      const vOff = (0.5 - cell.localV) * CELL
       const center = face.normal.clone()
         .addScaledVector(face.right, uOff)
         .addScaledVector(face.up, vOff)
