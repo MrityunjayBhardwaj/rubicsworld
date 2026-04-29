@@ -19,6 +19,7 @@ export function Controls({
   const solveAnimated = usePlanet(s => s.solveAnimated)
   const setShowLabels = usePlanet(s => s.setShowLabels)
   const setShowRing = usePlanet(s => s.setShowRing)
+  const setShowAxes = usePlanet(s => s.setShowAxes)
   const setCommitThreshold = usePlanet(s => s.setCommitThreshold)
   const setAiEnabled = usePlanet(s => s.setAiEnabled)
   const setEasyMode = usePlanet(s => s.setEasyMode)
@@ -43,6 +44,10 @@ export function Controls({
     'Tile numbers': {
       value: false,
       onChange: (v: boolean) => setShowLabels(v),
+    },
+    'Axes gizmo (X/Y/Z)': {
+      value: false,
+      onChange: (v: boolean) => setShowAxes(v),
     },
     'AI seed': {
       value: true,

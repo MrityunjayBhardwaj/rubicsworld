@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
-import { OrbitControls } from '@react-three/drei'
+import { OrbitControls, GizmoHelper, GizmoViewport } from '@react-three/drei'
 import { Leva } from 'leva'
 import * as THREE from 'three'
 import { Ring } from './world/Ring'
@@ -8,12 +8,16 @@ import { Interaction } from './world/Interaction'
 import { WalkControls } from './world/WalkControls'
 import { IntroCinematic } from './world/IntroCinematic'
 import { TutorialHint, TutorialChrome } from './world/TutorialOverlay'
+import { FpsMeter } from './world/FpsMeter'
 import { AiSeed } from './world/AiSeed'
 import { PostFx } from './world/PostFx'
 import { TileLabels, TileLabelsLegend } from './world/TileLabels'
 import { HDRIEnvironment } from './world/HDRIEnvironment'
 import { HDRIPanel } from './world/HDRIPanel'
 import { GrassPanel } from './world/GrassPanel'
+import { AudioBus } from './world/audio/AudioBus'
+import { AudioPanel } from './world/audio/AudioPanel'
+import { SoundVisualizer } from './world/audio/SoundVisualizer'
 import { CubeSphere } from './world/CubeSphere'
 import { TileGrid } from './diorama/TileGrid'
 import { DioramaGrid } from './diorama/DioramaGrid'
@@ -29,6 +33,11 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__neighborIdx = NEIGHBOR_IDX
   ;(window as unknown as Record<string, unknown>).__hud = hudUniforms
   ;(window as unknown as Record<string, unknown>).__hdri = useHdri
+  // Dev-only audio diagnostic: window.__audio.dumpLoops() shows per-loop
+  // gain state, used to chase sounds that escape the mute path.
+  void import('./world/audio/bus').then(m => {
+    ;(window as unknown as Record<string, unknown>).__audio = m.audioBus
+  })
 }
 
 function Cursor() {
@@ -76,6 +85,22 @@ function DevSceneExpose() {
   return null
 }
 
+function AxesGizmo() {
+  // Screen-space corner viewport showing world X (red) / Y (green) / Z (blue).
+  // Toggled by store.showAxes via Controls panel. Click an axis label to snap
+  // the active OrbitControls camera to that axis (works in any preview mode).
+  const showAxes = usePlanet(s => s.showAxes)
+  if (!showAxes) return null
+  return (
+    <GizmoHelper alignment="bottom-right" margin={[80, 80]}>
+      <GizmoViewport
+        axisColors={['#e85a5a', '#5ae87a', '#5a8ae8']}
+        labelColor="#0a0d12"
+      />
+    </GizmoHelper>
+  )
+}
+
 export default function App() {
   const [preview, setPreview] = useState<false | 'grid' | 'split' | 'cube' | 'rubik'>(false)
   const [bezier, setBezier] = useState({ cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 })
@@ -95,14 +120,41 @@ export default function App() {
 
   return (
     <>
-      <Leva hidden={levaHidden} />
+      {/*
+        Leva mounted inside a resize-host: wide default (480px) so the
+        long auto-generated keys in the Audio panel (e.g. windmill_whoosh
+        __speed) aren't truncated, and `resize: horizontal` on the host
+        lets the user drag the bottom-right corner to widen further.
+        `<Leva fill />` makes the panel fill its parent.
+      */}
+      <div
+        id="leva-host"
+        style={{
+          position: 'fixed',
+          top: 10,
+          right: 10,
+          width: 480,
+          minWidth: 280,
+          maxWidth: 900,
+          height: '92vh',          // explicit height so overflow-y can scroll
+          resize: 'horizontal',
+          overflowX: 'hidden',     // resize handle still works with non-visible overflow
+          overflowY: 'auto',       // vertical scroll when Audio panel rows expand past viewport
+          zIndex: 1000,
+          display: levaHidden ? 'none' : 'block',
+        }}
+      >
+        <Leva fill hidden={levaHidden} />
+      </div>
       <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />
       <Cursor />
       <TileLabelsLegend />
       <HDRIPanel />
+      {!preview && <AudioPanel />}
       {!preview && <GrassPanel />}
       {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <TutorialChrome />
+      <FpsMeter />
       <Canvas
         camera={{
           position: isTopDownPreview ? [0, 22, 0.1] : isRubik ? [3.2, 2.2, 3.2] : [2.4, 1.6, 2.8],
@@ -115,10 +167,15 @@ export default function App() {
         // SSGI/TRAA) can later take full control of MSAA. toneMapping moved
         // to the renderer (ACES Filmic) so effect passes receive linear input.
         gl={{ antialias: false, stencil: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.35 }}
-        dpr={[1, 2]}
+        // Cap pixel ratio at 1.5: on 2x retina the FB shrinks from ~5.8M
+        // pixels to ~3.3M (~56%), big fragment-shading win for the 24-pass
+        // sphere render + DoF blur with negligible visual cost. SMAA in
+        // the PostFx chain handles edge AA at any DPR.
+        dpr={[1, 1.5]}
       >
         <color attach="background" args={['#0a0d12']} />
         <DevSceneExpose />
+        <AxesGizmo />
         {preview === 'grid' ? (
           <>
             <DioramaGrid />
@@ -155,6 +212,8 @@ export default function App() {
             <WalkControls />
             <IntroCinematic />
             <TutorialHint />
+            <AudioBus />
+            <SoundVisualizer />
           </>
         )}
         {preview ? (

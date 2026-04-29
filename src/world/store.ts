@@ -35,6 +35,7 @@ interface PlanetStore {
   drag: DragState | null
   showLabels: boolean
   showRing: boolean
+  showAxes: boolean
   onPlanet: boolean
   hoveredTile: HoveredTile | null
   /** True at t=0 (HUD covers entire planet as a tutorial attract). Flips
@@ -76,6 +77,7 @@ interface PlanetStore {
 
   setShowLabels: (v: boolean) => void
   setShowRing: (v: boolean) => void
+  setShowAxes: (v: boolean) => void
   setOnPlanet: (v: boolean) => void
   setHoveredTile: (t: HoveredTile | null) => void
   setEasyMode: (v: boolean) => void
@@ -152,6 +154,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   drag: null,
   showLabels: false,
   showRing: false,
+  showAxes: false,
   onPlanet: false,
   hoveredTile: null,
   hudAttractMode: true,
@@ -169,6 +172,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
 
   setShowLabels: v => set({ showLabels: v }),
   setShowRing: v => set({ showRing: v }),
+  setShowAxes: v => set({ showAxes: v }),
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
   setEasyMode: v => set({ easyMode: v }),
   setCameraMode: v => set(s => (s.cameraMode === v ? {} : { cameraMode: v })),

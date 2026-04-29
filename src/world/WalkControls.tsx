@@ -6,6 +6,7 @@ import { isWalkBlocked } from './walkMask'
 import { sphereDirToFlat } from './walkMask'
 import { isPointBlocked, updateDynamicColliders } from './colliderRefs'
 import { grassRefs } from '../diorama/buildGrass'
+import { audioBus } from './audio/bus'
 
 /**
  * First-person surface walk on the planet.
@@ -44,6 +45,7 @@ const MOUSE_YAW   = 0.0025
 const MOUSE_PITCH = 0.0025
 const PITCH_MAX = Math.PI * 0.48
 const JUMP_SPEED = 0.6              // initial radial velocity on Space
+const FOOTSTEP_DIST = 0.5           // metres of walk per footstep tick
 const GRAVITY    = 1.6              // pulled toward planet centre (units/s²)
 const EASE_DUR   = 0.7              // seconds for the orbit→walk fly-in
 
@@ -60,6 +62,7 @@ export function WalkControls() {
   // (0 = on the surface, +ve = airborne). vertVel is the radial velocity.
   const vertOffsetRef = useRef<number>(0)
   const vertVelRef = useRef<number>(0)
+  const distAccumRef = useRef<number>(0)
   // Eased entry: lerp camera pose orbit→walk so the transition reads as
   // a fly-in rather than a snap. Active while progress < 1.
   const easeRef = useRef<{ progress: number; from: THREE.Vector3; fromTarget: THREE.Vector3 } | null>(null)
@@ -154,6 +157,7 @@ export function WalkControls() {
         // brings vertOffset back to zero on landing.
         if (vertOffsetRef.current <= 1e-4 && vertVelRef.current <= 1e-4) {
           vertVelRef.current = JUMP_SPEED
+          audioBus.play('jump')
         }
         return
       }
@@ -279,13 +283,26 @@ export function WalkControls() {
         }
         return true
       }
+      let stepLen = 0
       if (tryStep(move)) {
         posRef.current.add(move)
+        stepLen = move.length()
       } else {
         const fwdComp = fwdRef.current.clone().multiplyScalar(move.dot(fwdRef.current))
         const rgtComp = right.clone().multiplyScalar(move.dot(right))
-        if (fwdComp.lengthSq() > 1e-10 && tryStep(fwdComp)) posRef.current.add(fwdComp)
-        else if (rgtComp.lengthSq() > 1e-10 && tryStep(rgtComp)) posRef.current.add(rgtComp)
+        if (fwdComp.lengthSq() > 1e-10 && tryStep(fwdComp)) {
+          posRef.current.add(fwdComp); stepLen = fwdComp.length()
+        } else if (rgtComp.lengthSq() > 1e-10 && tryStep(rgtComp)) {
+          posRef.current.add(rgtComp); stepLen = rgtComp.length()
+        }
+      }
+      // Footstep tick — only when grounded; airborne walking shouldn't blip.
+      if (stepLen > 0 && vertOffsetRef.current < 1e-3) {
+        distAccumRef.current += stepLen
+        if (distAccumRef.current >= FOOTSTEP_DIST) {
+          audioBus.play('footstep')
+          distAccumRef.current = 0
+        }
       }
     }
 
