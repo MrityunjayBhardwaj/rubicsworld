@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
-import { OrbitControls } from '@react-three/drei'
+import { OrbitControls, GizmoHelper, GizmoViewport } from '@react-three/drei'
 import { Leva } from 'leva'
 import * as THREE from 'three'
 import { Ring } from './world/Ring'
@@ -85,6 +85,22 @@ function DevSceneExpose() {
   return null
 }
 
+function AxesGizmo() {
+  // Screen-space corner viewport showing world X (red) / Y (green) / Z (blue).
+  // Toggled by store.showAxes via Controls panel. Click an axis label to snap
+  // the active OrbitControls camera to that axis (works in any preview mode).
+  const showAxes = usePlanet(s => s.showAxes)
+  if (!showAxes) return null
+  return (
+    <GizmoHelper alignment="bottom-right" margin={[80, 80]}>
+      <GizmoViewport
+        axisColors={['#e85a5a', '#5ae87a', '#5a8ae8']}
+        labelColor="#0a0d12"
+      />
+    </GizmoHelper>
+  )
+}
+
 export default function App() {
   const [preview, setPreview] = useState<false | 'grid' | 'split' | 'cube' | 'rubik'>(false)
   const [bezier, setBezier] = useState({ cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 })
@@ -159,6 +175,7 @@ export default function App() {
       >
         <color attach="background" args={['#0a0d12']} />
         <DevSceneExpose />
+        <AxesGizmo />
         {preview === 'grid' ? (
           <>
             <DioramaGrid />

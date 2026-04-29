@@ -67,6 +67,7 @@ export function cubeNetToSphere(flatPos: THREE.Vector3, out: THREE.Vector3): boo
   const currentFace = FACES[tile.face]
 
   // Tile centre on cube face (matches storeTileCubeRender's cubePos).
+  // Convention: v=0 → +face.up (top), v=1 → -face.up (bottom).
   const uOff = (tile.u - 0.5) * CELL
   const vOff = (0.5 - tile.v) * CELL
   _cubePos.copy(currentFace.normal)

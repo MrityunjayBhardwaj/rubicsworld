@@ -13,8 +13,9 @@ export const AXIS_VEC: Record<Axis, Vector3> = {
 
 // Logical centroid of (face, u, v) in cube-local space.
 // Convention: v=0 is the +face.up end (top of the face), v=1 is -face.up
-// (bottom). Reading order along v matches face-image reading order.
-// Always has one component = ±1 (face normal direction) and two = ±0.5 for N=2.
+// (bottom). Within-face label numbering 1,2,3,4 reads top-down left-right
+// — labels 1,2 sit at v=0 (cube top), 3,4 at v=1 (bottom). Always has one
+// component = ±1 (face normal direction) and two = ±0.5 for N=2.
 export function tileCentroid(face: FaceIndex, u: number, v: number): Vector3 {
   const f = FACES[face]
   const s = -1 + (2 * u + 1) / N
@@ -29,14 +30,16 @@ export function centroidToFaceUV(c: Vector3): { face: FaceIndex; u: number; v: n
   const ax = Math.abs(c.x), ay = Math.abs(c.y), az = Math.abs(c.z)
   let face: FaceIndex
   if (ax >= ay && ax >= az) face = (c.x > 0 ? 0 : 1) as FaceIndex
-  else if (ay >= az) face = (c.y > 0 ? 2 : 3) as FaceIndex
+  // Face 2 is now physically at -Y (and face 3 at +Y) per the C↔D world-Z
+  // 180° rotation in faces.ts. Flip the dispatch to match.
+  else if (ay >= az) face = (c.y > 0 ? 3 : 2) as FaceIndex
   else face = (c.z > 0 ? 4 : 5) as FaceIndex
 
   const f = FACES[face]
   const s = c.dot(f.right)
   const t = c.dot(f.up)
   const u = Math.round((s + 1) * N / 2 - 0.5)
-  const v = Math.round((1 - t) * N / 2 - 0.5)   // flipped inverse
+  const v = Math.round((1 - t) * N / 2 - 0.5)   // matches tileCentroid: v=0 → t=+0.5
   return { face, u, v }
 }
 
