@@ -1481,17 +1481,18 @@ export function TileGrid({ mode = 'split', bezier }: {
       let optTilesCulled = 0
       if (optimize) {
         // View direction = camera position normalized (planet at origin).
-        // Cull ONLY the strictly-opposite face. On a sphere the four
+        // Cull ONLY the strictly-antipodal face. On a sphere the four
         // "side" faces remain quite visible from any viewing angle —
-        // their content bulges past the limb. So we want a threshold
-        // that only fires for tiles whose face normal points roughly
-        // antipodal to the camera. -0.6 is the "back hemisphere" slice
-        // (≥126° from view dir): for axis-aligned camera the only face
-        // that qualifies is the opposite face; at corner-views (camera
-        // near a +++ vertex) the three rear-axis faces (each at
-        // facing≈-0.577) just barely escape the cull, which is correct
-        // because they're at the silhouette where bulge keeps them
-        // visible. Pre-fix value was -0.25, which was over-aggressive.
+        // their content bulges past the limb due to terrain elevation.
+        // So we want a threshold that only fires for tiles whose face
+        // normal points almost exactly opposite the camera. -0.95 is
+        // "true antipodal" (~162° from view dir): axis-aligned camera
+        // culls the one fully-occluded back face (facing=-1); slightly
+        // off-axis releases it the moment elevated content might
+        // re-emerge at the silhouette; corner-of-3 views never cull
+        // (rear-axis faces at facing≈-0.577 escape comfortably).
+        // Earlier value -0.6 was geometrically safe but more aggressive;
+        // -0.95 is the bulletproof setting for elevation-bearing terrain.
         optCamDir.copy(camera.position).normalize()
         optMat4.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
         optFrustum = optFrustumInst.setFromProjectionMatrix(optMat4)
@@ -1518,27 +1519,32 @@ export function TileGrid({ mode = 'split', bezier }: {
           faceNormal = faceNormal.clone().applyQuaternion(sliceQuat)
         }
 
-        let cullGrassThisTile = false
+        let cullThisTile = false
         if (optimize && optFrustum) {
-          // Back-face: face-normal vs view-dir. Threshold is intentionally
-          // strict (only ~back hemisphere) — sphere-projected side tiles
-          // bulge well past the cube's silhouette and are visible from
-          // most viewing angles. See setup comment above for the math.
-          //
-          // Action on back-face: skip GRASS only, NOT the diorama models.
-          // Models are cheap and the user wants them rendered everywhere.
-          // Grass is the heavy thousands-of-blades instanced pass —
-          // skipping it on the hidden hemisphere is the actual win.
+          // Back-face: face-normal vs view-dir. -0.95 threshold = only
+          // strictly-antipodal tiles fire the cull (see setup comment
+          // above for the geometry). Side faces and corner-of-3 rear
+          // faces always escape, so horizon-elevation content stays
+          // intact.
           const facing = faceNormal.dot(optCamDir)
-          if (facing < -0.6) { cullGrassThisTile = true; optTilesCulled++ }
+          if (facing < -0.95) { cullThisTile = true; optTilesCulled++ }
           // Frustum: tile's projected sphere centre is faceNormal direction
           // (the tile spans ~half a face → ~0.5 rad on the unit sphere;
           // bound radius 0.7 in world units gives slack for tall meshes).
           optSphere.center.copy(faceNormal).multiplyScalar(1.0)
           optSphere.radius = 0.75
-          if (!optFrustum.intersectsSphere(optSphere)) { cullGrassThisTile = true; optTilesCulled++ }
-          if (!cullGrassThisTile) optTilesRendered++
+          if (!optFrustum.intersectsSphere(optSphere)) { cullThisTile = true; optTilesCulled++ }
+          if (!cullThisTile) optTilesRendered++
         }
+
+        // Strictly-antipodal or out-of-frustum tile: skip the entire
+        // per-tile pass — no clip-plane setup, no visibility sweep,
+        // no gl.render. Terrain already covers the planet's depth +
+        // colour for these regions; the diorama overlay would draw
+        // zero pixels through the 8 clip planes anyway. Animation
+        // tick + audio anchor traversal already ran above the tile
+        // loop, so P23 consumers are unaffected.
+        if (cullThisTile) continue
 
         // /optimize/ — per-tile mesh visibility. Hide every diorama mesh
         // whose AABB doesn't overlap THIS tile's home patch; show meshes
@@ -1562,12 +1568,9 @@ export function TileGrid({ mode = 'split', bezier }: {
           // mesh stays visible (one big InstancedMesh covers all tiles)
           // but renders only blades that belong to THIS tile per pass.
           grassUniforms.uActiveTileIdx.value = homeIdx
-          // Back-face / out-of-frustum tile: hide grass + flower
-          // instanced meshes specifically (overrides the alwaysVisible
-          // flag set by applySphereVisibility). Diorama models stay on.
-          if (cullGrassThisTile) {
-            for (const m of sphereVisRef.current.grassMeshes) m.visible = false
-          }
+          // (Strictly-antipodal / out-of-frustum tiles `continue` above,
+          // so by here the tile is renderable and grass meshes don't
+          // need the per-tile visible=false override that lived here.)
         }
 
         gl.clippingPlanes = clipPlanes
