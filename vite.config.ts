@@ -156,10 +156,12 @@ function patchGlbColorAccessorNames(body: Buffer, names: readonly string[]): Buf
     return body
   }
   // Find the terrain mesh by walking nodes — meshes don't carry names
-  // reliably from three.js's exporter, but nodes do.
+  // reliably from three.js's exporter, but nodes do. Match by prefix:
+  // the exporter writes the node name as `terrain_gameasset` (or similar
+  // suffix), not bare `terrain`, so strict equality silently no-oped.
   let terrainMeshIdx = -1
   for (const n of j.nodes ?? []) {
-    if (n.name === 'terrain' && typeof n.mesh === 'number') {
+    if (n.name?.startsWith('terrain') && typeof n.mesh === 'number') {
       terrainMeshIdx = n.mesh
       break
     }
