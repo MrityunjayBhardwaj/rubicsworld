@@ -70,6 +70,34 @@ function isMorphed(geom: THREE.BufferGeometry): boolean {
   return false
 }
 
+/** Sample-based content fingerprint for de-duplicating identical geometries
+ *  WITHIN a buildBatchedDiorama group. Group key already includes attribute
+ *  layout signature, so all members of a group share attribute names, item
+ *  sizes, indexed-or-not. This fingerprint discriminates by content for
+ *  same-layout geometries: index head/mid/tail + per-attribute count and
+ *  head/mid/tail samples. Misses only meshes that agree on all sampled
+ *  points but differ in interior verts — vanishingly rare for real Blender
+ *  exports, and worst-case symptom is one prop visually replacing another
+ *  (loud failure, easy to spot). three.js's BatchedMesh.addGeometry has no
+ *  internal cache (BatchedMesh.js:627 — copies vertex+index data per call),
+ *  so caller-side dedup is the only place to gain. */
+function geomContentFingerprint(geom: THREE.BufferGeometry): string {
+  const parts: (number | string)[] = []
+  const idx = geom.getIndex()
+  parts.push(idx?.count ?? 0)
+  if (idx) {
+    const a = idx.array as ArrayLike<number>
+    parts.push(a[0] ?? 0, a[(a.length / 2) | 0] ?? 0, a[a.length - 1] ?? 0)
+  }
+  const names = Object.keys(geom.attributes).sort()
+  for (const n of names) {
+    const a = geom.attributes[n]
+    const arr = a.array as ArrayLike<number>
+    parts.push(n, a.count, arr[0] ?? 0, arr[(arr.length / 2) | 0] ?? 0, arr[arr.length - 1] ?? 0)
+  }
+  return parts.join(':')
+}
+
 export function buildBatchedDiorama(
   root: THREE.Object3D,
   vis: SphereVisibility,
@@ -141,6 +169,9 @@ export function buildBatchedDiorama(
   const instanceCounts: number[] = []
   const batchedOriginals = new Set<THREE.Mesh>()
   const _m = new THREE.Matrix4()
+  let totalGeomFresh = 0
+  let totalGeomReused = 0
+  let totalVertsSavedReuse = 0
 
   for (const [, g] of groups) {
     const batch = new BatchedMesh(g.items.length, g.vertSum, g.indexSum, g.mat)
@@ -162,20 +193,36 @@ export function buildBatchedDiorama(
 
     const masks = new Uint32Array(g.items.length)
     let nAdded = 0
+    // Per-batch fingerprint→geomId map. BatchedMesh.addGeometry has no
+    // internal cache (BatchedMesh.js:627 — copies vertex+index per call), so
+    // identity-duplicate geometries within this group would otherwise each
+    // reserve their own slot in the merged buffer. Reusing geomId via
+    // addInstance lets all duplicates share one buffer slot — same draw
+    // count (BatchedMesh still issues 1 draw per batch), but smaller merged
+    // vertex buffer and fewer vertex-shader invocations per draw.
+    const fingerprintToGeomId = new Map<string, number>()
     for (const it of g.items) {
       const geom = it.mesh.geometry as THREE.BufferGeometry
-      let geomId: number
-      try {
-        geomId = batch.addGeometry(geom)
-      } catch (e) {
-        // First-fit reservation overrun or attribute mismatch we didn't
-        // catch with the signature check. Drop this instance, keep the
-        // original Mesh visible so it still renders the legacy way.
-        if (import.meta.env?.DEV) {
-          // eslint-disable-next-line no-console
-          console.warn(`[batchedDiorama] addGeometry failed for ${it.mesh.name}:`, e)
+      const fp = geomContentFingerprint(geom)
+      let geomId = fingerprintToGeomId.get(fp)
+      if (geomId === undefined) {
+        try {
+          geomId = batch.addGeometry(geom)
+        } catch (e) {
+          // First-fit reservation overrun or attribute mismatch we didn't
+          // catch with the signature check. Drop this instance, keep the
+          // original Mesh visible so it still renders the legacy way.
+          if (import.meta.env?.DEV) {
+            // eslint-disable-next-line no-console
+            console.warn(`[batchedDiorama] addGeometry failed for ${it.mesh.name}:`, e)
+          }
+          continue
         }
-        continue
+        fingerprintToGeomId.set(fp, geomId)
+        totalGeomFresh++
+      } else {
+        totalGeomReused++
+        totalVertsSavedReuse += geom.attributes.position.count
       }
       const instId = batch.addInstance(geomId)
       _m.copy(rootInv).multiply(it.mesh.matrixWorld)
@@ -199,6 +246,7 @@ export function buildBatchedDiorama(
     // eslint-disable-next-line no-console
     console.log(
       `[batchedDiorama] batches=${draws} instances=${total} ` +
+      `geom=${totalGeomFresh} reused=${totalGeomReused} (-${totalVertsSavedReuse} verts) ` +
       `skipped: animated=${skippedAnimated} multimat=${skippedMultiMat} ` +
       `skinned=${skippedSkinned} collider=${skippedCollider} ` +
       `morph=${skippedMorph} no-tile=${skippedNoTile}`,
