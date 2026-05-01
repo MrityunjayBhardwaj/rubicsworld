@@ -30,18 +30,31 @@ const GRASS_STAMP_MIN_DIST = 0.008
 // stamp loop where stampActive + dd are already in scope.
 let grassSwipeSmooth = 0
 
-// /optimize/ route scratch — module-scoped so the cull path doesn't
+// Per-tile cull scratch — module-scoped so the cull path doesn't
 // allocate per frame. Only read/written from inside useFrame.
-const optFrustumInst = new THREE.Frustum()
-const optVec3a = new THREE.Vector3()
-const optMat4 = new THREE.Matrix4()
-const optSphere = new THREE.Sphere()
-let optLogLast = 0
+const cullFrustumInst = new THREE.Frustum()
+const cullCamDir = new THREE.Vector3()
+const cullProjView = new THREE.Matrix4()
+const cullSphere = new THREE.Sphere()
+let cullLogLast = 0
+// Master toggle for per-tile back-face + frustum cull. Off → render
+// all 24 tiles every frame (legacy behaviour pre-PR #33). On →
+// ~3.1× render-time win measured in /tmp/probe-orbit.mjs A/B.
+const ENABLE_TILE_CULL = true
+
+// Back-face cull threshold: tile is culled when its centroid · viewDir
+// drops below this value. cos⁻¹(threshold) gives the cull cone half-angle
+// from the camera direction.
+//   -0.6  → ~127° (geometric safe bound for flat terrain)
+//   -0.85 → ~148° (looser; protects tall content like windmills/towers
+//                  on near-limb tiles from popping when their tops poke
+//                  above the silhouette)
+//   -0.9  → ~154° (even looser, only deeply back-facing tiles cull)
+// See full derivation in the per-frame cull setup comment below.
+const TILE_BACKFACE_CULL_THRESHOLD = -0.9
 
 // Per-tile-loop timing probe — module-scoped accumulators reset every
-// console flush. Active in DEV only; runs on BOTH default and /optimize/
-// routes so the two can be compared directly. Decision tool for the
-// "is /optimize/ actually slower" investigation (issue #20).
+// console flush. Active in DEV only.
 const probe = {
   applyVis: 0,        // ms spent in applySphereVisibility per second
   applyBatch: 0,      // ms in applyBatchVisibility per second
@@ -763,15 +776,12 @@ export function TileGrid({ mode = 'split', bezier }: {
       // tiles' 1×1 patches it overlaps. Animated subtrees + InstancedMesh
       // (grass) bypass tile gating via the alwaysVisible set.
       sphereVisRef.current = buildSphereVisibility(diorama.root, diorama.animations ?? [])
-      // /optimize/ — fold static, single-material, non-animated meshes
-      // into per-material BatchedMeshes. Originals stay in tree as
-      // visible=false placeholders (P23: traversal-based consumers
-      // — audio anchors, mixer track binding, grass groundMesh —
-      // still resolve them by name). Batches inherit per-pass
-      // root.quaternion automatically since they're added under root.
-      const optimizeBuild = (typeof window !== 'undefined') &&
-        Boolean((window as unknown as { __rwOptimize?: boolean }).__rwOptimize)
-      if (optimizeBuild && sphereVisRef.current) {
+      // Fold static, single-material, non-animated meshes into per-material
+      // BatchedMeshes. Originals stay in tree as visible=false placeholders
+      // (P23: traversal-based consumers — audio anchors, mixer track binding,
+      // grass groundMesh — still resolve them by name). Batches inherit
+      // per-pass root.quaternion automatically since they're added under root.
+      if (sphereVisRef.current) {
         dioramaBatchRef.current = buildBatchedDiorama(diorama.root, sphereVisRef.current)
       }
     }
@@ -837,9 +847,7 @@ export function TileGrid({ mode = 'split', bezier }: {
           // Recompute per-tile visibility for the new tree — old map's
           // mesh refs are stale (point at the disposed prev.root).
           sphereVisRef.current = buildSphereVisibility(next.root, next.animations ?? [])
-          const optimizeBuild = (typeof window !== 'undefined') &&
-            Boolean((window as unknown as { __rwOptimize?: boolean }).__rwOptimize)
-          if (optimizeBuild && sphereVisRef.current) {
+          if (sphereVisRef.current) {
             dioramaBatchRef.current = buildBatchedDiorama(next.root, sphereVisRef.current)
           }
         }
@@ -1491,41 +1499,32 @@ export function TileGrid({ mode = 'split', bezier }: {
         gl.render(terrainScene, camera)
       }
 
-      // /optimize/ route: skip per-tile renders that can't contribute to
-      // the framebuffer — back-face (planet's far hemisphere) and
-      // out-of-frustum tiles. Terrain already covers the whole sphere
-      // with depth + color, so culling the diorama overlay leaves no
-      // hole. Animation tick + audio anchor traversal already ran above
-      // (P23 — keep mesh tree intact, only skip the gl.render call).
-      const optimize = (typeof window !== 'undefined') &&
-        Boolean((window as unknown as { __rwOptimize?: boolean }).__rwOptimize)
-      let optFrustum: THREE.Frustum | null = null
-      const optCamDir = optVec3a
-      let optTilesRendered = 0
-      let optTilesCulled = 0
-      if (optimize) {
-        // View direction = camera position normalized (planet at origin).
-        // Per-tile back-face cull: each tile's centroid direction (= cubePos
-        // normalized) is dotted with optCamDir. The face-normal version was
-        // a coarser proxy — all 4 quadrants on one face shared one normal,
-        // so the threshold had to be absurdly conservative (-0.95) to avoid
-        // culling tiles whose face is mostly visible. Per-tile centroid
-        // discriminates by quadrant; threshold -0.6 is geometrically safe.
-        //
-        // Threshold derivation (data-corroborated, see issue #32):
-        //   - quadrant angular radius from its own centroid ≈ 16°
-        //   - elevation bulge ≈ arctan(maxElevation/sphereRadius) ≈ 17°
-        //   - safe threshold = -sin(16° + 17°) ≈ -0.545
-        //   - chosen -0.6 (~5° margin past safe) for headroom
-        //
-        // Observed in /tmp/probe-facings.out at rest: 4 tiles cluster at
-        // -0.82 (deeply back-facing quadrants), next tier at -0.41 (near
-        // limb, NOT safe to cull). -0.6 cleanly separates the clusters.
-        // Active orbit: 4-6 tiles cull per frame depending on camera pose.
-        optCamDir.copy(camera.position).normalize()
-        optMat4.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
-        optFrustum = optFrustumInst.setFromProjectionMatrix(optMat4)
-      }
+      // Skip per-tile renders that can't contribute to the framebuffer —
+      // back-face (planet's far hemisphere) and out-of-frustum tiles.
+      // Terrain already covers the whole sphere with depth + color, so
+      // culling the diorama overlay leaves no hole. Animation tick + audio
+      // anchor traversal already ran above (P23 — keep mesh tree intact,
+      // only skip the gl.render call).
+      //
+      // View direction = camera position normalized (planet at origin).
+      // Per-tile back-face cull: each tile's centroid direction (= cubePos
+      // normalized) is dotted with cullCamDir. Per-tile centroid discriminates
+      // by quadrant. Threshold lives in TILE_BACKFACE_CULL_THRESHOLD (module
+      // scope) — see that const for the live value + tradeoff table.
+      //
+      // Threshold derivation (data-corroborated, see issue #32):
+      //   - quadrant angular radius from its own centroid ≈ 16°
+      //   - elevation bulge ≈ arctan(maxElevation/sphereRadius) ≈ 17°
+      //   - safe threshold for FLAT terrain = -sin(16° + 17°) ≈ -0.545
+      // Tall content (windmill / towers) has a larger elevation bulge, so
+      // the const sits below this safe-flat bound. Observed in
+      // /tmp/probe-facings.out at rest: 4 tiles cluster at -0.82 (deeply
+      // back-facing quadrants), next tier at -0.41 (near limb).
+      let cullTilesRendered = 0
+      let cullTilesCulled = 0
+      cullCamDir.copy(camera.position).normalize()
+      cullProjView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+      const cullFrustum = cullFrustumInst.setFromProjectionMatrix(cullProjView)
 
       for (const tile of tiles) {
         const r = storeTileCubeRender(tile, SPHERE_GAP)
@@ -1563,21 +1562,21 @@ export function TileGrid({ mode = 'split', bezier }: {
         }
 
         let cullThisTile = false
-        if (optimize && optFrustum) {
+        if (ENABLE_TILE_CULL) {
           // Back-face: per-tile centroid vs view-dir. Threshold -0.6 culls
           // tiles whose centroid is at least ~127° from camera direction
           // (cos⁻¹(-0.6) ≈ 127°), with comfortable margin past the safe
           // bound -sin(quadrant_half_angle + elevation_bulge) ≈ -0.545.
           // See setup comment above for the derivation and observed data.
-          const tileFacing = tileCentroidDir.dot(optCamDir)
-          if (tileFacing < -0.6) { cullThisTile = true; optTilesCulled++ }
+          const tileFacing = tileCentroidDir.dot(cullCamDir)
+          if (tileFacing < TILE_BACKFACE_CULL_THRESHOLD) { cullThisTile = true; cullTilesCulled++ }
           // Frustum: tile's projected sphere centre is faceNormal direction
           // (the tile spans ~half a face → ~0.5 rad on the unit sphere;
           // bound radius 0.7 in world units gives slack for tall meshes).
-          optSphere.center.copy(faceNormal).multiplyScalar(1.0)
-          optSphere.radius = 0.75
-          if (!optFrustum.intersectsSphere(optSphere)) { cullThisTile = true; optTilesCulled++ }
-          if (!cullThisTile) optTilesRendered++
+          cullSphere.center.copy(faceNormal).multiplyScalar(1.0)
+          cullSphere.radius = 0.75
+          if (!cullFrustum.intersectsSphere(cullSphere)) { cullThisTile = true; cullTilesCulled++ }
+          if (!cullThisTile) cullTilesRendered++
         }
 
         // Strictly-antipodal or out-of-frustum tile: skip the entire
@@ -1594,13 +1593,13 @@ export function TileGrid({ mode = 'split', bezier }: {
         // from prod via import.meta.env.DEV gating below.
         const _tLoopStart = import.meta.env.DEV ? performance.now() : 0
 
-        // /optimize/ — per-tile mesh visibility. Hide every diorama mesh
-        // whose AABB doesn't overlap THIS tile's home patch; show meshes
-        // that do, plus the always-visible set (animated subtrees +
-        // InstancedMesh grass). Three.js's render path skips invisible
-        // meshes — pure perf win, output identical because the hidden
-        // meshes would have been clipped out anyway by the 8 clip planes.
-        if (optimize && sphereVisRef.current) {
+        // Per-tile mesh visibility. Hide every diorama mesh whose AABB
+        // doesn't overlap THIS tile's home patch; show meshes that do,
+        // plus the always-visible set (animated subtrees + InstancedMesh
+        // grass). Three.js's render path skips invisible meshes — pure
+        // perf win, output identical because the hidden meshes would
+        // have been clipped out anyway by the 8 clip planes.
+        if (sphereVisRef.current) {
           const homeIdx = tile.homeFace * 4 + tile.homeV * 2 + tile.homeU
           const _tApplyVis = import.meta.env.DEV ? performance.now() : 0
           applySphereVisibility(sphereVisRef.current, homeIdx)
@@ -1649,36 +1648,34 @@ export function TileGrid({ mode = 'split', bezier }: {
       // originals stay visible=false (the batch is the renderer); the
       // helper itself skips them. Batch instances all get re-visible
       // so any non-24-pass render path sees the full set.
-      if (optimize && sphereVisRef.current) {
+      if (sphereVisRef.current) {
         restoreSphereVisibility(sphereVisRef.current)
       }
-      if (optimize && dioramaBatchRef.current) {
+      if (dioramaBatchRef.current) {
         restoreBatchVisibility(dioramaBatchRef.current)
       }
       // Reset grass per-tile cull to "render all blades" so any non-
       // 24-pass render path (preview modes, future single-render hooks)
       // sees a fully-populated meadow. -1 is the disabled sentinel.
-      if (optimize) grassUniforms.uActiveTileIdx.value = -1
+      grassUniforms.uActiveTileIdx.value = -1
 
-      if (optimize && import.meta.env.DEV) {
+      if (import.meta.env.DEV) {
         const nowS = clock.elapsedTime
-        if (nowS - optLogLast > 1) {
-          optLogLast = nowS
+        if (nowS - cullLogLast > 1) {
+          cullLogLast = nowS
           // eslint-disable-next-line no-console
-          console.log(`[optimize] tiles withGrass=${optTilesRendered} grassSuppressed=${optTilesCulled}`)
+          console.log(`[cull] tiles withGrass=${cullTilesRendered} grassSuppressed=${cullTilesCulled}`)
         }
       }
 
-      // Per-tile timing probe — flushes once/sec on BOTH routes for A/B
-      // comparison. Reports per-frame averages over the window. The route
-      // tag (OPT vs DEFAULT) makes it obvious which trace is which when
-      // reading the dev console. Issue #20.
+      // Per-tile timing probe — flushes once/sec. Reports per-frame
+      // averages over the window. Issue #20 / PK8.
       if (import.meta.env.DEV) {
         const nowS = clock.elapsedTime
         if (nowS - probeLogLast > 1 && probe.frames > 0) {
           probeLogLast = nowS
           const f = probe.frames
-          const tag = optimize ? 'OPT     ' : 'DEFAULT '
+          const tag = 'probe   '
           // eslint-disable-next-line no-console
           console.log(
             `[probe ${tag}] ` +

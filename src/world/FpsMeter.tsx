@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react'
 
 /**
- * Lightweight FPS / frame-time HUD. Always visible at top-left so we can
- * eyeball perf across the default route vs `/optimize/`.
+ * Lightweight FPS / frame-time HUD. Always visible at top-left for
+ * eyeballing perf without opening devtools.
  *
  * Counts frames between rAF ticks and refreshes the DOM at 500ms cadence
  * (so the digits don't jitter every frame). Writes via ref — no React

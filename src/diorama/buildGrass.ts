@@ -94,11 +94,10 @@ export interface GrassUniforms {
   uTrailPos:      { value: Float32Array }  // length 3 * TRAIL_N
   uTrailTime:     { value: Float32Array }  // length TRAIL_N
   uTrailDecay:    { value: number }        // seconds
-  /** Per-tile shader cull. -1 = render all blades (default, identical to
-   *  pre-optimization). [0, 23] = only blades whose home-tile index
-   *  matches survive; the rest collapse to a degenerate point in the
-   *  vertex shader before the heavy bend / hover math runs. TileGrid's
-   *  per-tile loop sets this each pass on /optimize/. */
+  /** Per-tile shader cull. -1 = render all blades. [0, 23] = only blades
+   *  whose home-tile index matches survive; the rest collapse to a
+   *  degenerate point in the vertex shader before the heavy bend / hover
+   *  math runs. TileGrid's per-tile loop writes this each pass. */
   uActiveTileIdx: { value: number }
 }
 
@@ -314,14 +313,13 @@ const VERTEX_BEGIN = /* glsl */`
   vHue = iHue;
 
   // Per-tile shader cull. uActiveTileIdx == -1 → render every blade
-  // (default + non-/optimize/ path, identical to old behaviour).
-  // uActiveTileIdx in [0,23] → only blades whose home-tile index
-  // matches survive; the rest collapse to the instance origin (8 verts
-  // per blade map to one point → degenerate triangles → no fragments)
-  // AND skip the heavy bend / hover-trail math below. Big win because
-  // the bend + trail loop is the costliest part of the grass shader,
-  // and 23 of every 24 tile passes are looking at "the wrong tile" for
-  // most blades.
+  // (sentinel for non-24-pass render paths). uActiveTileIdx in [0,23]
+  // → only blades whose home-tile index matches survive; the rest
+  // collapse to the instance origin (8 verts per blade map to one
+  // point → degenerate triangles → no fragments) AND skip the heavy
+  // bend / hover-trail math below. Big win because the bend + trail
+  // loop is the costliest part of the grass shader, and 23 of every
+  // 24 tile passes are looking at "the wrong tile" for most blades.
   bool _gCulled = (uActiveTileIdx >= 0.0) && (abs(iTileIdx - uActiveTileIdx) > 0.5);
   if (_gCulled) {
     transformed = vec3(0.0);
