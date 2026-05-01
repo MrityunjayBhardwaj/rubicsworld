@@ -101,7 +101,21 @@ function AxesGizmo() {
   )
 }
 
-export default function App() {
+interface AppProps {
+  /** Route gate: 'dev' = full playground (Leva, Controls, panels, preview
+   *  modes — current root-route behavior). 'game' = jam route at /game/:
+   *  no Leva chrome, no dev tools, no preview modes. Settings panels
+   *  (HDRI / Audio / Grass) stay mounted-but-hidden so their useControls
+   *  side effects (mask rasterisation, HDRI selection, audio bus init)
+   *  still shape the scene. */
+  route?: 'dev' | 'game'
+}
+
+export default function App({ route: _route = 'dev' }: AppProps) {
+  // Note: _route accepted but unused at commit 1 — wiring lands in commit 3
+  // when MenuOverlay mounts and dev-chrome gating reads this. Keeping the
+  // prop on App now lets main.tsx's isGame branch land first without TS
+  // errors.
   const [preview, setPreview] = useState<false | 'grid' | 'split' | 'cube' | 'rubik'>(false)
   const [bezier, setBezier] = useState({ cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 })
   const onBezierChange = useCallback((cx1: number, cy1: number, cx2: number, cy2: number) => {
