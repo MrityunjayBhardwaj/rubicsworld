@@ -599,12 +599,17 @@ class AudioBus {
   }
 
   private loadBuffer(src: string): Promise<AudioBuffer> {
-    const cached = this.bufferCache.get(src)
+    // Registry entries are public/-relative ("audio/foo.ogg"). Without a
+    // leading slash, fetch resolves them against document.baseURI — fine on
+    // /, broken on /optimize/ where they'd hit /optimize/audio/foo.ogg →
+    // SPA fallback HTML → decodeAudioData EncodingError.
+    const url = src.startsWith('/') ? src : '/' + src
+    const cached = this.bufferCache.get(url)
     if (cached) return cached
     const promise = new Promise<AudioBuffer>((resolve, reject) => {
-      this.audioLoader.load(src, resolve, undefined, reject)
+      this.audioLoader.load(url, resolve, undefined, reject)
     })
-    this.bufferCache.set(src, promise)
+    this.bufferCache.set(url, promise)
     return promise
   }
 
