@@ -38,8 +38,10 @@ public/*.glb
 # Re-encode any time via: bash scripts/encode-audio.sh
 src/sfx/
 
-# Local debug helpers + bake backups + anvi session state
+# Local debug helpers + bake backups
 aud.mjs
 audio-check.mjs
 public/diorama.glb.before-bake
-.anvi/sessions/
+
+# Anvi cognitive catalogues — internal, per-machine
+.anvi/
