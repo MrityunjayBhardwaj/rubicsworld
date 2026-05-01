@@ -58,6 +58,8 @@ const TILE_BACKFACE_CULL_THRESHOLD = -0.9
 const probe = {
   applyVis: 0,        // ms spent in applySphereVisibility per second
   applyBatch: 0,      // ms in applyBatchVisibility per second
+  clipSet: 0,         // ms in `gl.clippingPlanes = ...` per second (Firefox-suspect)
+  mwUpdate: 0,        // ms in updateMatrixWorld per second
   render: 0,          // ms in per-tile gl.render(dScene) per second
   loopTotal: 0,       // ms for the entire per-tile for-loop body per second
   tilesRendered: 0,   // tiles that actually called gl.render per second
@@ -1624,13 +1626,17 @@ export function TileGrid({ mode = 'split', bezier }: {
           // need the per-tile visible=false override that lived here.)
         }
 
+        const _tClip = import.meta.env.DEV ? performance.now() : 0
         gl.clippingPlanes = clipPlanes
+        if (import.meta.env.DEV) probe.clipSet += performance.now() - _tClip
         if (su) su.uFaceNormal.value.copy(faceNormal)
 
         diorama.root.quaternion.copy(quaternion)
         diorama.root.position.copy(position)
         diorama.root.updateMatrix()
+        const _tMW = import.meta.env.DEV ? performance.now() : 0
         diorama.root.updateMatrixWorld(true)
+        if (import.meta.env.DEV) probe.mwUpdate += performance.now() - _tMW
         const _tRender = import.meta.env.DEV ? performance.now() : 0
         gl.render(dScene, camera)
         if (import.meta.env.DEV) {
@@ -1683,12 +1689,16 @@ export function TileGrid({ mode = 'split', bezier }: {
             `culled=${(probe.tilesCulled / f).toFixed(1)}/24 | ` +
             `applyVis=${(probe.applyVis / f).toFixed(2)}ms ` +
             `applyBatch=${(probe.applyBatch / f).toFixed(2)}ms ` +
+            `clipSet=${(probe.clipSet / f).toFixed(2)}ms ` +
+            `mwUpdate=${(probe.mwUpdate / f).toFixed(2)}ms ` +
             `render=${(probe.render / f).toFixed(2)}ms ` +
             `loopBody=${(probe.loopTotal / f).toFixed(2)}ms ` +
             `(${f} frames)`
           )
           probe.applyVis = 0
           probe.applyBatch = 0
+          probe.clipSet = 0
+          probe.mwUpdate = 0
           probe.render = 0
           probe.loopTotal = 0
           probe.tilesRendered = 0
