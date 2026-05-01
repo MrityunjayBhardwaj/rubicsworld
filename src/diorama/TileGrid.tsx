@@ -1105,6 +1105,15 @@ export function TileGrid({ mode = 'split', bezier }: {
     const rebuildMeadow = () => {
       const diorama = dioramaRef.current
       if (!diorama) return
+      // Glb-path mounts an empty stub root and async-swaps in the loaded
+      // scene. If a Leva mask "apply" fires during that interim — e.g.
+      // applyDefaultGrassMask at panel mount — buildGrass would traverse
+      // the stub, find no terrain, and emit a spurious "no ground" error.
+      // The mask itself was already stashed in grassRefs.activeMask before
+      // this function ran, and loadGlbDiorama reads that to thread it into
+      // its own buildGrass call once the scene arrives. Skipping here is
+      // safe.
+      if (diorama.root.children.length === 0) return
       for (const old of grassRefs.meadowMeshes) {
         old.parent?.remove(old)
         old.geometry.dispose()
