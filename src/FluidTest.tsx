@@ -300,9 +300,7 @@ function FluidScene() {
           rotation={[-Math.PI / 2, 0, 0]}
           scale={[flow.groundSize / 8, flow.groundSize / 8, 1]}
         >
-          {/* @ts-expect-error r3f primitive — geometry constructed imperatively */}
           <primitive attach="geometry" object={groundGeometry} />
-          {/* @ts-expect-error r3f primitive — material constructed imperatively */}
           <primitive attach="material" object={groundMaterial} />
         </mesh>
       )}
@@ -310,9 +308,7 @@ function FluidScene() {
         <mesh
           rotation={autoRotate ? [0, performance.now() * 0.0002, 0] : [0, 0, 0]}
         >
-          {/* @ts-expect-error r3f primitive — geometry from a buffer */}
           <primitive attach="geometry" object={geometry} />
-          {/* @ts-expect-error r3f primitive — material constructed imperatively */}
           <primitive attach="material" object={material} />
         </mesh>
       )}

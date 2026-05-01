@@ -81,7 +81,7 @@ export interface Registry {
 
 export type Category = 'master' | 'ambient' | 'sfx'
 
-export const REGISTRY = registryJson as Registry
+export const REGISTRY = registryJson as unknown as Registry
 
 type Modulator = () => number
 
@@ -844,7 +844,11 @@ class AudioBus {
       lr.node = null
     }
     if (lr.synth) {
-      try { lr.synth.source.stop?.() } catch { /* ignore */ }
+      // Use the handle's documented cleanup (stops oscillators, LFOs, source
+      // nodes — see SynthLoopHandle in ./synth.ts). Earlier `source.stop?.()`
+      // probed AudioNode for a method only present on AudioScheduledSourceNode
+      // subtypes — TS 2339 since `source: AudioNode`.
+      try { lr.synth.stop() } catch { /* ignore */ }
       lr.synth = null
     }
     if (lr.synthGain) {

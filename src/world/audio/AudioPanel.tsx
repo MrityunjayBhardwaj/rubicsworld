@@ -75,11 +75,14 @@ export function AudioPanel() {
     sfxMute:       { value: false, label: 'sfx mute' },
     sfxVol:        { value: 1.0,   min: 0, max: 1.0, step: 0.01, label: 'sfx vol' },
     showVisualizer:{ value: false, label: 'show sound debug' },
-    Loops:  folder(buildLoopRows(),  { collapsed: true }),
-    Events: folder(buildEventRows(), { collapsed: true }),
+    Loops:  folder(buildLoopRows()  as Parameters<typeof folder>[0], { collapsed: true }),
+    Events: folder(buildEventRows() as Parameters<typeof folder>[0], { collapsed: true }),
   }), { collapsed: true })
 
-  const values = v as Record<string, boolean | number>
+  // Flatten the Leva return — folder children are nested in the schema but
+  // appear flat in the values map. Cast through unknown because the schema
+  // shape includes Folder inputs that aren't boolean | number.
+  const values = v as unknown as Record<string, boolean | number>
   const latestRef = useRef(values)
   latestRef.current = values
 
