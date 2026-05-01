@@ -37,6 +37,21 @@ const optVec3a = new THREE.Vector3()
 const optMat4 = new THREE.Matrix4()
 const optSphere = new THREE.Sphere()
 let optLogLast = 0
+
+// Per-tile-loop timing probe — module-scoped accumulators reset every
+// console flush. Active in DEV only; runs on BOTH default and /optimize/
+// routes so the two can be compared directly. Decision tool for the
+// "is /optimize/ actually slower" investigation (issue #20).
+const probe = {
+  applyVis: 0,        // ms spent in applySphereVisibility per second
+  applyBatch: 0,      // ms in applyBatchVisibility per second
+  render: 0,          // ms in per-tile gl.render(dScene) per second
+  loopTotal: 0,       // ms for the entire per-tile for-loop body per second
+  tilesRendered: 0,   // tiles that actually called gl.render per second
+  tilesCulled: 0,     // tiles that hit the back-face / frustum continue per second
+  frames: 0,          // frame samples in the window
+}
+let probeLogLast = 0
 import { buildGrass, grassRefs } from './buildGrass'
 import { loadGlbDiorama } from './loadGlbDiorama'
 import { audioBus } from '../world/audio/bus'
@@ -1553,7 +1568,12 @@ export function TileGrid({ mode = 'split', bezier }: {
         // zero pixels through the 8 clip planes anyway. Animation
         // tick + audio anchor traversal already ran above the tile
         // loop, so P23 consumers are unaffected.
-        if (cullThisTile) continue
+        if (cullThisTile) { probe.tilesCulled++; continue }
+
+        // Probe: per-tile-loop body timing. performance.now() is ~50ns
+        // per call, fine to keep around all 24 tiles in DEV. Stripped
+        // from prod via import.meta.env.DEV gating below.
+        const _tLoopStart = import.meta.env.DEV ? performance.now() : 0
 
         // /optimize/ — per-tile mesh visibility. Hide every diorama mesh
         // whose AABB doesn't overlap THIS tile's home patch; show meshes
@@ -1563,13 +1583,17 @@ export function TileGrid({ mode = 'split', bezier }: {
         // meshes would have been clipped out anyway by the 8 clip planes.
         if (optimize && sphereVisRef.current) {
           const homeIdx = tile.homeFace * 4 + tile.homeV * 2 + tile.homeU
+          const _tApplyVis = import.meta.env.DEV ? performance.now() : 0
           applySphereVisibility(sphereVisRef.current, homeIdx)
+          if (import.meta.env.DEV) probe.applyVis += performance.now() - _tApplyVis
           // Per-tile cull on BatchedMesh instances. Same tile-mask logic
           // as the per-mesh path, but flips visibility on per-instance
           // slots inside each batch instead of on the original Mesh
           // (which is now permanently invisible — see __batched flag).
           if (dioramaBatchRef.current) {
+            const _tApplyBatch = import.meta.env.DEV ? performance.now() : 0
             applyBatchVisibility(dioramaBatchRef.current, homeIdx)
+            if (import.meta.env.DEV) probe.applyBatch += performance.now() - _tApplyBatch
           }
           // Per-tile grass shader cull: blades whose iTileIdx differs
           // from this tile collapse to a degenerate point in the vertex
@@ -1589,8 +1613,15 @@ export function TileGrid({ mode = 'split', bezier }: {
         diorama.root.position.copy(position)
         diorama.root.updateMatrix()
         diorama.root.updateMatrixWorld(true)
+        const _tRender = import.meta.env.DEV ? performance.now() : 0
         gl.render(dScene, camera)
+        if (import.meta.env.DEV) {
+          probe.render += performance.now() - _tRender
+          probe.tilesRendered++
+          probe.loopTotal += performance.now() - _tLoopStart
+        }
       }
+      if (import.meta.env.DEV) probe.frames++
 
       // After the per-tile pass: restore everything to .visible = true so
       // post-frame consumers (audio anchor traversal on swap, grass
@@ -1616,6 +1647,37 @@ export function TileGrid({ mode = 'split', bezier }: {
           optLogLast = nowS
           // eslint-disable-next-line no-console
           console.log(`[optimize] tiles withGrass=${optTilesRendered} grassSuppressed=${optTilesCulled}`)
+        }
+      }
+
+      // Per-tile timing probe — flushes once/sec on BOTH routes for A/B
+      // comparison. Reports per-frame averages over the window. The route
+      // tag (OPT vs DEFAULT) makes it obvious which trace is which when
+      // reading the dev console. Issue #20.
+      if (import.meta.env.DEV) {
+        const nowS = clock.elapsedTime
+        if (nowS - probeLogLast > 1 && probe.frames > 0) {
+          probeLogLast = nowS
+          const f = probe.frames
+          const tag = optimize ? 'OPT     ' : 'DEFAULT '
+          // eslint-disable-next-line no-console
+          console.log(
+            `[probe ${tag}] ` +
+            `tilesDrawn=${(probe.tilesRendered / f).toFixed(1)}/24 ` +
+            `culled=${(probe.tilesCulled / f).toFixed(1)}/24 | ` +
+            `applyVis=${(probe.applyVis / f).toFixed(2)}ms ` +
+            `applyBatch=${(probe.applyBatch / f).toFixed(2)}ms ` +
+            `render=${(probe.render / f).toFixed(2)}ms ` +
+            `loopBody=${(probe.loopTotal / f).toFixed(2)}ms ` +
+            `(${f} frames)`
+          )
+          probe.applyVis = 0
+          probe.applyBatch = 0
+          probe.render = 0
+          probe.loopTotal = 0
+          probe.tilesRendered = 0
+          probe.tilesCulled = 0
+          probe.frames = 0
         }
       }
     } else {
