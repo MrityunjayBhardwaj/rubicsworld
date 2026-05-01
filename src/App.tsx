@@ -179,7 +179,14 @@ export default function App({ route = 'dev' }: AppProps) {
       {!isGame && <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />}
       <Cursor />
       {!isGame && <TileLabelsLegend />}
-      <HDRIPanel />
+      {/* HDRIPanel mounts its OWN fixed-position div (not inside Leva), so
+          hiding Leva chrome doesn't hide it. Wrap with display:none on
+          /game/ so the useControls schema registration + side effects
+          still run (HDRI selection, image upload callback) — only the
+          visible panel chrome is hidden. */}
+      <div style={{ display: isGame ? 'none' : 'contents' }}>
+        <HDRIPanel />
+      </div>
       {!preview && <AudioPanel />}
       {!preview && <GrassPanel />}
       {!isGame && !preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
