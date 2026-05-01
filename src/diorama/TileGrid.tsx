@@ -1505,18 +1505,23 @@ export function TileGrid({ mode = 'split', bezier }: {
       let optTilesCulled = 0
       if (optimize) {
         // View direction = camera position normalized (planet at origin).
-        // Cull ONLY the strictly-antipodal face. On a sphere the four
-        // "side" faces remain quite visible from any viewing angle —
-        // their content bulges past the limb due to terrain elevation.
-        // So we want a threshold that only fires for tiles whose face
-        // normal points almost exactly opposite the camera. -0.95 is
-        // "true antipodal" (~162° from view dir): axis-aligned camera
-        // culls the one fully-occluded back face (facing=-1); slightly
-        // off-axis releases it the moment elevated content might
-        // re-emerge at the silhouette; corner-of-3 views never cull
-        // (rear-axis faces at facing≈-0.577 escape comfortably).
-        // Earlier value -0.6 was geometrically safe but more aggressive;
-        // -0.95 is the bulletproof setting for elevation-bearing terrain.
+        // Per-tile back-face cull: each tile's centroid direction (= cubePos
+        // normalized) is dotted with optCamDir. The face-normal version was
+        // a coarser proxy — all 4 quadrants on one face shared one normal,
+        // so the threshold had to be absurdly conservative (-0.95) to avoid
+        // culling tiles whose face is mostly visible. Per-tile centroid
+        // discriminates by quadrant; threshold -0.6 is geometrically safe.
+        //
+        // Threshold derivation (data-corroborated, see issue #32):
+        //   - quadrant angular radius from its own centroid ≈ 16°
+        //   - elevation bulge ≈ arctan(maxElevation/sphereRadius) ≈ 17°
+        //   - safe threshold = -sin(16° + 17°) ≈ -0.545
+        //   - chosen -0.6 (~5° margin past safe) for headroom
+        //
+        // Observed in /tmp/probe-facings.out at rest: 4 tiles cluster at
+        // -0.82 (deeply back-facing quadrants), next tier at -0.41 (near
+        // limb, NOT safe to cull). -0.6 cleanly separates the clusters.
+        // Active orbit: 4-6 tiles cull per frame depending on camera pose.
         optCamDir.copy(camera.position).normalize()
         optMat4.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
         optFrustum = optFrustumInst.setFromProjectionMatrix(optMat4)
@@ -1528,6 +1533,19 @@ export function TileGrid({ mode = 'split', bezier }: {
         let quaternion = r.quaternion
         let clipPlanes = r.clipPlanes
         let faceNormal = FACES[tile.face].normal
+
+        // Per-tile centroid direction in cube-space — finer-grained than
+        // faceNormal (each face's 4 quadrants share faceNormal but have
+        // distinct centroid directions). cubePos formula matches
+        // storeTileCubeRender's intermediate (kept inline to avoid
+        // plumbing the value through CellRender). CELL=1 baked in.
+        const _f = FACES[tile.face]
+        const _uOff = (tile.u - 0.5)
+        const _vOff = (0.5 - tile.v)
+        let tileCentroidDir = _f.normal.clone()
+          .addScaledVector(_f.right, _uOff)
+          .addScaledVector(_f.up, _vOff)
+          .normalize()
 
         if (sliceQuat && activeAxis && tileInSlice(tile, activeAxis, activeSlice)) {
           // Rotate around origin: position rotates, plane normals rotate,
@@ -1541,17 +1559,18 @@ export function TileGrid({ mode = 'split', bezier }: {
             p.constant,
           ))
           faceNormal = faceNormal.clone().applyQuaternion(sliceQuat)
+          tileCentroidDir = tileCentroidDir.clone().applyQuaternion(sliceQuat)
         }
 
         let cullThisTile = false
         if (optimize && optFrustum) {
-          // Back-face: face-normal vs view-dir. -0.95 threshold = only
-          // strictly-antipodal tiles fire the cull (see setup comment
-          // above for the geometry). Side faces and corner-of-3 rear
-          // faces always escape, so horizon-elevation content stays
-          // intact.
-          const facing = faceNormal.dot(optCamDir)
-          if (facing < -0.95) { cullThisTile = true; optTilesCulled++ }
+          // Back-face: per-tile centroid vs view-dir. Threshold -0.6 culls
+          // tiles whose centroid is at least ~127° from camera direction
+          // (cos⁻¹(-0.6) ≈ 127°), with comfortable margin past the safe
+          // bound -sin(quadrant_half_angle + elevation_bulge) ≈ -0.545.
+          // See setup comment above for the derivation and observed data.
+          const tileFacing = tileCentroidDir.dot(optCamDir)
+          if (tileFacing < -0.6) { cullThisTile = true; optTilesCulled++ }
           // Frustum: tile's projected sphere centre is faceNormal direction
           // (the tile spans ~half a face → ~0.5 rad on the unit sphere;
           // bound radius 0.7 in world units gives slack for tall meshes).
