@@ -20,6 +20,7 @@ export const settings: Settings = defaultsJson
 export async function captureLiveSettings(): Promise<Settings> {
   const { grassUniforms, flowerColorUniforms } = await import('../diorama/buildGrass')
   const { useHdri } = await import('../world/hdriStore')
+  const { postfxLive } = await import('../world/PostFx')
 
   const hex = (c: { getHexString: () => string }) => '#' + c.getHexString()
 
@@ -77,6 +78,11 @@ export async function captureLiveSettings(): Promise<Settings> {
       roughnessBoost:    hs.roughnessBoost,
       fresnelEnabled:    hs.fresnelEnabled,
     },
+    // Snapshot of the PostFx component's live useControls state, mirrored
+    // by PostFx.tsx into postfxLive. If PostFx hasn't mounted yet (e.g.
+    // capture called pre-canvas) postfxLive still holds the JSON defaults
+    // because it's seeded from settings.postfx at module init.
+    postfx: { ...postfxLive },
   }
 }
 
@@ -179,6 +185,16 @@ export async function applySettings(partial: Partial<Settings>): Promise<string[
     if (h.fresnelEnabled    !== undefined) hs.setFresnelEnabled(h.fresnelEnabled)
   }
 
+  if (partial.postfx) {
+    touched.push('postfx')
+    // Mirror is the read-side source of truth for capture; write it
+    // immediately so a follow-up capture is consistent. The Leva-side push
+    // (via flattenSettingsForLeva → setLeva) drives the actual scene
+    // because the useEffect chain in PostFx.tsx fires on Leva-state changes.
+    const { postfxLive } = await import('../world/PostFx')
+    Object.assign(postfxLive, partial.postfx)
+  }
+
   // eslint-disable-next-line no-console
   console.log('[settings] applied:', touched)
   return touched
@@ -210,6 +226,14 @@ export function flattenSettingsForLeva(s: Partial<Settings>): Record<string, unk
   if (s.flowers) {
     for (const [k, v] of Object.entries(s.flowers)) {
       if (flowersSkip.has(k)) continue
+      out[k] = v
+    }
+  }
+  // PostFx values live in PostFx.tsx's useControls — every key in
+  // settings.postfx.X is registered as a bare declaration name (folder paths
+  // don't enter mappedPaths), so we can pass them through unchanged.
+  if (s.postfx) {
+    for (const [k, v] of Object.entries(s.postfx)) {
       out[k] = v
     }
   }
