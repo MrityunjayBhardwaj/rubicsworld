@@ -184,6 +184,11 @@ interface PlanetStore {
    *  is no next planet (end of progression), wipes solvedPlanets and falls
    *  back to title — placeholder UX until the credits flow lands. */
   advancePlanet: () => void
+  /** Jump directly to a specific planet by slug — used by the title screen's
+   *  "Select level" roster. Like advancePlanet but driven by user pick
+   *  rather than progression order. Resets the puzzle, starts the run
+   *  timer, kicks gamePhase → 'playing'. No-op if slug is unknown. */
+  selectLevel: (slug: string) => void
   /** Wipe localStorage flags (tutorial-seen, audio-muted) and reset
    *  in-memory mute to fresh-install default. Does NOT reload the page —
    *  caller is responsible for follow-up nav (e.g. returnToTitle). */
@@ -377,6 +382,28 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
       // Continue button keeps gamePhase === 'playing'; the new planet's
       // IntroCinematic re-runs from 'orbit-solved' just like first launch.
       // Restart the timer for the new planet's run.
+      playStartedAt: performance.now(),
+    }
+  }),
+  selectLevel: slug => set(s => {
+    if (!getPlanet(slug)) return {}
+    writePersistedProgress({ currentPlanetSlug: slug, solvedPlanets: s.solvedPlanets })
+    return {
+      tiles: buildSolvedTiles(),
+      solved: true,
+      anim: null,
+      drag: null,
+      history: [] as Move[],
+      hudAttractMode: true,
+      introPhase: 'orbit-solved' as const,
+      aiHasFired: false,
+      lastPlayerActionAt: performance.now(),
+      menuOpen: false,
+      cameraMode: 'orbit' as const,
+      statsOverlayOpen: false,
+      lastSolveTimeMs: null,
+      currentPlanetSlug: slug,
+      gamePhase: 'playing' as const,
       playStartedAt: performance.now(),
     }
   }),
