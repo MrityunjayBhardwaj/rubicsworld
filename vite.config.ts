@@ -15,13 +15,13 @@ import crypto from 'node:crypto'
  * swaps the scene in place — no page reload, Leva knob state preserved.
  */
 // Phase A of issue #48: per-planet asset folders. Until the manifest is
-// queryable from middleware (Phase B), watch + commit target the meadow slot
-// directly. When planet-switching lands, this becomes "watch all planets'
+// queryable from middleware (Phase B), watch + commit target the first planet
+// slot directly. When planet-switching lands, this becomes "watch all planets'
 // glb paths" + "commit accepts ?planet=slug to pick the target file".
-const MEADOW_GLB_PATH = 'public/planets/meadow/diorama.glb'
+const PLANET_GLB_PATH = 'public/planets/country-land/diorama.glb'
 
 function dioramaHotReload(): Plugin {
-  const watchPath = path.resolve(__dirname, MEADOW_GLB_PATH)
+  const watchPath = path.resolve(__dirname, PLANET_GLB_PATH)
   return {
     name: 'diorama-hot-reload',
     configureServer(server) {
@@ -280,7 +280,7 @@ function patchGlbColorAccessorNames(body: Buffer, names: readonly string[]): Buf
  * every CDP message comfortably small.
  */
 function dioramaCommit(): Plugin {
-  const targetPath = path.resolve(__dirname, MEADOW_GLB_PATH)
+  const targetPath = path.resolve(__dirname, PLANET_GLB_PATH)
   // Per-session in-memory accumulator. Sessions are short-lived (one bake),
   // dev-only, and not user-facing; no eviction policy needed beyond delete-on-commit.
   const sessions = new Map<string, Buffer[]>()
@@ -347,7 +347,7 @@ async function writeBakedGlb(body: Buffer, targetPath: string, res: import('http
   await fs.promises.writeFile(targetPath, patched)
   res.statusCode = 200
   res.setHeader('Content-Type', 'application/json')
-  res.end(JSON.stringify({ ok: true, path: 'public/planets/meadow/diorama.glb', size: patched.length }))
+  res.end(JSON.stringify({ ok: true, path: PLANET_GLB_PATH, size: patched.length }))
 }
 
 export default defineConfig({

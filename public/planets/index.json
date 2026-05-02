@@ -2,10 +2,10 @@
   "$schema": "manifest@v1",
   "planets": [
     {
-      "slug": "meadow",
-      "name": "Meadow",
+      "slug": "country-land",
+      "name": "Country Land",
       "order": 0,
-      "dioramaUrl": "/planets/meadow/diorama.glb",
+      "dioramaUrl": "/planets/country-land/diorama.glb",
       "audioOverlapMs": 1200
     }
   ]

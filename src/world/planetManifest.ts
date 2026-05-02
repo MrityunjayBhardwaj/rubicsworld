@@ -27,10 +27,10 @@ export interface PlanetEntry {
 
 export const PLANETS: readonly PlanetEntry[] = [
   {
-    slug:           'meadow',
-    name:           'Meadow',
+    slug:           'country-land',
+    name:           'Country Land',
     order:          0,
-    dioramaUrl:     '/planets/meadow/diorama.glb',
+    dioramaUrl:     '/planets/country-land/diorama.glb',
     audioOverlapMs: 1200,
   },
 ] as const
@@ -41,7 +41,7 @@ export function getPlanet(slug: string): PlanetEntry | null {
 }
 
 /**
- * Return the current planet entry. Phase A only has `meadow`, so this just
+ * Return the current planet entry. Phase A only has `country-land`, so this just
  * returns it. Phase B reads `currentPlanetSlug` out of the zustand store.
  * Accepts an optional override slug for code paths that already know which
  * planet they're targeting (bake script, dev tools).
