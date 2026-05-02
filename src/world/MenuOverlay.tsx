@@ -23,7 +23,6 @@ export function MenuOverlay() {
   const gamePhase = usePlanet(s => s.gamePhase)
   const menuOpen = usePlanet(s => s.menuOpen)
   const audioMuted = usePlanet(s => s.audioMuted)
-  const setGamePhase = usePlanet(s => s.setGamePhase)
   const toggleMenu = usePlanet(s => s.toggleMenu)
   const setMenuOpen = usePlanet(s => s.setMenuOpen)
   const setAudioMuted = usePlanet(s => s.setAudioMuted)
@@ -31,6 +30,7 @@ export function MenuOverlay() {
   const returnToTitle = usePlanet(s => s.returnToTitle)
   const selectLevel = usePlanet(s => s.selectLevel)
   const solvedPlanets = usePlanet(s => s.solvedPlanets)
+  const currentPlanetSlug = usePlanet(s => s.currentPlanetSlug)
 
   // Title fade-in on first paint (~1.2s) so the planet+ring read first.
   const [titleFaded, setTitleFaded] = useState(false)
@@ -74,7 +74,12 @@ export function MenuOverlay() {
       <TitleView
         faded={titleFaded}
         audioMuted={audioMuted}
-        onBegin={() => setGamePhase('playing')}
+        // Route Begin through selectLevel so it triggers the same reload
+        // path Select Level uses — boot then seeds HDRI / grass / postfx
+        // from the persisted level's settings.json. Without this, Begin
+        // played on the saved slot but settings stayed seeded from lvl_1
+        // (the title's backdrop), so the actual gameplay HDRI was wrong.
+        onBegin={() => selectLevel(currentPlanetSlug)}
         onSelectLevel={() => setRosterOpen(true)}
         onToggleAudio={() => setAudioMuted(!audioMuted)}
         onReset={resetProgress}

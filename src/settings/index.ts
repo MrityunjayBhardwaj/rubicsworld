@@ -48,19 +48,30 @@ function bootResolveSlug(): string | null {
   const m = path.match(/^\/edit\/levels\/(lvl_\d+)\/?/)
   if (m && getPlanet(m[1])) return m[1]
   if (path.startsWith('/game')) {
-    try {
-      const raw = localStorage.getItem('rubicsworld:progress')
-      if (raw) {
-        const p = JSON.parse(raw) as { currentPlanetSlug?: unknown }
-        if (typeof p.currentPlanetSlug === 'string' && getPlanet(p.currentPlanetSlug)) {
-          return p.currentPlanetSlug
+    // selectLevel / advancePlanet set rubicsworld:autoStart=1 right before
+    // reloading; presence of that flag means the post-reload boot will
+    // resume directly at gamePhase='playing'. Use the persisted slug's
+    // settings so the level they're about to play has matching HDRI /
+    // grass / postfx.
+    //
+    // Absence means we're landing on the title screen. The title backdrop
+    // is forced to lvl_1 by TileGrid (regardless of saved slot) — seed
+    // settings from lvl_1 too so the HDRI matches the visible planet.
+    // Begin / Select Level both flip to 'playing' via reloadIntoLevel,
+    // which sets autoStart=1 → next boot picks up the right slug.
+    let autoStart = false
+    try { autoStart = localStorage.getItem('rubicsworld:autoStart') === '1' } catch { /* ignore */ }
+    if (autoStart) {
+      try {
+        const raw = localStorage.getItem('rubicsworld:progress')
+        if (raw) {
+          const p = JSON.parse(raw) as { currentPlanetSlug?: unknown }
+          if (typeof p.currentPlanetSlug === 'string' && getPlanet(p.currentPlanetSlug)) {
+            return p.currentPlanetSlug
+          }
         }
-      }
-    } catch { /* ignore */ }
-    // Fresh visit / wiped localStorage — start at the first planet so
-    // /game/ STILL gets a per-level seed (otherwise the default backdrop
-    // shows global defaults, which look subtly different from lvl_1's
-    // saved settings).
+      } catch { /* ignore */ }
+    }
     return PLANETS[0]?.slug ?? null
   }
   return null
