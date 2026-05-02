@@ -44,8 +44,8 @@
     "envMapIntensity": 1,
     "roughnessBoost": 0,
     "fresnelEnabled": true,
-    "customPath": "/hdri/custom-bc3d6e3a.png",
-    "customFilename": "sky_38_2k.png"
+    "customPath": null,
+    "customFilename": null
   },
   "postfx": {
     "dofEnabled": true,
@@ -80,8 +80,5 @@
     "gradeBrightness": 0,
     "noiseEnabled": true,
     "noiseOpacity": 0.035
-  },
-  "walk": {
-    "playerHeight": 0.16
   }
 }

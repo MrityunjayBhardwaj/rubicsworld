@@ -80,15 +80,19 @@ function dioramaHotReload(): Plugin {
 }
 
 /**
- * Dev-only endpoint for the "Commit Settings" Leva button: POST a JSON body
- * to /__settings/commit and we write it to src/settings/defaults.json. The
- * browser sandbox can't touch disk directly, so this tiny middleware is the
- * bridge. Only wired in dev — production builds don't need writable
- * settings. Vite's HMR picks up the file change and the app re-evaluates
- * with the new defaults.
+ * Dev-only endpoint for the "Commit Settings" Leva button. Writes the
+ * captured live state to a per-level file at
+ * `public/levels/<slug>/settings.json` so each planet keeps its own
+ * HDRI / grass / postfx tuning. Without `?level=<slug>` the request is
+ * rejected — the legacy "write to global defaults.json" path was the
+ * source of the bug where editing one level's HDRI propagated to every
+ * other level (#48).
+ *
+ * Slug is whitelisted against the manifest before any file write —
+ * `levelGlbPath()` returns null for unknown slugs, which keeps the
+ * endpoint from creating arbitrary directories on disk.
  */
 function settingsCommit(): Plugin {
-  const targetPath = path.resolve(__dirname, 'src/settings/defaults.json')
   return {
     name: 'settings-commit',
     configureServer(server) {
@@ -100,6 +104,15 @@ function settingsCommit(): Plugin {
           return
         }
         try {
+          const url = new URL(req.url ?? '', 'http://x')
+          const slug = url.searchParams.get('level')
+          if (!slug || !levelGlbPath(slug)) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: `unknown or missing level slug: ${slug ?? '(none)'}` }))
+            return
+          }
+          const targetPath = path.resolve(__dirname, 'public', 'levels', slug, 'settings.json')
           // Buffer the request body.
           const chunks: Buffer[] = []
           for await (const chunk of req) chunks.push(chunk as Buffer)
@@ -111,7 +124,8 @@ function settingsCommit(): Plugin {
           await fs.promises.writeFile(targetPath, pretty, 'utf8')
           res.statusCode = 200
           res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ ok: true, path: 'src/settings/defaults.json' }))
+          const rel = `public/levels/${slug}/settings.json`
+          res.end(JSON.stringify({ ok: true, level: slug, path: rel }))
         } catch (err) {
           res.statusCode = 500
           res.setHeader('Content-Type', 'application/json')

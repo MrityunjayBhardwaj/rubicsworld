@@ -8,11 +8,85 @@ import defaultsJson from './defaults.json'
  *
  * Runtime is still driven by mutable refs / uniform objects; this module
  * only provides the STARTING values.
+ *
+ * Per-level layering (issue #48): at module init we synchronously fetch
+ * `/levels/<slug>/settings.json` and deep-merge it on top of defaults
+ * BEFORE any consumer imports `settings` (consumers run AFTER this
+ * module's body in ES module ordering). The slug is taken from the URL
+ * (`/edit/levels/<slug>/`) or — on the /game/ route — from the
+ * persisted progression in localStorage. Without a slug, settings stays
+ * at globals.
  */
 
 export type Settings = typeof defaultsJson
 
-export const settings: Settings = defaultsJson
+function deepClone<T>(v: T): T { return JSON.parse(JSON.stringify(v)) as T }
+
+function deepMergeInto(base: Record<string, unknown>, src: Record<string, unknown>): void {
+  for (const key of Object.keys(src)) {
+    const sv = src[key]
+    if (sv && typeof sv === 'object' && !Array.isArray(sv)) {
+      const bv = base[key]
+      const target = (bv && typeof bv === 'object' && !Array.isArray(bv))
+        ? bv as Record<string, unknown>
+        : {}
+      deepMergeInto(target, sv as Record<string, unknown>)
+      base[key] = target
+    } else {
+      base[key] = sv
+    }
+  }
+}
+
+/** Resolve the level slug for the current page load — URL takes priority,
+ *  else /game/ progression in localStorage, else null (use globals). */
+function bootResolveSlug(): string | null {
+  if (typeof window === 'undefined') return null
+  const path = window.location.pathname.toLowerCase()
+  const m = path.match(/^\/edit\/levels\/(lvl_\d+)\/?/)
+  if (m) return m[1]
+  if (path.startsWith('/game')) {
+    try {
+      const raw = localStorage.getItem('rubicsworld:progress')
+      if (raw) {
+        const p = JSON.parse(raw) as { currentPlanetSlug?: unknown }
+        if (typeof p.currentPlanetSlug === 'string') return p.currentPlanetSlug
+      }
+    } catch { /* ignore */ }
+  }
+  return null
+}
+
+/** Synchronous XHR — yes, deprecated, but it's the only way to seed the
+ *  exported `settings` value before downstream module bodies run. Dev-
+ *  loop only; no impact on production consumers (the bundle still ships
+ *  the global defaults and per-level files served from /public/). */
+function bootFetchOverride(slug: string): Record<string, unknown> | null {
+  try {
+    const xhr = new XMLHttpRequest()
+    xhr.open('GET', `/levels/${slug}/settings.json`, /* async */ false)
+    xhr.send()
+    if (xhr.status !== 200) return null
+    const parsed = JSON.parse(xhr.responseText) as Record<string, unknown>
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+const merged: Settings = deepClone(defaultsJson)
+const _bootSlug = bootResolveSlug()
+if (_bootSlug) {
+  const override = bootFetchOverride(_bootSlug)
+  if (override) deepMergeInto(merged as unknown as Record<string, unknown>, override)
+}
+
+export const settings: Settings = merged
+/** The slug whose settings.json was layered into `settings` at boot.
+ *  Null when the boot URL/localStorage resolved no slug (e.g. /bake/,
+ *  root /, test routes). Read by commitSettingsToDisk to target the
+ *  same file the consumers were seeded from. */
+export const bootLevelSlug: string | null = _bootSlug
 
 /** Captures the current runtime state in the shape of settings.json. Called
  *  by the Copy Settings button. Imports live values lazily (inside the
@@ -326,12 +400,27 @@ export function flattenSettingsForLeva(s: Partial<Settings>): Record<string, unk
   return out
 }
 
-/** Commit the current live settings to disk at `src/settings/defaults.json`
- *  via the Vite dev-server middleware at POST /__settings/commit. Dev-only —
- *  there's no equivalent in production (and production doesn't need
- *  writable settings). HMR picks up the file change and the app re-evaluates
- *  module-scope uniforms with the new defaults on the next reload. */
+/** Commit the current live settings to disk at
+ *  `public/levels/<slug>/settings.json` via the Vite dev-server middleware
+ *  at POST /__settings/commit?level=<slug>. Dev-only — there's no
+ *  equivalent in production (and production doesn't need writable
+ *  settings). HMR picks up the file change; on the next page load this
+ *  module's boot-time sync layer reads the level's settings.json and
+ *  consumers see the committed values.
+ *
+ *  The slug is whichever level was layered into `settings` at boot —
+ *  ensures Commit writes to the same file the live consumers were
+ *  seeded from, so a session is internally consistent. Errors out when
+ *  there's no boot slug (root /, /bake/, etc.) — committing to "global
+ *  defaults" was the source of the cross-level pollution bug; we don't
+ *  silently fall back to it. */
 export async function commitSettingsToDisk(): Promise<void> {
+  if (!bootLevelSlug) {
+    // eslint-disable-next-line no-console
+    console.error('[settings] no boot level slug — open /edit/levels/<slug>/ or /game/ to commit')
+    toast('error', 'No active level — open /edit/levels/<slug>/ first')
+    return
+  }
   let pretty: string
   try {
     const live = await captureLiveSettings()
@@ -343,7 +432,7 @@ export async function commitSettingsToDisk(): Promise<void> {
     return
   }
   try {
-    const res = await fetch('/__settings/commit', {
+    const res = await fetch(`/__settings/commit?level=${encodeURIComponent(bootLevelSlug)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: pretty,
