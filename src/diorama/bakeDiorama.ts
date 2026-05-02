@@ -26,6 +26,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { dedupeMaterials } from './loadGlbDiorama'
 import { weldCubeNetSeams } from './weldSeams'
+import { getCurrentPlanet } from '../world/planetManifest'
 
 interface GlbJsonShape {
   extensionsUsed?: string[]
@@ -119,7 +120,7 @@ function summariseGlb(json: GlbJsonShape | null) {
 }
 
 export async function bakeDioramaGlb(opts: BakeOptions = {}): Promise<BakeResult> {
-  const { glbUrl = '/diorama.glb', dryRun = false } = opts
+  const { glbUrl = getCurrentPlanet().dioramaUrl, dryRun = false } = opts
   const warnings: string[] = []
 
   // Fetch raw source bytes (not via GLTFLoader yet — we need the original
