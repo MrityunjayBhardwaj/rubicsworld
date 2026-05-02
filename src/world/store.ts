@@ -429,20 +429,18 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
     set({ audioMuted: false })
   },
   returnToTitle: () => {
-    set({
-      tiles: buildSolvedTiles(),
-      solved: true,
-      anim: null,
-      drag: null,
-      aiHasFired: false,
-      lastPlayerActionAt: performance.now(),
-      history: [],
-      gamePhase: 'title',
-      menuOpen: false,
-      cameraMode: 'orbit',
-      introPhase: 'orbit-solved',
-      hudAttractMode: true,
-    })
+    // Reload so HDRI / grass / postfx re-seed from lvl_1 — the title
+    // backdrop is forced to lvl_1, so without a reload the in-memory
+    // settings stay pinned to the last-played level's seed and the
+    // visible HDRI doesn't match the visible planet. autoStart is
+    // unset at this point (it was consumed at the just-finished
+    // session's boot), so settings/index.ts sees no flag → seeds
+    // from PLANETS[0]. localStorage:progress keeps currentPlanetSlug
+    // intact so a subsequent Begin still resumes the last played level.
+    if (typeof window !== 'undefined') {
+      try { localStorage.removeItem(AUTOSTART_KEY) } catch { /* ignore */ }
+      window.location.reload()
+    }
   },
   setIntroPhase: v => set(s => (s.introPhase === v ? {} : { introPhase: v })),
   setSceneGrade: v => set(s => (s.sceneGrade === v ? {} : { sceneGrade: v })),
