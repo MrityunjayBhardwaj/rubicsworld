@@ -45,3 +45,6 @@ public/diorama.glb.before-bake
 
 # Anvi cognitive catalogues — internal, per-machine
 .anvi/
+
+# Local research / planning notes — keep out of version control
+artifacts/
