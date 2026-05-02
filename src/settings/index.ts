@@ -1,4 +1,5 @@
 import defaultsJson from './defaults.json'
+import { PLANETS, getPlanet } from '../world/planetManifest'
 
 /**
  * Typed handle on `defaults.json`. Every Leva `useControls` default value
@@ -39,20 +40,28 @@ function deepMergeInto(base: Record<string, unknown>, src: Record<string, unknow
 }
 
 /** Resolve the level slug for the current page load — URL takes priority,
- *  else /game/ progression in localStorage, else null (use globals). */
+ *  else /game/ progression in localStorage, else PLANETS[0] on /game/, else
+ *  null (use globals — for /bake/, root /, test routes that have no level). */
 function bootResolveSlug(): string | null {
   if (typeof window === 'undefined') return null
   const path = window.location.pathname.toLowerCase()
   const m = path.match(/^\/edit\/levels\/(lvl_\d+)\/?/)
-  if (m) return m[1]
+  if (m && getPlanet(m[1])) return m[1]
   if (path.startsWith('/game')) {
     try {
       const raw = localStorage.getItem('rubicsworld:progress')
       if (raw) {
         const p = JSON.parse(raw) as { currentPlanetSlug?: unknown }
-        if (typeof p.currentPlanetSlug === 'string') return p.currentPlanetSlug
+        if (typeof p.currentPlanetSlug === 'string' && getPlanet(p.currentPlanetSlug)) {
+          return p.currentPlanetSlug
+        }
       }
     } catch { /* ignore */ }
+    // Fresh visit / wiped localStorage — start at the first planet so
+    // /game/ STILL gets a per-level seed (otherwise the default backdrop
+    // shows global defaults, which look subtly different from lvl_1's
+    // saved settings).
+    return PLANETS[0]?.slug ?? null
   }
   return null
 }
@@ -60,11 +69,18 @@ function bootResolveSlug(): string | null {
 /** Synchronous XHR — yes, deprecated, but it's the only way to seed the
  *  exported `settings` value before downstream module bodies run. Dev-
  *  loop only; no impact on production consumers (the bundle still ships
- *  the global defaults and per-level files served from /public/). */
+ *  the global defaults and per-level files served from /public/).
+ *
+ *  Cache-bust query: the browser's HTTP cache (and any intermediate
+ *  proxy) WILL otherwise serve a stale settings.json when the user has
+ *  just committed an edit and refreshed — staleness in this path looks
+ *  like "the level didn't reload its settings". Forcing a unique URL
+ *  per page load sidesteps that without a Cache-Control header on the
+ *  static file middleware. */
 function bootFetchOverride(slug: string): Record<string, unknown> | null {
   try {
     const xhr = new XMLHttpRequest()
-    xhr.open('GET', `/levels/${slug}/settings.json`, /* async */ false)
+    xhr.open('GET', `/levels/${slug}/settings.json?t=${Date.now()}`, /* async */ false)
     xhr.send()
     if (xhr.status !== 200) return null
     const parsed = JSON.parse(xhr.responseText) as Record<string, unknown>
