@@ -69,6 +69,7 @@ const probe = {
 let probeLogLast = 0
 import { buildGrass, grassRefs } from './buildGrass'
 import { loadGlbDiorama } from './loadGlbDiorama'
+import { getCurrentPlanet } from '../world/planetManifest'
 import { audioBus } from '../world/audio/bus'
 import { buildSphereVisibility, applySphereVisibility, restoreSphereVisibility, type SphereVisibility } from './sphereVisibility'
 import { buildBatchedDiorama, applyBatchVisibility, restoreBatchVisibility, type DioramaBatch } from './buildBatchedDiorama'
@@ -656,24 +657,26 @@ export function TileGrid({ mode = 'split', bezier }: {
   useEffect(() => {
     gl.localClippingEnabled = true
 
-    // Check for a `?glb=<path>` (or `?glb=1` → /diorama.glb) URL query. When
-    // present, we start with an empty root and async-swap in the loaded
-    // scene as soon as it arrives — keeps the useEffect synchronous, avoids
-    // paying the ~500 ms imperative build cost just to throw it away, and
-    // falls back to imperative if the fetch/parse fails.
+    // Check for a `?glb=<path>` (or `?glb=1` → current planet's diorama URL)
+    // URL query. When present, we start with an empty root and async-swap in
+    // the loaded scene as soon as it arrives — keeps the useEffect synchronous,
+    // avoids paying the ~500 ms imperative build cost just to throw it away,
+    // and falls back to imperative if the fetch/parse fails.
     // The /game/ route (jam build) implicitly defaults to `?glb=1` because
     // the Blender-baked diorama is the canonical visual target. An explicit
     // `?glb=<path>` query still wins so the route can be overridden for
     // debug. All downstream paths (P23 hideFlatTerrainInSphereMode skip,
     // audio anchor registration, grass build, etc.) already gate on
     // `glbPath` truthy/null — no new branches, same gate as `?glb=1`.
+    // Multi-planet (issue #48): `?glb=1` resolves through the planet manifest
+    // so the loaded asset follows the current planet's progression slot.
     const glbParam = typeof window !== 'undefined'
       ? new URLSearchParams(window.location.search).get('glb')
       : null
     const isGameRoute = typeof window !== 'undefined' &&
       window.location.pathname.toLowerCase().startsWith('/game')
     const effectiveGlb = glbParam ?? (isGameRoute ? '1' : null)
-    const glbPath = effectiveGlb === '1' ? '/diorama.glb' : effectiveGlb
+    const glbPath = effectiveGlb === '1' ? getCurrentPlanet().dioramaUrl : effectiveGlb
 
     // In sphere mode, terrain is rendered as a single global SphereGeometry
     // mesh (see globalTerrainScene below) — the flat "terrain" plane stays

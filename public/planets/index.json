@@ -1,0 +1,12 @@
+{
+  "$schema": "manifest@v1",
+  "planets": [
+    {
+      "slug": "meadow",
+      "name": "Meadow",
+      "order": 0,
+      "dioramaUrl": "/planets/meadow/diorama.glb",
+      "audioOverlapMs": 1200
+    }
+  ]
+}
