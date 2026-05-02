@@ -587,6 +587,12 @@ export function TileGrid({ mode = 'split', bezier }: {
 }) {
   const { gl, scene, camera } = useThree()
   const bz = bezier ?? { cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 }
+  // Active level slug. Reading it as a hooks subscription means changing
+  // it (selectLevel from the menu, advancePlanet on solve, the /edit/
+  // route's pre-set, /__levels/active beacon) re-runs the loader effect
+  // below and swaps the glb. Without this, the effect resolves the URL
+  // once at first mount and stays pinned to PLANETS[0].
+  const currentPlanetSlug = usePlanet(s => s.currentPlanetSlug)
   const dioramaRef = useRef<DioramaScene | null>(null)
   const sphereVisRef = useRef<SphereVisibility | null>(null)
   const dioramaBatchRef = useRef<DioramaBatch | null>(null)
@@ -676,7 +682,7 @@ export function TileGrid({ mode = 'split', bezier }: {
     const isGameRoute = typeof window !== 'undefined' &&
       window.location.pathname.toLowerCase().startsWith('/game')
     const effectiveGlb = glbParam ?? (isGameRoute ? '1' : null)
-    const glbPath = effectiveGlb === '1' ? getCurrentPlanet().dioramaUrl : effectiveGlb
+    const glbPath = effectiveGlb === '1' ? getCurrentPlanet(currentPlanetSlug).dioramaUrl : effectiveGlb
 
     // In sphere mode, terrain is rendered as a single global SphereGeometry
     // mesh (see globalTerrainScene below) — the flat "terrain" plane stays
@@ -894,7 +900,7 @@ export function TileGrid({ mode = 'split', bezier }: {
         const onDioramaChanged = ({ slug, ts }: { slug?: string; ts: number }) => {
           // Slug is optional for back-compat with anything that still emits
           // the old shape. When present, gate on equality with current planet.
-          if (slug && slug !== getCurrentPlanet().slug) return
+          if (slug && slug !== currentPlanetSlug) return
           void swapInScene(`${glbPath}?t=${ts}`, 'none')
         }
         import.meta.hot.on('diorama:changed', onDioramaChanged)
@@ -1216,7 +1222,7 @@ export function TileGrid({ mode = 'split', bezier }: {
         }
       })
     }
-  }, [gl, mode])
+  }, [gl, mode, currentPlanetSlug])
 
   useFrame(({ clock }) => {
     const diorama = dioramaRef.current
