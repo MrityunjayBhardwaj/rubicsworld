@@ -417,6 +417,69 @@ async function writeBakedGlb(
   res.end(JSON.stringify({ ok: true, level: levelSlug, path: rel, size: patched.length }))
 }
 
+/**
+ * Last-active-level beacon. The browser POSTs `{ slug }` here every couple
+ * seconds; GET returns the most recent value (with `ageMs` so the consumer
+ * can decide if it's stale). The Blender addon's "Auto" live-link mode
+ * polls this endpoint to learn which level slot the user is currently
+ * editing, so a Live-Mode export writes to the right slug without manual
+ * dropdown bookkeeping.
+ *
+ * In-memory only — no persistence. Multiple tabs are last-write-wins:
+ * whatever tab POSTed most recently is what the addon picks up.
+ */
+function activeLevelBeacon(): Plugin {
+  let latest: { slug: string; ts: number } | null = null
+  return {
+    name: 'active-level-beacon',
+    configureServer(server) {
+      server.middlewares.use('/__levels/active', async (req, res) => {
+        try {
+          if (req.method === 'POST') {
+            const chunks: Buffer[] = []
+            for await (const chunk of req) chunks.push(chunk as Buffer)
+            const body = Buffer.concat(chunks).toString('utf-8')
+            const parsed = JSON.parse(body) as { slug?: unknown }
+            // Whitelist against the manifest — refuse beacons for slugs that
+            // don't exist (a stale tab on an old build shouldn't poison the
+            // addon's pick).
+            if (typeof parsed.slug === 'string' && levelGlbPath(parsed.slug)) {
+              latest = { slug: parsed.slug, ts: Date.now() }
+              res.statusCode = 200
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ ok: true }))
+              return
+            }
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: 'invalid or unknown slug' }))
+            return
+          }
+          if (req.method === 'GET') {
+            res.statusCode = 200
+            res.setHeader('Content-Type', 'application/json')
+            res.setHeader('Cache-Control', 'no-store')
+            if (!latest) {
+              res.end(JSON.stringify({ ok: true, slug: null, ageMs: null }))
+              return
+            }
+            const ageMs = Date.now() - latest.ts
+            res.end(JSON.stringify({ ok: true, slug: latest.slug, ageMs }))
+            return
+          }
+          res.statusCode = 405
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: 'GET or POST only' }))
+        } catch (err) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: String(err) }))
+        }
+      })
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), dioramaHotReload(), settingsCommit(), maskCommit(), hdriCommit(), dioramaCommit()],
+  plugins: [react(), dioramaHotReload(), settingsCommit(), maskCommit(), hdriCommit(), dioramaCommit(), activeLevelBeacon()],
 })

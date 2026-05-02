@@ -139,6 +139,29 @@ export default function App({ route = 'dev' }: AppProps) {
   // unmounts it so the next Begin gets a clean first-mount.
   const gamePhase = usePlanet(s => s.gamePhase)
 
+  // Live-link beacon: post the active level slug to the dev server every
+  // few seconds so the Blender addon's "Auto" mode knows which slot to
+  // export into. Dev-only — production builds skip the heartbeat entirely.
+  // The beacon is best-effort; failures are silently swallowed (the addon
+  // falls back to its dropdown selection if the endpoint is unreachable).
+  const currentPlanetSlug = usePlanet(s => s.currentPlanetSlug)
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    let cancelled = false
+    const post = () => {
+      if (cancelled) return
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      void fetch('/__levels/active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: currentPlanetSlug }),
+      }).catch(() => { /* best-effort, ignore */ })
+    }
+    post() // fire immediately on slug change so Auto picks up the switch fast
+    const id = window.setInterval(post, 2000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [currentPlanetSlug])
+
   return (
     <>
       {/*

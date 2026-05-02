@@ -23,11 +23,14 @@ so you can author on the cross cube-net without eyeballing coordinates.
 
 Workflow once installed:
     1. Set the project path (once) → points at the RubicsWorld repo root.
-    2. "Import Diorama"    → loads  <project>/public/diorama.glb
-    3. (edit, add animations, keep every object inside one face block…)
-    4. "Export Diorama"    → writes <project>/public/diorama.glb
-       Vite's HMR picks it up; reload http://localhost:5174/?glb=1
-       to see your scene on the planet.
+    2. Pick a Live Link slug — AUTO mirrors the browser's active tab, or
+       pin a specific lvl_<N>. All Import / Export / Live Mode actions
+       target <project>/public/levels/<slug>/diorama.glb.
+    3. "Import Diorama"    → loads the active slot's glb
+    4. (edit, add animations, keep every object inside one face block…)
+    5. "Export Diorama"    → writes back to the active slot
+       Vite's HMR picks it up; the matching /edit/levels/<slug>/?glb=1
+       tab hot-reloads, every other slot's tab stays untouched.
 
 The face-block table matches `buildDiorama.ts` header comment 1:1. Changing
 either side means changing both — the validator reads these from here.
@@ -85,18 +88,105 @@ class RubicsPrefs(bpy.types.AddonPreferences):
         subtype='DIR_PATH',
     )
 
+    dev_server_url: bpy.props.StringProperty(  # type: ignore[valid-type]
+        name="Dev Server URL",
+        description=(
+            "URL of `npm run dev` (Vite). Used by Live Link's AUTO mode to "
+            "fetch the slug currently active in the browser via "
+            "/__levels/active. Default matches the project's vite config."
+        ),
+        default="http://localhost:5173",
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "project_path")
+        layout.prop(self, "dev_server_url")
         layout.label(text=f"Target: {_glb_path(context) or '(set project path first)'}")
 
 
+# Hard-coded slug roster — mirrors public/levels/index.json. Update both when
+# adding a level. Reading the manifest from disk would be more DRY but the
+# enum needs the items at registration time, so a static list keeps the addon
+# self-contained.
+LEVEL_SLUG_ITEMS = [
+    ('AUTO',  "Auto (last active tab)", "Poll the dev server's /__levels/active and use whichever level the browser is currently editing"),
+    ('lvl_1', "lvl_1 — Country Land",   ""),
+    ('lvl_2', "lvl_2 — Terracotta",     ""),
+    ('lvl_3', "lvl_3 — Sage",           ""),
+    ('lvl_4', "lvl_4 — Dusty Blue",     ""),
+    ('lvl_5', "lvl_5 — Lavender",       ""),
+]
+PINNED_SLUGS = {s[0] for s in LEVEL_SLUG_ITEMS if s[0] != 'AUTO'}
+
+# Per-process cache for the AUTO resolver — avoids hammering the dev server
+# on every Live-Mode tick. Populated by _fetch_active_slug, consumed by
+# _resolve_slug.
+_AUTO_CACHE = {"slug": None, "fetched_at": 0.0}
+_AUTO_CACHE_TTL = 1.5  # seconds — under the 2 s heartbeat from the app side
+
+
+def _fetch_active_slug(server_url: str, timeout: float = 0.5) -> str | None:
+    """GET <server>/__levels/active and return the slug if the beacon is
+    fresh (under ~5 s old). Returns None on any error or stale beacon —
+    callers should fall back to the last-known pinned slug.
+    """
+    if not server_url:
+        return None
+    try:
+        import urllib.request, json
+        req = urllib.request.Request(server_url.rstrip('/') + '/__levels/active')
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (local dev only)
+            data = json.loads(resp.read().decode('utf-8'))
+        if not data.get('ok') or not data.get('slug'):
+            return None
+        # 5 s freshness window — heartbeat fires every 2 s, so anything
+        # older means the tab is closed or the network is broken.
+        age_ms = data.get('ageMs')
+        if age_ms is None or age_ms > 5000:
+            return None
+        return data['slug']
+    except Exception:
+        return None
+
+
+def _resolve_slug(context_or_scene) -> str:
+    """Resolve the currently-effective level slug. AUTO consults the dev
+    server (with a 1.5 s in-process cache); pinned slugs return as-is.
+    Falls back to lvl_1 when the scene property hasn't been set yet
+    (fresh .blend) or when AUTO can't reach the server.
+    """
+    scene = context_or_scene if isinstance(context_or_scene, bpy.types.Scene) else context_or_scene.scene
+    pick = getattr(scene, 'rubics_live_link_slug', 'AUTO') or 'AUTO'
+    if pick != 'AUTO':
+        return pick if pick in PINNED_SLUGS else 'lvl_1'
+    # AUTO — consult cache, then server.
+    now = time.time()
+    if _AUTO_CACHE["slug"] and (now - _AUTO_CACHE["fetched_at"]) < _AUTO_CACHE_TTL:
+        return _AUTO_CACHE["slug"]
+    try:
+        prefs = bpy.context.preferences.addons[__name__].preferences
+        server_url = prefs.dev_server_url
+    except Exception:
+        server_url = ""
+    slug = _fetch_active_slug(server_url) if server_url else None
+    _AUTO_CACHE["fetched_at"] = now
+    if slug:
+        _AUTO_CACHE["slug"] = slug
+        return slug
+    # Beacon unreachable / stale — keep returning the last-known good slug
+    # if we have one, else default to lvl_1 so an export still lands somewhere.
+    return _AUTO_CACHE["slug"] or 'lvl_1'
+
+
 def _glb_path(context) -> str:
+    """Resolve the current slug and return its on-disk diorama.glb path."""
     prefs = context.preferences.addons[__name__].preferences
     root = prefs.project_path
     if not root:
         return ""
-    return os.path.join(bpy.path.abspath(root), "public", "diorama.glb")
+    slug = _resolve_slug(context)
+    return os.path.join(bpy.path.abspath(root), "public", "levels", slug, "diorama.glb")
 
 
 # ── Collection conventions ─────────────────────────────────────────────────
@@ -199,6 +289,7 @@ _LIVE = {
     "last_export_wall": 0.0,
     "last_export_ok": True,
     "last_path": "",
+    "last_slug": "",
     "last_fingerprint": "",  # set after each successful export
 }
 
@@ -718,21 +809,27 @@ def _live_tick():
         return LIVE_DEBOUNCE
 
     # Resolve path via preferences without a context arg (timers get no ctx).
+    # Slug resolves through _resolve_slug → AUTO mode polls the dev server's
+    # /__levels/active so a tab switch in the browser retargets exports
+    # without the user touching Blender.
     try:
         prefs = bpy.context.preferences.addons[__name__].preferences
         root = prefs.project_path
+        scene = bpy.context.scene
     except Exception:
-        root = ""
-    if not root:
         return LIVE_DEBOUNCE
-    path = os.path.join(bpy.path.abspath(root), "public", "diorama.glb")
+    if not root or scene is None:
+        return LIVE_DEBOUNCE
+    slug = _resolve_slug(scene)
+    path = os.path.join(bpy.path.abspath(root), "public", "levels", slug, "diorama.glb")
     ok, size = _do_export_current(path)
     _LIVE["last_export_wall"] = time.time()
     _LIVE["last_export_ok"] = ok
     _LIVE["last_path"] = path
+    _LIVE["last_slug"] = slug
     if ok:
         _LIVE["last_fingerprint"] = fp
-        print(f"[rubics-live] auto-exported {size} bytes → {path}")
+        print(f"[rubics-live] auto-exported {size} bytes → {path} (slug={slug})")
     return LIVE_DEBOUNCE
 
 
@@ -851,7 +948,7 @@ def validate_scene(context):
 class RUBICS_OT_Import(bpy.types.Operator):
     bl_idname = "rubics.import_diorama"
     bl_label = "Import Diorama"
-    bl_description = "Clear existing objects and load <project>/public/diorama.glb"
+    bl_description = "Clear existing objects and load the active level slot's diorama.glb (resolved from Live Link slug)"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -1288,7 +1385,7 @@ class RUBICS_OT_EnsureCollections(bpy.types.Operator):
 class RUBICS_OT_Export(bpy.types.Operator):
     bl_idname = "rubics.export_diorama"
     bl_label = "Export Diorama"
-    bl_description = "Validate + export current scene to <project>/public/diorama.glb (HMR reloads the app)"
+    bl_description = "Validate + export current scene to the active level slot (resolved from Live Link slug; HMR reloads matching tabs)"
     bl_options = {'REGISTER'}
 
     def execute(self, context):
@@ -1408,7 +1505,7 @@ class RUBICS_OT_AddGuides(bpy.types.Operator):
 class RUBICS_OT_LiveToggle(bpy.types.Operator):
     bl_idname = "rubics.live_toggle"
     bl_label = "Live Mode"
-    bl_description = ("Auto-export to <project>/public/diorama.glb on every "
+    bl_description = ("Auto-export to the active level slot on every "
                       "scene change (debounced). Vite HMR reloads the app "
                       "so your edits appear at http://localhost:5174/?glb=1 "
                       "within a couple of seconds.")
@@ -1424,9 +1521,10 @@ class RUBICS_OT_LiveToggle(bpy.types.Operator):
             self.report({'INFO'}, "Live mode OFF")
         else:
             _live_start()
+            slug = _resolve_slug(context.scene)
             self.report({'INFO'},
-                "Live mode ON — edits auto-export to public/diorama.glb. "
-                "Visit http://localhost:5174/?glb=1")
+                f"Live mode ON — edits auto-export to public/levels/{slug}/diorama.glb. "
+                f"Visit http://localhost:5173/edit/levels/{slug}/?glb=1")
         return {'FINISHED'}
 
 
@@ -1528,6 +1626,22 @@ class RUBICS_PT_Panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="Project", icon='FILE_FOLDER')
         box.prop(prefs, "project_path", text="")
+
+        # Live Link target — which level slot exports/imports/Live Mode
+        # all read from. AUTO mirrors whichever tab the user has focused
+        # in the browser; pinning forces a specific slot.
+        box.separator()
+        box.label(text="Live Link:", icon='LINKED')
+        box.prop(context.scene, "rubics_live_link_slug", text="")
+        # When AUTO is selected, surface the resolved slug so the user can
+        # confirm the addon is hearing the heartbeat.
+        pick = getattr(context.scene, 'rubics_live_link_slug', 'AUTO')
+        if pick == 'AUTO':
+            resolved = _AUTO_CACHE["slug"]
+            if resolved:
+                box.label(text=f"  → resolved: {resolved}")
+            else:
+                box.label(text="  → no beacon yet (open a /edit/levels/ tab)")
         path = _glb_path(context)
         if path:
             box.label(text=os.path.relpath(path, bpy.path.abspath(prefs.project_path or "/")))
@@ -1556,7 +1670,8 @@ class RUBICS_PT_Panel(bpy.types.Panel):
                 box.label(text=f"  last export: {ago}s ago {status}")
             else:
                 box.label(text="  waiting for first change…")
-            box.label(text="http://localhost:5174/?glb=1")
+            slug = _LIVE.get("last_slug") or _resolve_slug(context.scene)
+            box.label(text=f"  http://localhost:5173/edit/levels/{slug}/?glb=1")
         else:
             box.label(text="Toggle ON to auto-export on change")
 
@@ -1590,7 +1705,7 @@ class RUBICS_PT_Panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="Dev server:")
         box.label(text="cd <project> && npm run dev")
-        box.label(text="→ http://localhost:5174/?glb=1")
+        box.label(text="→ http://localhost:5173/edit/levels/<slug>/?glb=1")
 
 
 # ── Registration ───────────────────────────────────────────────────────────
@@ -1626,6 +1741,19 @@ def register():
         ),
         default=True,
     )
+    # Per-.blend Live Link slot. AUTO mirrors the browser tab; pinning forces
+    # exports into a specific level. Default to AUTO so a fresh open follows
+    # whichever tab the user has up.
+    bpy.types.Scene.rubics_live_link_slug = bpy.props.EnumProperty(
+        name="Live Link Slug",
+        description=(
+            "Target level slot for Import / Export / Live Mode. AUTO polls "
+            "the dev server to mirror the browser's active tab; pin a "
+            "specific lvl_<N> to override."
+        ),
+        items=LEVEL_SLUG_ITEMS,
+        default='AUTO',
+    )
 
 
 def unregister():
@@ -1635,6 +1763,10 @@ def unregister():
     _live_stop()
     try:
         del bpy.types.Scene.rubics_isolate_export
+    except AttributeError:
+        pass
+    try:
+        del bpy.types.Scene.rubics_live_link_slug
     except AttributeError:
         pass
     for cls in reversed(CLASSES):
