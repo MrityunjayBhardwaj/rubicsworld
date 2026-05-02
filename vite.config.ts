@@ -18,7 +18,7 @@ import crypto from 'node:crypto'
 // queryable from middleware (Phase B), watch + commit target the first planet
 // slot directly. When planet-switching lands, this becomes "watch all planets'
 // glb paths" + "commit accepts ?planet=slug to pick the target file".
-const PLANET_GLB_PATH = 'public/planets/country-land/diorama.glb'
+const PLANET_GLB_PATH = 'public/levels/lvl_1/diorama.glb'
 
 function dioramaHotReload(): Plugin {
   const watchPath = path.resolve(__dirname, PLANET_GLB_PATH)

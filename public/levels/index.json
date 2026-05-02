@@ -1,0 +1,40 @@
+{
+  "$schema": "manifest@v1",
+  "levels": [
+    {
+      "slug": "lvl_1",
+      "name": "Country Land",
+      "order": 0,
+      "dioramaUrl": "/levels/lvl_1/diorama.glb",
+      "audioOverlapMs": 1200
+    },
+    {
+      "slug": "lvl_2",
+      "name": "Terracotta",
+      "order": 1,
+      "dioramaUrl": "/levels/lvl_2/diorama.glb",
+      "audioOverlapMs": 1200
+    },
+    {
+      "slug": "lvl_3",
+      "name": "Sage",
+      "order": 2,
+      "dioramaUrl": "/levels/lvl_3/diorama.glb",
+      "audioOverlapMs": 1200
+    },
+    {
+      "slug": "lvl_4",
+      "name": "Dusty Blue",
+      "order": 3,
+      "dioramaUrl": "/levels/lvl_4/diorama.glb",
+      "audioOverlapMs": 1200
+    },
+    {
+      "slug": "lvl_5",
+      "name": "Lavender",
+      "order": 4,
+      "dioramaUrl": "/levels/lvl_5/diorama.glb",
+      "audioOverlapMs": 1200
+    }
+  ]
+}
