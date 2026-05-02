@@ -49,6 +49,32 @@ function writePersistedProgress(p: PersistedProgress) {
   try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(p)) } catch { /* ignore */ }
 }
 
+// One-shot flag set by selectLevel / advancePlanet right before they call
+// window.location.reload() — boot reads it once and resumes at gamePhase
+// 'playing' instead of dropping back to the title screen. The reload is
+// what re-seeds module-scope consumers (hdriStore, grassUniforms,
+// postfxLive) from the NEW level's settings.json — they don't react to
+// runtime slug changes, so without this an in-session selectLevel left
+// the previous level's HDRI / grass / postfx in place. Cleared after
+// it's read so a subsequent natural refresh starts at title.
+const AUTOSTART_KEY = 'rubicsworld:autoStart'
+function readAutoStart(): boolean {
+  try {
+    if (typeof localStorage === 'undefined') return false
+    if (localStorage.getItem(AUTOSTART_KEY) !== '1') return false
+    localStorage.removeItem(AUTOSTART_KEY)
+    return true
+  } catch { return false }
+}
+function reloadIntoLevel(slug: string, solvedPlanets: string[]): never {
+  writePersistedProgress({ currentPlanetSlug: slug, solvedPlanets })
+  try { localStorage.setItem(AUTOSTART_KEY, '1') } catch { /* ignore */ }
+  if (typeof window !== 'undefined') window.location.reload()
+  // Throw to unwind the set() — should never reach here unless tests
+  // stub `window`. Cast keeps the call site's `set(s => ...)` type-safe.
+  throw new Error('reloadIntoLevel: window.location.reload returned')
+}
+
 function readPersistedMute(): boolean {
   try {
     return typeof localStorage !== 'undefined' &&
@@ -279,7 +305,11 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   easyMode: false,
   cameraMode: 'orbit',
   introPhase: 'orbit-solved',
-  gamePhase: 'title',
+  // gamePhase resumes at 'playing' on the page-reload-after-selectLevel
+  // path so the level pick doesn't dump the user back at the title screen
+  // (the reload is needed to re-seed HDRI / grass / postfx consumers
+  // from the new slug's settings.json — see reloadIntoLevel above).
+  gamePhase: readAutoStart() ? 'playing' : 'title',
   menuOpen: false,
   currentPlanetSlug: initialProgress.currentPlanetSlug,
   solvedPlanets: initialProgress.solvedPlanets,
@@ -375,37 +405,20 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
         gamePhase: 'title' as const,
       }
     }
-    writePersistedProgress({ currentPlanetSlug: next.slug, solvedPlanets: s.solvedPlanets })
-    return {
-      ...puzzleReset,
-      currentPlanetSlug: next.slug,
-      // Continue button keeps gamePhase === 'playing'; the new planet's
-      // IntroCinematic re-runs from 'orbit-solved' just like first launch.
-      // Restart the timer for the new planet's run.
-      playStartedAt: performance.now(),
-    }
+    // Continue button: reload so HDRI / grass / postfx re-seed from the
+    // new level's settings.json (they init at module load from the
+    // boot-resolved slug; an in-session set() doesn't cycle them).
+    // AUTOSTART_KEY makes the post-reload boot land directly in 'playing'.
+    reloadIntoLevel(next.slug, s.solvedPlanets)
   }),
   selectLevel: slug => set(s => {
     if (!getPlanet(slug)) return {}
-    writePersistedProgress({ currentPlanetSlug: slug, solvedPlanets: s.solvedPlanets })
-    return {
-      tiles: buildSolvedTiles(),
-      solved: true,
-      anim: null,
-      drag: null,
-      history: [] as Move[],
-      hudAttractMode: true,
-      introPhase: 'orbit-solved' as const,
-      aiHasFired: false,
-      lastPlayerActionAt: performance.now(),
-      menuOpen: false,
-      cameraMode: 'orbit' as const,
-      statsOverlayOpen: false,
-      lastSolveTimeMs: null,
-      currentPlanetSlug: slug,
-      gamePhase: 'playing' as const,
-      playStartedAt: performance.now(),
-    }
+    // Same reload path as advancePlanet — the in-memory selectLevel that
+    // existed previously left HDRI / grass / postfx pinned to the prior
+    // level's seed, which read in /game/ as "the HDRI bleeds across
+    // levels". Reload is the simplest correct fix; everything else
+    // (zustand stores, useControls panels, three uniforms) re-inits.
+    reloadIntoLevel(slug, s.solvedPlanets)
   }),
   resetProgress: () => {
     try {
