@@ -15,7 +15,8 @@ import { useControls, folder, button } from 'leva'
 import { useCallback, useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { flowerColorUniforms, FLOWER_KEYS, grassDebug, grassRefs, grassUniforms, type FlowerKey } from '../diorama/buildGrass'
-import { settings, copySettingsToClipboard, downloadSettingsJson, pickAndApplySettings, commitSettingsToDisk } from '../settings'
+import { settings, copySettingsToClipboard, downloadSettingsJson, pickAndApplySettings, commitSettingsToDisk, toast } from '../settings'
+import { bakeDioramaGlb, commitBakedGlb } from '../diorama/bakeDiorama'
 import { setWalkMask, walkMaskRefs, DEFAULT_WALK_MASK_URL } from './walkMask'
 
 function triggerDownload(dataUrl: string, filename: string) {
@@ -372,41 +373,48 @@ async function saveDioramaGlb() {
   setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 
-/** Bake the imperative diorama (props + colliders + 4-second procedural
- *  animation loop) and overwrite public/diorama.glb on disk via the
- *  /__diorama/commit-glb middleware. After this, hitting the app with
- *  ?glb=1 loads an exact copy of the imperative scene; importing the
- *  glb in Blender drops props into rubics_diorama and collider cubes
- *  into rubics_collider via the Import operator's role-sorting. */
+/** Process public/diorama.glb in place: load it, run the same transforms
+ *  loadGlbDiorama applies at every page boot (dedupe materials, weld
+ *  cube-net seams, recompute terrain normals), GLTFExporter back to bytes,
+ *  POST through /__diorama/commit-glb. Non-destructive — source and target
+ *  are the same file. Doesn't depend on grassRefs.saveDiorama, so it works
+ *  on /game/ and any ?glb= route (PV25). Same operation as `node bake-diorama.mjs`,
+ *  driven from the running app instead of via Playwright. */
 async function commitDioramaGlbToDisk() {
-  if (!grassRefs.saveDiorama) {
-    alert('Diorama bake not ready yet — try again in a moment.')
+  let bytes: ArrayBuffer | null = null
+  try {
+    const result = await bakeDioramaGlb()
+    bytes = result.bytes
+    for (const w of result.stats.warnings) {
+      // eslint-disable-next-line no-console
+      console.warn('[diorama bake]', w)
+      if (w.startsWith('REQUIRED')) toast('error', w, 6000)
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[diorama bake]', err)
+    toast('error', `bake failed: ${err instanceof Error ? err.message : String(err)}`)
     return
   }
-  const blob = await grassRefs.saveDiorama()
-  if (!blob) {
-    alert('Diorama bake failed — see console.')
+  if (!bytes) {
+    toast('error', 'bake produced no bytes — see console')
     return
   }
   try {
-    const res = await fetch('/__diorama/commit-glb', {
-      method: 'POST',
-      headers: { 'Content-Type': 'model/gltf-binary' },
-      body: blob,
-    })
-    const payload = await res.json().catch(() => ({ ok: false, error: 'non-JSON response' }))
-    if (!res.ok || !payload.ok) {
+    const payload = await commitBakedGlb(bytes)
+    if (!payload.ok) {
       // eslint-disable-next-line no-console
       console.error('[diorama] commit failed:', payload)
-      alert('diorama.glb commit failed — see console. (Only works in `npm run dev`.)')
+      toast('error', `commit failed: ${payload.error ?? 'unknown'} (only works in npm run dev)`)
       return
     }
     // eslint-disable-next-line no-console
     console.log(`[diorama] committed ${payload.size} bytes to ${payload.path}`)
+    toast('success', `Baked diorama.glb (${(payload.size ?? 0).toLocaleString()} bytes)`)
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error('[diorama] commit error:', err)
-    alert('diorama.glb commit error — see console.')
+    toast('error', `commit error: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 

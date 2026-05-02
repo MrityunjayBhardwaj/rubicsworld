@@ -125,7 +125,7 @@ export async function captureLiveSettings(): Promise<Settings> {
  *  let them keep adjusting sliders while still seeing what happened. The
  *  three states (success / error / info) map to colour only — the message
  *  carries the verbatim error string when there is one. */
-function toast(kind: 'success' | 'error' | 'info', msg: string, ms = 3000): void {
+export function toast(kind: 'success' | 'error' | 'info', msg: string, ms = 3000): void {
   if (typeof document === 'undefined') return
   const host = (() => {
     const existing = document.getElementById('settings-toast-host')
