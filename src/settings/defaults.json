@@ -80,5 +80,8 @@
     "gradeBrightness": 0,
     "noiseEnabled": true,
     "noiseOpacity": 0.035
+  },
+  "walk": {
+    "playerHeight": 0.16
   }
 }

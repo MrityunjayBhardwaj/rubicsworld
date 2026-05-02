@@ -29,6 +29,7 @@ import { usePlanet } from './world/store'
 import { NEIGHBOR_IDX } from './world/rotation'
 import { hudUniforms } from './diorama/buildDiorama'
 import { useHdri } from './world/hdriStore'
+import { loadLevelSettings } from './settings/levelSettings'
 
 if (import.meta.env.DEV && typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__planet = usePlanet
@@ -139,12 +140,20 @@ export default function App({ route = 'dev' }: AppProps) {
   // unmounts it so the next Begin gets a clean first-mount.
   const gamePhase = usePlanet(s => s.gamePhase)
 
+  // Per-level settings layering: load <slug>/settings.json and deep-merge
+  // it onto the global defaults whenever the active level changes. Walk
+  // mode reads playerHeight from the merged view so each planet's eye-line
+  // can differ. Best-effort — fetch failure leaves the live view at globals.
+  const currentPlanetSlug = usePlanet(s => s.currentPlanetSlug)
+  useEffect(() => {
+    void loadLevelSettings(currentPlanetSlug)
+  }, [currentPlanetSlug])
+
   // Live-link beacon: post the active level slug to the dev server every
   // few seconds so the Blender addon's "Auto" mode knows which slot to
   // export into. Dev-only — production builds skip the heartbeat entirely.
   // The beacon is best-effort; failures are silently swallowed (the addon
   // falls back to its dropdown selection if the endpoint is unreachable).
-  const currentPlanetSlug = usePlanet(s => s.currentPlanetSlug)
   useEffect(() => {
     if (!import.meta.env.DEV) return
     let cancelled = false
