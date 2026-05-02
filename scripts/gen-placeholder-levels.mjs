@@ -3,10 +3,21 @@
  * Generate placeholder GLB files for level slots that don't have a hand-
  * authored asset yet (issue #48 — sequential planet progression).
  *
- * Each placeholder is a minimal colored cube (~700 bytes) — enough to
- * render distinctly in /edit/levels/lvl_N/?glb=1 and the /game/ flow until
- * a real Blender-authored planet replaces it. Re-run this script to reset
- * any placeholder slot (will not overwrite lvl_1 — that's the real planet).
+ * Each placeholder is a colored CROSS CUBE-NET — the same 8×6 cell layout
+ * that buildDiorama produces in code (see src/diorama/buildDiorama.ts header
+ * for the cell map). The mesh is a single subdivided plane named "terrain"
+ * in the XZ plane (Y=0), so the dev playground's four preview modes all
+ * have something to render against:
+ *
+ *   - grid  → flat top-down cube-net
+ *   - split → 6 face-blocks separated
+ *   - cube  → 6 blocks wrapped into a cube
+ *   - rubik → cube-net wrapped into a sphere
+ *
+ * Subdivisions per face block: 8×8 (≈4/cell) — meets the sphere-projection
+ * minimum (per memory: long-span meshes chord through the sphere when
+ * widthSegments < 8/face). Output is ~20 KB per slot — small enough to
+ * commit, plenty to edit against in Blender.
  *
  * Usage: node scripts/gen-placeholder-levels.mjs
  */
@@ -16,6 +27,20 @@ import { fileURLToPath } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
+
+// Cross cube-net face blocks (mirror of src/diorama/buildDiorama.ts header).
+// Each block is a 2×2 area in (x, z); subdivided uniformly. Block order
+// doesn't matter — every block becomes its own contiguous slice of the
+// vertex/index buffer.
+const FACE_BLOCKS = [
+  { name: 'B', x0: -4, z0: -1, w: 2, h: 2 }, // -X left
+  { name: 'E', x0: -2, z0: -1, w: 2, h: 2 }, // +Z center
+  { name: 'A', x0:  0, z0: -1, w: 2, h: 2 }, // +X right
+  { name: 'F', x0:  2, z0: -1, w: 2, h: 2 }, // -Z far right
+  { name: 'C', x0: -2, z0:  1, w: 2, h: 2 }, // +Y top
+  { name: 'D', x0: -2, z0: -3, w: 2, h: 2 }, // -Y bottom
+]
+const SUB = 8 // segments per face block (4 per cell)
 
 // Slug → linear-RGB color in [0,1]. Tints chosen for distinct hue spacing
 // against country-land's warm-meadow palette so the editor can tell them
@@ -28,53 +53,76 @@ const PLACEHOLDERS = [
 ]
 
 /**
- * Build a minimal GLB containing a colored unit cube. Format reference:
+ * Build cross cube-net geometry as flat Float32/Uint16 arrays. Each block
+ * gets its own (SUB+1)² vertex grid; blocks don't share verts even where
+ * they touch in the cross layout (matches the country-land pipeline, which
+ * welds seams at load time via weldSeams).
+ */
+function buildCrossCubeNet() {
+  const positions = []
+  const normals = []
+  const indices = []
+  for (const blk of FACE_BLOCKS) {
+    const baseIdx = positions.length / 3
+    const stepX = blk.w / SUB
+    const stepZ = blk.h / SUB
+    for (let j = 0; j <= SUB; j++) {
+      for (let i = 0; i <= SUB; i++) {
+        const x = blk.x0 + i * stepX
+        const z = blk.z0 + j * stepZ
+        positions.push(x, 0, z)
+        normals.push(0, 1, 0)
+      }
+    }
+    for (let j = 0; j < SUB; j++) {
+      for (let i = 0; i < SUB; i++) {
+        const a = baseIdx + j * (SUB + 1) + i
+        const b = a + 1
+        const c = a + (SUB + 1)
+        const d = c + 1
+        indices.push(a, c, b,  b, c, d)
+      }
+    }
+  }
+  return {
+    positions: new Float32Array(positions),
+    normals:   new Float32Array(normals),
+    indices:   new Uint16Array(indices),
+  }
+}
+
+/**
+ * Pack the cross cube-net + a colored material into a minimal GLB.
+ * Format reference:
  * https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#binary-glb-file-format-specification
  */
-function buildColoredCubeGlb([r, g, b]) {
-  // Faceted cube: 24 verts (4 per face × 6 faces), 36 indices (2 tri × 6 face × 3).
-  const positions = new Float32Array([
-    // +X face
-     1,-1, 1,  1,-1,-1,  1, 1,-1,  1, 1, 1,
-    // -X face
-    -1,-1,-1, -1,-1, 1, -1, 1, 1, -1, 1,-1,
-    // +Y face (top)
-    -1, 1, 1,  1, 1, 1,  1, 1,-1, -1, 1,-1,
-    // -Y face (bottom)
-    -1,-1,-1,  1,-1,-1,  1,-1, 1, -1,-1, 1,
-    // +Z face
-    -1,-1, 1,  1,-1, 1,  1, 1, 1, -1, 1, 1,
-    // -Z face
-     1,-1,-1, -1,-1,-1, -1, 1,-1,  1, 1,-1,
-  ])
-  const normals = new Float32Array([
-     1,0,0,  1,0,0,  1,0,0,  1,0,0,
-    -1,0,0, -1,0,0, -1,0,0, -1,0,0,
-     0,1,0,  0,1,0,  0,1,0,  0,1,0,
-     0,-1,0, 0,-1,0, 0,-1,0, 0,-1,0,
-     0,0,1,  0,0,1,  0,0,1,  0,0,1,
-     0,0,-1, 0,0,-1, 0,0,-1, 0,0,-1,
-  ])
-  const indices = new Uint16Array([
-    0,1,2,    0,2,3,
-    4,5,6,    4,6,7,
-    8,9,10,   8,10,11,
-    12,13,14, 12,14,15,
-    16,17,18, 16,18,19,
-    20,21,22, 20,22,23,
-  ])
-
-  // Pack into one binary buffer with 4-byte alignment between sub-views.
-  const posBytes = positions.byteLength       // 24 * 12 = 288
-  const normBytes = normals.byteLength        // 288
-  const idxBytes = indices.byteLength         // 36 * 2 = 72
-  const idxOffset = posBytes + normBytes      // 576
-  const totalBytes = align4(idxOffset + idxBytes) // 648 (already 4-aligned, padding noop)
+function buildPlaceholderGlb([r, g, b]) {
+  const { positions, normals, indices } = buildCrossCubeNet()
+  const vertCount = positions.length / 3
+  const triCount = indices.length / 3
+  const posBytes = positions.byteLength
+  const normBytes = normals.byteLength
+  // Pad indices section to a 4-byte boundary so the next view (none here,
+  // but keep the discipline) starts aligned.
+  const idxBytes = indices.byteLength
+  const idxOffset = align4(posBytes + normBytes)
+  const totalBytes = align4(idxOffset + idxBytes)
 
   const bin = Buffer.alloc(totalBytes)
   Buffer.from(positions.buffer, positions.byteOffset, posBytes).copy(bin, 0)
   Buffer.from(normals.buffer, normals.byteOffset, normBytes).copy(bin, posBytes)
   Buffer.from(indices.buffer, indices.byteOffset, idxBytes).copy(bin, idxOffset)
+
+  // Position min/max for accessor metadata (loaders use this for bounds /
+  // frustum culling; required by spec for POSITION accessors).
+  let xmin = Infinity, ymin = Infinity, zmin = Infinity
+  let xmax = -Infinity, ymax = -Infinity, zmax = -Infinity
+  for (let i = 0; i < vertCount; i++) {
+    const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2]
+    if (x < xmin) xmin = x; if (x > xmax) xmax = x
+    if (y < ymin) ymin = y; if (y > ymax) ymax = y
+    if (z < zmin) zmin = z; if (z > zmax) zmax = z
+  }
 
   const gltf = {
     asset: { version: '2.0', generator: 'rubicsworld-placeholder-gen' },
@@ -93,6 +141,7 @@ function buildColoredCubeGlb([r, g, b]) {
     }],
     materials: [{
       name: 'placeholder',
+      doubleSided: true,
       pbrMetallicRoughness: {
         baseColorFactor: [r, g, b, 1],
         metallicFactor: 0,
@@ -100,14 +149,14 @@ function buildColoredCubeGlb([r, g, b]) {
       },
     }],
     accessors: [
-      { bufferView: 0, componentType: 5126, count: 24, type: 'VEC3', min: [-1,-1,-1], max: [1,1,1] },
-      { bufferView: 1, componentType: 5126, count: 24, type: 'VEC3' },
-      { bufferView: 2, componentType: 5123, count: 36, type: 'SCALAR' },
+      { bufferView: 0, componentType: 5126, count: vertCount, type: 'VEC3', min: [xmin, ymin, zmin], max: [xmax, ymax, zmax] },
+      { bufferView: 1, componentType: 5126, count: vertCount, type: 'VEC3' },
+      { bufferView: 2, componentType: 5123, count: triCount * 3, type: 'SCALAR' },
     ],
     bufferViews: [
-      { buffer: 0, byteOffset: 0,         byteLength: posBytes,  target: 34962 },
-      { buffer: 0, byteOffset: posBytes,  byteLength: normBytes, target: 34962 },
-      { buffer: 0, byteOffset: idxOffset, byteLength: idxBytes,  target: 34963 },
+      { buffer: 0, byteOffset: 0,                  byteLength: posBytes,  target: 34962 },
+      { buffer: 0, byteOffset: posBytes,           byteLength: normBytes, target: 34962 },
+      { buffer: 0, byteOffset: idxOffset,          byteLength: idxBytes,  target: 34963 },
     ],
     buffers: [{ byteLength: totalBytes }],
   }
@@ -134,7 +183,7 @@ function buildColoredCubeGlb([r, g, b]) {
   out.writeUInt32LE(binPadded.length, p); p += 4
   out.writeUInt32LE(0x004E4942, p); p += 4 // 'BIN\0'
   binPadded.copy(out, p)
-  return out
+  return { glb: out, vertCount, triCount }
 }
 
 function align4(n) { return (n + 3) & ~3 }
@@ -151,9 +200,12 @@ for (const { slug, color } of PLACEHOLDERS) {
   const dir = resolve(ROOT, 'public', 'levels', slug)
   const path = resolve(dir, 'diorama.glb')
   mkdirSync(dir, { recursive: true })
-  const glb = buildColoredCubeGlb(color)
+  const { glb, vertCount, triCount } = buildPlaceholderGlb(color)
   writeFileSync(path, glb)
-  console.log(`wrote ${path} (${glb.length} bytes, color rgb(${color.map(c => Math.round(c * 255)).join(',')}))`)
+  console.log(
+    `wrote ${path} (${glb.length} bytes, ${vertCount} verts, ${triCount} tris,` +
+    ` color rgb(${color.map(c => Math.round(c * 255)).join(',')}))`,
+  )
   wrote++
 }
 console.log(`done — ${wrote} placeholder${wrote === 1 ? '' : 's'} generated`)
