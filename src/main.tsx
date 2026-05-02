@@ -15,18 +15,22 @@ import { FluidTest } from './FluidTest.tsx'
 //                 optimize-only render path is the default now).
 //   /fluid      → CellFluids 2 FBX viewer — verify per-vertex flow
 //                 channels (UV1/UV2/COLOR_0) before wiring the shader
-//   else        → full app
+//   /game       → jam route: title screen + menu, no Leva/dev chrome.
+//                 Same App component, route-gated UI.
+//   else        → full app (dev playground with all panels)
 const path = typeof window !== 'undefined' ? window.location.pathname.toLowerCase() : ''
 const isDofTest   = path.startsWith('/doftest')
 const isGrassTest = path.startsWith('/grasstest')
 const isBake      = path.startsWith('/bake')
 const isFluid     = path.startsWith('/fluid')
+const isGame      = path.startsWith('/game')
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     {isBake
       ? <BakeRoute />
       : isFluid ? <FluidTest />
-      : isDofTest ? <DOFTest /> : isGrassTest ? <GrassTest /> : <App />}
+      : isDofTest ? <DOFTest /> : isGrassTest ? <GrassTest />
+      : <App route={isGame ? 'game' : 'dev'} />}
   </StrictMode>,
 )

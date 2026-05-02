@@ -2,6 +2,24 @@ import { create } from 'zustand'
 import { buildSolvedTiles, isSolved, type Tile } from './tile'
 import { rotateSlice, randomMove, inverseMove, type Axis, type Direction, type Move } from './rotation'
 import type { FaceIndex } from './faces'
+import { audioBus } from './audio/bus'
+
+// localStorage keys for the menu/jam-route persistence layer. TutorialOverlay
+// also writes 'rubicsworld:tutorialSeen' from its own copy of the literal —
+// the constant is duplicated rather than shared because resetProgress() is
+// the only consumer here and the overlay has no other store-coupling reason
+// to import from store.
+const TUTORIAL_SEEN_KEY = 'rubicsworld:tutorialSeen'
+const AUDIO_MUTED_KEY = 'rubicsworld:audioMuted'
+
+function readPersistedMute(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' &&
+      localStorage.getItem(AUDIO_MUTED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 
 /** Which tile the cursor is over, in current cube coordinates. Drives the
  *  hover-to-key rotation hybrid: hover a tile, press Q/W/E/A/S/D → rotate the
@@ -38,6 +56,19 @@ interface PlanetStore {
   showAxes: boolean
   onPlanet: boolean
   hoveredTile: HoveredTile | null
+  /** 'title' = start screen + Begin gate; planet shows solved with attract
+   *  orbit but IntroCinematic is unmounted (gated in App.tsx on the game
+   *  route). Flips to 'playing' on Begin click, which mounts IntroCinematic
+   *  and runs the existing scramble/tutorial flow. Read by App.tsx; only
+   *  meaningful on /game/ — the dev route ignores it. */
+  gamePhase: 'title' | 'playing'
+  /** In-game pause overlay. Independent of gamePhase — the title screen IS
+   *  its own menu, this is the overlay shown via Esc while playing. Opening
+   *  it forces cameraMode→'orbit' so the cursor is free for the overlay. */
+  menuOpen: boolean
+  /** Persisted to localStorage; bound to audioBus.setMasterMute on every
+   *  setAudioMuted call AND once at module load below. */
+  audioMuted: boolean
   /** True at t=0 (HUD covers entire planet as a tutorial attract). Flips
    *  to false on the first successful player commit. TileGrid's useFrame
    *  reads this and eases the shader's uHudOpacity uniform 1→0. */
@@ -81,6 +112,19 @@ interface PlanetStore {
   setOnPlanet: (v: boolean) => void
   setHoveredTile: (t: HoveredTile | null) => void
   setEasyMode: (v: boolean) => void
+  setGamePhase: (v: 'title' | 'playing') => void
+  setMenuOpen: (v: boolean) => void
+  toggleMenu: () => void
+  setAudioMuted: (v: boolean) => void
+  /** Wipe localStorage flags (tutorial-seen, audio-muted) and reset
+   *  in-memory mute to fresh-install default. Does NOT reload the page —
+   *  caller is responsible for follow-up nav (e.g. returnToTitle). */
+  resetProgress: () => void
+  /** From in-game → back to title screen. Clears scramble, drops to
+   *  'orbit-solved' attract, closes menu, exits walk. IntroCinematic
+   *  unmounts (gated on gamePhase==='playing' in App.tsx) so the next
+   *  Begin click runs a fresh first-mount cinematic. */
+  returnToTitle: () => void
   setCameraMode: (v: 'orbit' | 'walk') => void
   setIntroPhase: (v: PlanetStore['introPhase']) => void
   setSceneGrade: (v: PlanetStore['sceneGrade']) => void
@@ -161,6 +205,9 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   easyMode: false,
   cameraMode: 'orbit',
   introPhase: 'orbit-solved',
+  gamePhase: 'title',
+  menuOpen: false,
+  audioMuted: readPersistedMute(),
   sceneGrade: 'stylized',
   tutorialQueue: [],
   tutorialStep: 0,
@@ -176,6 +223,49 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
   setEasyMode: v => set({ easyMode: v }),
   setCameraMode: v => set(s => (s.cameraMode === v ? {} : { cameraMode: v })),
+  setGamePhase: v => set(s => (s.gamePhase === v ? {} : { gamePhase: v })),
+  setMenuOpen: v => set(s => {
+    if (s.menuOpen === v) return {}
+    // Opening the menu while in walk forces orbit so the cursor is free for
+    // the overlay. Closing the menu does NOT auto-restore walk — player
+    // re-enters via Tab if they want.
+    if (v && s.cameraMode === 'walk') return { menuOpen: true, cameraMode: 'orbit' as const }
+    return { menuOpen: v }
+  }),
+  toggleMenu: () => set(s => {
+    const next = !s.menuOpen
+    if (next && s.cameraMode === 'walk') return { menuOpen: true, cameraMode: 'orbit' as const }
+    return { menuOpen: next }
+  }),
+  setAudioMuted: v => {
+    audioBus.setMasterMute(v)
+    try { localStorage.setItem(AUDIO_MUTED_KEY, v ? '1' : '0') } catch { /* ignore */ }
+    set({ audioMuted: v })
+  },
+  resetProgress: () => {
+    try {
+      localStorage.removeItem(TUTORIAL_SEEN_KEY)
+      localStorage.removeItem(AUDIO_MUTED_KEY)
+    } catch { /* ignore */ }
+    audioBus.setMasterMute(false)
+    set({ audioMuted: false })
+  },
+  returnToTitle: () => {
+    set({
+      tiles: buildSolvedTiles(),
+      solved: true,
+      anim: null,
+      drag: null,
+      aiHasFired: false,
+      lastPlayerActionAt: performance.now(),
+      history: [],
+      gamePhase: 'title',
+      menuOpen: false,
+      cameraMode: 'orbit',
+      introPhase: 'orbit-solved',
+      hudAttractMode: true,
+    })
+  },
   setIntroPhase: v => set(s => (s.introPhase === v ? {} : { introPhase: v })),
   setSceneGrade: v => set(s => (s.sceneGrade === v ? {} : { sceneGrade: v })),
   setTutorialQueue: q => set({ tutorialQueue: q, tutorialStep: 0 }),
@@ -351,3 +441,8 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
       return { anim: null }
     }),
 }))
+
+// Apply persisted mute on first import. audioBus.setMasterMute is idempotent
+// and safe to call before the AudioContext exists — it stores the flag and
+// applyGraphGains becomes a no-op until init().
+audioBus.setMasterMute(readPersistedMute())

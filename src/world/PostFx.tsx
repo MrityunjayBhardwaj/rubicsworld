@@ -10,6 +10,17 @@ import {
 import { folder, useControls } from 'leva'
 import { hudUniforms } from '../diorama/buildDiorama'
 import { PLANET_SPHERE } from './Interaction'
+import { settings, type Settings } from '../settings'
+
+// Module-scope mirror of the current PostFx Leva state. PostFx is a React
+// component whose values live in useControls — invisible to outside callers
+// (notably captureLiveSettings in src/settings/index.ts which round-trips the
+// Leva state into defaults.json). Updated via useEffect on every render so
+// the mirror is always one frame stale at most.
+//
+// Initialised from JSON defaults so consumers can read it BEFORE PostFx
+// mounts (e.g. captureLiveSettings called before the Canvas paints once).
+export const postfxLive: Settings['postfx'] = { ...settings.postfx }
 
 /**
  * DoF-ONLY debug build (branch: debug/dof-only).
@@ -144,71 +155,100 @@ export function PostFx() {
     noiseEnabled, noiseOpacity,
   } = useControls('PostFx', {
     'Depth of Field': folder({
-      dofEnabled: { value: true, label: 'on' },
-      dofFollowCursor: { value: true, label: 'follow cursor (else planet)' },
-      dofFocusRangeOnCursor: { value: 1.0, min: 0.05, max: 25, step: 0.05, label: 'range on hover (m)' },
-      dofFocusRangeWholePlanet: { value: 20.0, min: 1, max: 150, step: 0.5, label: 'range full planet (m)' },
-      dofBokehScale: { value: 4.0, min: 0, max: 40, step: 0.1, label: 'bokeh' },
-      dofSmoothing: { value: 0.18, min: 0.01, max: 1, step: 0.01, label: 'follow speed' },
-      dofFocusSurfaceRadius: { value: 1.05, min: 1.0, max: 1.30, step: 0.005, label: 'focus surface R' },
+      dofEnabled: { value: settings.postfx.dofEnabled, label: 'on' },
+      dofFollowCursor: { value: settings.postfx.dofFollowCursor, label: 'follow cursor (else planet)' },
+      dofFocusRangeOnCursor: { value: settings.postfx.dofFocusRangeOnCursor, min: 0.05, max: 25, step: 0.05, label: 'range on hover (m)' },
+      dofFocusRangeWholePlanet: { value: settings.postfx.dofFocusRangeWholePlanet, min: 1, max: 150, step: 0.5, label: 'range full planet (m)' },
+      dofBokehScale: { value: settings.postfx.dofBokehScale, min: 0, max: 40, step: 0.1, label: 'bokeh' },
+      dofSmoothing: { value: settings.postfx.dofSmoothing, min: 0.01, max: 1, step: 0.01, label: 'follow speed' },
+      dofFocusSurfaceRadius: { value: settings.postfx.dofFocusSurfaceRadius, min: 1.0, max: 1.30, step: 0.005, label: 'focus surface R' },
       // Bokeh render-target downscale. This is the library's real cost knob
       // for DoF (tap counts are hardcoded at 64+16). 0.5 default ≈ 4× cheaper
       // than 1.0 full-res. Pushed via `resolution.scale` runtime setter so
       // the effect isn't reinstantiated on every slider tick.
-      dofResolutionScale: { value: 0.35, min: 0.25, max: 1.0, step: 0.05, label: 'bokeh res scale' },
+      dofResolutionScale: { value: settings.postfx.dofResolutionScale, min: 0.25, max: 1.0, step: 0.05, label: 'bokeh res scale' },
       // Screen-space aperture. CoC shader is patched to
       //   magnitude = max(depthCoC, smoothstep(sharpR, blurR, screenDist))
       // so a tack-sharp *circle* appears around the projected dofTarget, and
       // the depth-focus ring beyond the circle becomes invisible (CoC=1).
       // Radii are in UV-height units: 0.1 ≈ 10% of the shorter screen axis.
-      dofScreenSharpRadius: { value: 0.08, min: 0.0, max: 1.0, step: 0.005, label: 'screen sharp R' },
-      dofScreenBlurRadius:  { value: 0.30, min: 0.01, max: 1.5, step: 0.01, label: 'screen blur R' },
-      dofDebugTarget: { value: false, label: 'debug: show target' },
-      dofDebugFixedDistance: { value: false, label: 'debug: fixed distance' },
-      dofDebugFixedValue: { value: 3.5, min: 0.1, max: 30, step: 0.05, label: 'debug: distance value' },
+      dofScreenSharpRadius: { value: settings.postfx.dofScreenSharpRadius, min: 0.0, max: 1.0, step: 0.005, label: 'screen sharp R' },
+      dofScreenBlurRadius:  { value: settings.postfx.dofScreenBlurRadius, min: 0.01, max: 1.5, step: 0.01, label: 'screen blur R' },
+      dofDebugTarget: { value: settings.postfx.dofDebugTarget, label: 'debug: show target' },
+      dofDebugFixedDistance: { value: settings.postfx.dofDebugFixedDistance, label: 'debug: fixed distance' },
+      dofDebugFixedValue: { value: settings.postfx.dofDebugFixedValue, min: 0.1, max: 30, step: 0.05, label: 'debug: distance value' },
     }, { collapsed: false }),
     // Renderer-level exposure. ACES lives in the ToneMapping effect below;
     // gl.toneMappingExposure flows into three.js's built-in ACES function
     // via the standard toneMappingExposure uniform even though
     // gl.toneMapping is forced to NoToneMapping by the composer wrapper.
     'Tone Mapping': folder({
-      toneExposure: { value: 1.0, min: 0.1, max: 3.0, step: 0.01, label: 'exposure' },
+      toneExposure: { value: settings.postfx.toneExposure, min: 0.1, max: 3.0, step: 0.01, label: 'exposure' },
     }, { collapsed: true }),
     'Bloom': folder({
-      bloomEnabled: { value: true, label: 'on' },
-      bloomIntensity: { value: 0.6, min: 0, max: 4, step: 0.05, label: 'intensity' },
-      bloomThreshold: { value: 0.9, min: 0, max: 1.5, step: 0.01, label: 'luminance threshold' },
-      bloomSmoothing: { value: 0.2, min: 0, max: 1, step: 0.01, label: 'smoothing' },
+      bloomEnabled: { value: settings.postfx.bloomEnabled, label: 'on' },
+      bloomIntensity: { value: settings.postfx.bloomIntensity, min: 0, max: 4, step: 0.05, label: 'intensity' },
+      bloomThreshold: { value: settings.postfx.bloomThreshold, min: 0, max: 1.5, step: 0.01, label: 'luminance threshold' },
+      bloomSmoothing: { value: settings.postfx.bloomSmoothing, min: 0, max: 1, step: 0.01, label: 'smoothing' },
     }, { collapsed: true }),
     'Vignette': folder({
-      vignetteEnabled: { value: true, label: 'on' },
-      vignetteOffset: { value: 0.5, min: 0, max: 1, step: 0.01, label: 'offset' },
-      vignetteDarkness: { value: 1.0, min: 0, max: 2, step: 0.01, label: 'darkness' },
+      vignetteEnabled: { value: settings.postfx.vignetteEnabled, label: 'on' },
+      vignetteOffset: { value: settings.postfx.vignetteOffset, min: 0, max: 1, step: 0.01, label: 'offset' },
+      vignetteDarkness: { value: settings.postfx.vignetteDarkness, min: 0, max: 2, step: 0.01, label: 'darkness' },
     }, { collapsed: true }),
     'Chromatic Aberration': folder({
-      caEnabled: { value: true, label: 'on' },
-      caOffsetX: { value: 0.0015, min: 0, max: 0.01, step: 0.0001, label: 'offset x' },
-      caOffsetY: { value: 0.0015, min: 0, max: 0.01, step: 0.0001, label: 'offset y' },
+      caEnabled: { value: settings.postfx.caEnabled, label: 'on' },
+      caOffsetX: { value: settings.postfx.caOffsetX, min: 0, max: 0.01, step: 0.0001, label: 'offset x' },
+      caOffsetY: { value: settings.postfx.caOffsetY, min: 0, max: 0.01, step: 0.0001, label: 'offset y' },
       // Built-in vignette-style mask on the CA effect itself:
       //   d = max(distance(uv, center)*2 - modulationOffset, 0)
       // → zero CA inside a centered disc of radius `radialOffset`, ramping
       //   to full CA at the corners. Does not require a separate mask pass.
-      caRadialMask: { value: true, label: 'edges only (radial mask)' },
-      caRadialOffset: { value: 0.35, min: 0, max: 1, step: 0.01, label: 'mask inner radius' },
+      caRadialMask: { value: settings.postfx.caRadialMask, label: 'edges only (radial mask)' },
+      caRadialOffset: { value: settings.postfx.caRadialOffset, min: 0, max: 1, step: 0.01, label: 'mask inner radius' },
     }, { collapsed: true }),
     // Tiny-world / miniature grade. HueSaturation + BrightnessContrast sit
     // after tone mapping (LDR) so the grade operates on display-ready values.
     'Color Grade': folder({
-      gradeEnabled: { value: true, label: 'on' },
-      gradeSaturation: { value: 0.25, min: -1, max: 1, step: 0.01, label: 'saturation' },
-      gradeContrast:   { value: 0.15, min: -1, max: 1, step: 0.01, label: 'contrast' },
-      gradeBrightness: { value: 0.0,  min: -1, max: 1, step: 0.01, label: 'brightness' },
+      gradeEnabled: { value: settings.postfx.gradeEnabled, label: 'on' },
+      gradeSaturation: { value: settings.postfx.gradeSaturation, min: -1, max: 1, step: 0.01, label: 'saturation' },
+      gradeContrast:   { value: settings.postfx.gradeContrast, min: -1, max: 1, step: 0.01, label: 'contrast' },
+      gradeBrightness: { value: settings.postfx.gradeBrightness,  min: -1, max: 1, step: 0.01, label: 'brightness' },
     }, { collapsed: false }),
     'Grain': folder({
-      noiseEnabled: { value: true, label: 'on' },
-      noiseOpacity: { value: 0.035, min: 0, max: 0.3, step: 0.005, label: 'opacity' },
+      noiseEnabled: { value: settings.postfx.noiseEnabled, label: 'on' },
+      noiseOpacity: { value: settings.postfx.noiseOpacity, min: 0, max: 0.3, step: 0.005, label: 'opacity' },
     }, { collapsed: true }),
   })
+
+  // Mirror live PostFx state into the module-scope `postfxLive` so
+  // captureLiveSettings (settings/index.ts) can read it without going
+  // through React. Runs after every change to any of the 32 fields.
+  useEffect(() => {
+    Object.assign(postfxLive, {
+      dofEnabled, dofFollowCursor, dofFocusRangeOnCursor, dofFocusRangeWholePlanet,
+      dofBokehScale, dofSmoothing, dofFocusSurfaceRadius, dofResolutionScale,
+      dofScreenSharpRadius, dofScreenBlurRadius, dofDebugTarget,
+      dofDebugFixedDistance, dofDebugFixedValue,
+      toneExposure,
+      bloomEnabled, bloomIntensity, bloomThreshold, bloomSmoothing,
+      vignetteEnabled, vignetteOffset, vignetteDarkness,
+      caEnabled, caOffsetX, caOffsetY, caRadialMask, caRadialOffset,
+      gradeEnabled, gradeSaturation, gradeContrast, gradeBrightness,
+      noiseEnabled, noiseOpacity,
+    } satisfies Settings['postfx'])
+  }, [
+    dofEnabled, dofFollowCursor, dofFocusRangeOnCursor, dofFocusRangeWholePlanet,
+    dofBokehScale, dofSmoothing, dofFocusSurfaceRadius, dofResolutionScale,
+    dofScreenSharpRadius, dofScreenBlurRadius, dofDebugTarget,
+    dofDebugFixedDistance, dofDebugFixedValue,
+    toneExposure,
+    bloomEnabled, bloomIntensity, bloomThreshold, bloomSmoothing,
+    vignetteEnabled, vignetteOffset, vignetteDarkness,
+    caEnabled, caOffsetX, caOffsetY, caRadialMask, caRadialOffset,
+    gradeEnabled, gradeSaturation, gradeContrast, gradeBrightness,
+    noiseEnabled, noiseOpacity,
+  ])
 
   // Cursor raycast sphere radius — sync from Leva.
   useEffect(() => {

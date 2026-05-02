@@ -7,6 +7,7 @@ import { Ring } from './world/Ring'
 import { Interaction } from './world/Interaction'
 import { WalkControls } from './world/WalkControls'
 import { IntroCinematic } from './world/IntroCinematic'
+import { MenuOverlay } from './world/MenuOverlay'
 import { TutorialHint, TutorialChrome } from './world/TutorialOverlay'
 import { FpsMeter } from './world/FpsMeter'
 import { AiSeed } from './world/AiSeed'
@@ -101,7 +102,18 @@ function AxesGizmo() {
   )
 }
 
-export default function App() {
+interface AppProps {
+  /** Route gate: 'dev' = full playground (Leva, Controls, panels, preview
+   *  modes — current root-route behavior). 'game' = jam route at /game/:
+   *  no Leva chrome, no dev tools, no preview modes. Settings panels
+   *  (HDRI / Audio / Grass) stay mounted-but-hidden so their useControls
+   *  side effects (mask rasterisation, HDRI selection, audio bus init)
+   *  still shape the scene. */
+  route?: 'dev' | 'game'
+}
+
+export default function App({ route = 'dev' }: AppProps) {
+  const isGame = route === 'game'
   const [preview, setPreview] = useState<false | 'grid' | 'split' | 'cube' | 'rubik'>(false)
   const [bezier, setBezier] = useState({ cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 })
   const onBezierChange = useCallback((cx1: number, cy1: number, cx2: number, cy2: number) => {
@@ -117,6 +129,14 @@ export default function App() {
   // on the canvas. Esc / Tab returns to orbit and Leva pops back.
   const cameraMode = usePlanet(s => s.cameraMode)
   const levaHidden = cameraMode === 'walk'
+  // IntroCinematic is gated on the 'playing' game phase (game route only).
+  // During 'title' the planet renders solved (initial store state) and
+  // SphereCamera's autoRotate continues because `introPhase: 'orbit-solved'`
+  // keeps the attract going — the title overlay sits on top of that
+  // backdrop. On Begin → 'playing', IntroCinematic mounts fresh and runs
+  // the scramble cinematic (or first-visit tutorial). returnToTitle
+  // unmounts it so the next Begin gets a clean first-mount.
+  const gamePhase = usePlanet(s => s.gamePhase)
 
   return (
     <>
@@ -141,20 +161,37 @@ export default function App() {
           overflowX: 'hidden',     // resize handle still works with non-visible overflow
           overflowY: 'auto',       // vertical scroll when Audio panel rows expand past viewport
           zIndex: 1000,
-          display: levaHidden ? 'none' : 'block',
+          display: (levaHidden || isGame) ? 'none' : 'block',
         }}
       >
-        <Leva fill hidden={levaHidden} />
+        {/* On /game/ Leva itself stays mounted (with hidden=true and the
+            host display:none) because the three settings panels below
+            (HDRIPanel, AudioPanel, GrassPanel) call useControls — without
+            a Leva store hooked up to React, those values would still
+            resolve from defaults but the inline schema callbacks (button
+            actions, paste-import) become orphaned. Mounting Leva hidden
+            keeps the store + schema wiring intact while showing nothing
+            on screen. Pure dev-only UI (Controls, BezierCurveEditor,
+            TileLabelsLegend, FpsMeter) stays gated below — they're not
+            settings, they're dev tools. */}
+        <Leva fill hidden={levaHidden || isGame} />
       </div>
-      <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />
+      {!isGame && <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />}
       <Cursor />
-      <TileLabelsLegend />
-      <HDRIPanel />
+      {!isGame && <TileLabelsLegend />}
+      {/* HDRIPanel mounts its OWN fixed-position div (not inside Leva), so
+          hiding Leva chrome doesn't hide it. Wrap with display:none on
+          /game/ so the useControls schema registration + side effects
+          still run (HDRI selection, image upload callback) — only the
+          visible panel chrome is hidden. */}
+      <div style={{ display: isGame ? 'none' : 'contents' }}>
+        <HDRIPanel />
+      </div>
       {!preview && <AudioPanel />}
       {!preview && <GrassPanel />}
-      {!preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
+      {!isGame && !preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <TutorialChrome />
-      <FpsMeter />
+      {!isGame && <FpsMeter />}
       <Canvas
         camera={{
           position: isTopDownPreview ? [0, 22, 0.1] : isRubik ? [3.2, 2.2, 3.2] : [2.4, 1.6, 2.8],
@@ -210,7 +247,13 @@ export default function App() {
             <TileLabels mode="sphere" />
             <PostFx />
             <WalkControls />
-            <IntroCinematic />
+            {/* IntroCinematic gating depends on route:
+                  dev  → mount unconditionally (legacy: cinematic plays on
+                         every page load, regardless of gamePhase).
+                  game → mount only when gamePhase==='playing' so the title
+                         screen attract holds the planet at the solved
+                         orbit-solved phase until the user clicks Begin. */}
+            {(isGame ? gamePhase === 'playing' : true) && <IntroCinematic />}
             <TutorialHint />
             <AudioBus />
             <SoundVisualizer />
@@ -237,6 +280,7 @@ export default function App() {
           <SphereCamera />
         )}
       </Canvas>
+      {isGame && <MenuOverlay />}
     </>
   )
 }

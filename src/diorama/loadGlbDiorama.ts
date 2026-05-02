@@ -28,7 +28,7 @@ import { audioBus } from '../world/audio/bus'
  *  to share — the sphere patch is idempotent on userData.__spherePatched,
  *  so whichever of the N equivalents first reaches patchSceneForSphere
  *  wins and the rest skip. */
-function dedupeMaterials(node: THREE.Object3D): void {
+export function dedupeMaterials(node: THREE.Object3D): void {
   const canonical = new Map<string, THREE.Material>()
   let dedupedCount = 0
   let totalBefore = 0
