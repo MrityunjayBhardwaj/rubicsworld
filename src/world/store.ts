@@ -13,6 +13,61 @@ import { PLANETS, getPlanet, getNextPlanet } from './planetManifest'
 const TUTORIAL_SEEN_KEY = 'rubicsworld:tutorialSeen'
 const AUDIO_MUTED_KEY = 'rubicsworld:audioMuted'
 const PROGRESS_KEY = 'rubicsworld:progress'
+const PREFS_KEY = 'rubicsworld:preferences'
+
+// User-pickable level of three for difficulty + visuals. Difficulty maps
+// to scramble move count (read by IntroCinematic on each level boot).
+// Visuals is a placeholder rung — wired through the panel UI but no
+// renderer flag consumes it yet (Phase C territory).
+export type Tier = 'low' | 'medium' | 'high'
+
+interface PersistedPrefs {
+  difficulty: Tier
+  visuals: Tier
+  masterVolume: number  // [0..1]
+  sfxVolume: number     // [0..1]
+}
+
+const DEFAULT_PREFS: PersistedPrefs = {
+  difficulty: 'medium',
+  visuals: 'high',
+  masterVolume: 1,
+  sfxVolume: 1,
+}
+
+function readPersistedPrefs(): PersistedPrefs {
+  try {
+    if (typeof localStorage === 'undefined') return { ...DEFAULT_PREFS }
+    const raw = localStorage.getItem(PREFS_KEY)
+    if (!raw) return { ...DEFAULT_PREFS }
+    const parsed = JSON.parse(raw) as Partial<PersistedPrefs>
+    return {
+      difficulty: isTier(parsed.difficulty) ? parsed.difficulty : DEFAULT_PREFS.difficulty,
+      visuals:    isTier(parsed.visuals)    ? parsed.visuals    : DEFAULT_PREFS.visuals,
+      masterVolume: clampVol(parsed.masterVolume, DEFAULT_PREFS.masterVolume),
+      sfxVolume:    clampVol(parsed.sfxVolume,    DEFAULT_PREFS.sfxVolume),
+    }
+  } catch { return { ...DEFAULT_PREFS } }
+}
+
+function writePersistedPrefs(p: PersistedPrefs) {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)) } catch { /* ignore */ }
+}
+
+function isTier(v: unknown): v is Tier { return v === 'low' || v === 'medium' || v === 'high' }
+function clampVol(v: unknown, fallback: number): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return fallback
+  return Math.min(1, Math.max(0, v))
+}
+
+/** Difficulty → number of scramble moves applied at level boot. Spans
+ *  the 3..8 range the spec calls for: easy enough to teach the
+ *  rotation moves at LOW, challenging at HIGH. Read by IntroCinematic
+ *  via a getter so a preference change between levels takes effect on
+ *  the next boot without component churn. */
+export function scrambleCountFor(t: Tier): number {
+  return t === 'low' ? 3 : t === 'high' ? 8 : 5
+}
 
 interface PersistedProgress {
   currentPlanetSlug: string
@@ -151,6 +206,12 @@ interface PlanetStore {
   /** Persisted to localStorage; bound to audioBus.setMasterMute on every
    *  setAudioMuted call AND once at module load below. */
   audioMuted: boolean
+  /** User preferences — difficulty (scramble count), visuals (placeholder),
+   *  audio volumes. Persisted under PREFS_KEY as a single JSON blob. */
+  difficulty: Tier
+  visuals: Tier
+  masterVolume: number
+  sfxVolume: number
   /** True at t=0 (HUD covers entire planet as a tutorial attract). Flips
    *  to false on the first successful player commit. TileGrid's useFrame
    *  reads this and eases the shader's uHudOpacity uniform 1→0. */
@@ -198,6 +259,10 @@ interface PlanetStore {
   setMenuOpen: (v: boolean) => void
   toggleMenu: () => void
   setAudioMuted: (v: boolean) => void
+  setDifficulty: (v: Tier) => void
+  setVisuals: (v: Tier) => void
+  setMasterVolume: (v: number) => void
+  setSfxVolume: (v: number) => void
   /** Mark the given slug solved + open the stats overlay + snapshot the
    *  elapsed time. Idempotent: re-calling for an already-solved slug does
    *  nothing (the overlay can re-open via gamePhase transitions). */
@@ -271,6 +336,7 @@ const initialProgress = readPersistedProgress()
 // would return false the second time. Both gamePhase and playStartedAt
 // below depend on this single decision.
 const _bootAutoStart = readAutoStart()
+const _bootPrefs = readPersistedPrefs()
 
 let animCounter = 0
 let animResolver: (() => void) | null = null
@@ -326,6 +392,10 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   lastSolveTimeMs: null,
   statsOverlayOpen: false,
   audioMuted: readPersistedMute(),
+  difficulty:   _bootPrefs.difficulty,
+  visuals:      _bootPrefs.visuals,
+  masterVolume: _bootPrefs.masterVolume,
+  sfxVolume:    _bootPrefs.sfxVolume,
   sceneGrade: 'stylized',
   tutorialQueue: [],
   tutorialStep: 0,
@@ -370,6 +440,32 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
     audioBus.setMasterMute(v)
     try { localStorage.setItem(AUDIO_MUTED_KEY, v ? '1' : '0') } catch { /* ignore */ }
     set({ audioMuted: v })
+  },
+  setDifficulty: v => set(s => {
+    if (s.difficulty === v) return {}
+    writePersistedPrefs({ difficulty: v, visuals: s.visuals, masterVolume: s.masterVolume, sfxVolume: s.sfxVolume })
+    return { difficulty: v }
+  }),
+  setVisuals: v => set(s => {
+    if (s.visuals === v) return {}
+    writePersistedPrefs({ difficulty: s.difficulty, visuals: v, masterVolume: s.masterVolume, sfxVolume: s.sfxVolume })
+    return { visuals: v }
+  }),
+  setMasterVolume: v => {
+    const clamped = Math.min(1, Math.max(0, v))
+    audioBus.setMasterVolume(clamped)
+    set(s => {
+      writePersistedPrefs({ difficulty: s.difficulty, visuals: s.visuals, masterVolume: clamped, sfxVolume: s.sfxVolume })
+      return { masterVolume: clamped }
+    })
+  },
+  setSfxVolume: v => {
+    const clamped = Math.min(1, Math.max(0, v))
+    audioBus.setCategoryVolume('sfx', clamped)
+    set(s => {
+      writePersistedPrefs({ difficulty: s.difficulty, visuals: s.visuals, masterVolume: s.masterVolume, sfxVolume: clamped })
+      return { sfxVolume: clamped }
+    })
   },
   markSolved: slug => set(s => {
     if (s.solvedPlanets.includes(slug)) return {}
@@ -627,7 +723,9 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
     }),
 }))
 
-// Apply persisted mute on first import. audioBus.setMasterMute is idempotent
-// and safe to call before the AudioContext exists — it stores the flag and
-// applyGraphGains becomes a no-op until init().
+// Apply persisted mute + volumes on first import. The audioBus setters are
+// idempotent and safe to call before the AudioContext exists — they stash
+// the values and applyGraphGains becomes a no-op until init().
 audioBus.setMasterMute(readPersistedMute())
+audioBus.setMasterVolume(_bootPrefs.masterVolume)
+audioBus.setCategoryVolume('sfx', _bootPrefs.sfxVolume)
