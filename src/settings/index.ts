@@ -18,17 +18,37 @@ export const settings: Settings = defaultsJson
  *  by the Copy Settings button. Imports live values lazily (inside the
  *  function) to avoid pulling heavy modules at import time. */
 export async function captureLiveSettings(): Promise<Settings> {
+  // Per-section try/catch below: if any one block throws (e.g. PostFx not
+  // yet mounted, hdriStore not initialised, a uniform field renamed), the
+  // commit STILL succeeds for the working sections — broken sections fall
+  // back to the JSON defaults instead of taking the whole capture down.
+  // Without this, a missing hdriStore.url field used to surface as "click
+  // commit, nothing happens, no console error" because the unhandled
+  // rejection propagated above the only try/catch (around fetch).
+
   const { grassUniforms, flowerColorUniforms } = await import('../diorama/buildGrass')
   const { useHdri } = await import('../world/hdriStore')
   const { postfxLive } = await import('../world/PostFx')
 
   const hex = (c: { getHexString: () => string }) => '#' + c.getHexString()
 
-  const hs = useHdri.getState()
+  // Per-section capture: each block falls back to settings.<section> if
+  // anything throws. The fallback is the JSON-defined default, NOT random
+  // data — so a partial capture still produces a valid Settings shape.
+  const safeSection = <K extends keyof Omit<Settings, '$schema'>>(
+    name: K,
+    capture: () => Settings[K],
+  ): Settings[K] => {
+    try { return capture() } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[settings] capture for "${name}" failed; falling back to JSON default:`, err)
+      return settings[name]
+    }
+  }
 
   return {
     $schema: settings.$schema,
-    grass: {
+    grass: safeSection('grass', () => ({
       // `visible` / `density` live in Leva alone (not in grassUniforms),
       // so we can only capture from the JSON defaults unless the Leva
       // panel passes its current values in. For now, re-emit whatever
@@ -52,8 +72,8 @@ export async function captureLiveSettings(): Promise<Settings> {
       hoverRadius:    grassUniforms.uHoverRadius.value,
       hoverStrength:  grassUniforms.uHoverStrength.value,
       trailDecay:     grassUniforms.uTrailDecay.value,
-    },
-    flowers: {
+    })),
+    flowers: safeSection('flowers', () => ({
       flowerPct:    settings.flowers.flowerPct,
       pinkWeight:   settings.flowers.pinkWeight,
       purpleWeight: settings.flowers.purpleWeight,
@@ -65,47 +85,92 @@ export async function captureLiveSettings(): Promise<Settings> {
       redColor:     hex(flowerColorUniforms.red.value),
       flowerWidth:  settings.flowers.flowerWidth,
       flowerHeight: settings.flowers.flowerHeight,
-    },
-    hdri: {
-      preset:            hs.preset,
-      blur:              hs.blur,
-      intensity:         hs.intensity,
-      rotation:          hs.rotation,
-      backgroundOpacity: hs.backgroundOpacity,
-      physicalLights:    hs.physicalLights,
-      uniformColor:      hs.uniformColor,
-      envMapIntensity:   hs.envMapIntensity,
-      roughnessBoost:    hs.roughnessBoost,
-      fresnelEnabled:    hs.fresnelEnabled,
-      // Persistent custom HDRI: only round-trip a non-blob URL. Blob URLs
-      // die on reload, so committing one would recreate "loaded HDRI but
-      // wrong on next visit" — record null instead, which leaves the next
-      // session on the preset until the user re-uploads or the upload's
-      // /__hdri/commit succeeded and swapped the URL to a public path.
-      customPath:     hs.url && !hs.url.startsWith('blob:') ? hs.url : null,
-      customFilename: hs.url && !hs.url.startsWith('blob:') ? hs.filename : null,
-    },
+    })),
+    hdri: safeSection('hdri', () => {
+      const hs = useHdri.getState()
+      return {
+        preset:            hs.preset,
+        blur:              hs.blur,
+        intensity:         hs.intensity,
+        rotation:          hs.rotation,
+        backgroundOpacity: hs.backgroundOpacity,
+        physicalLights:    hs.physicalLights,
+        uniformColor:      hs.uniformColor,
+        envMapIntensity:   hs.envMapIntensity,
+        roughnessBoost:    hs.roughnessBoost,
+        fresnelEnabled:    hs.fresnelEnabled,
+        // Persistent custom HDRI: only round-trip a non-blob URL. Blob
+        // URLs die on reload, so committing one would record "loaded
+        // HDRI but wrong on next visit" — record null instead, which
+        // leaves the next session on the preset until the user re-
+        // uploads or /__hdri/commit succeeded and swapped to a public
+        // path.
+        customPath:     hs.url && !hs.url.startsWith('blob:') ? hs.url : null,
+        customFilename: hs.url && !hs.url.startsWith('blob:') ? hs.filename : null,
+      }
+    }),
     // Snapshot of the PostFx component's live useControls state, mirrored
     // by PostFx.tsx into postfxLive. If PostFx hasn't mounted yet (e.g.
     // capture called pre-canvas) postfxLive still holds the JSON defaults
     // because it's seeded from settings.postfx at module init.
-    postfx: { ...postfxLive },
+    postfx: safeSection('postfx', () => ({ ...postfxLive })),
   }
+}
+
+/** Lightweight floating toast — drop-in replacement for the alert()s
+ *  scattered through this module. Auto-dismisses after `ms` (default 3 s).
+ *  Stacks toasts vertically when multiple fire in succession.
+ *
+ *  alert() blocks the event loop and pushes the user out of flow; toasts
+ *  let them keep adjusting sliders while still seeing what happened. The
+ *  three states (success / error / info) map to colour only — the message
+ *  carries the verbatim error string when there is one. */
+function toast(kind: 'success' | 'error' | 'info', msg: string, ms = 3000): void {
+  if (typeof document === 'undefined') return
+  const host = (() => {
+    const existing = document.getElementById('settings-toast-host')
+    if (existing) return existing
+    const el = document.createElement('div')
+    el.id = 'settings-toast-host'
+    el.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:10000;display:flex;flex-direction:column;gap:6px;pointer-events:none;'
+    document.body.appendChild(el)
+    return el
+  })()
+  const colour = kind === 'success' ? '#3a7a3a' : kind === 'error' ? '#7a3a3a' : '#3a4a7a'
+  const div = document.createElement('div')
+  div.style.cssText = `background:${colour};color:#f5ead3;padding:8px 14px;border-radius:6px;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;box-shadow:0 2px 12px rgba(0,0,0,0.4);max-width:520px;word-break:break-word;`
+  div.textContent = msg
+  host.appendChild(div)
+  setTimeout(() => {
+    div.style.transition = 'opacity 240ms ease'
+    div.style.opacity = '0'
+    setTimeout(() => div.remove(), 260)
+  }, ms)
 }
 
 /** Serialises the live settings + copies to clipboard + console.logs. */
 export async function copySettingsToClipboard(): Promise<void> {
-  const live = await captureLiveSettings()
-  const pretty = JSON.stringify(live, null, 2)
+  let pretty: string
+  try {
+    const live = await captureLiveSettings()
+    pretty = JSON.stringify(live, null, 2)
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[settings] capture failed:', err)
+    toast('error', `Capture failed: ${String(err)}`)
+    return
+  }
   try {
     await navigator.clipboard.writeText(pretty)
     // eslint-disable-next-line no-console
     console.log('[settings] copied to clipboard:\n' + pretty)
+    toast('success', 'Settings copied to clipboard')
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error('[settings] clipboard write failed, logging instead:', err)
     // eslint-disable-next-line no-console
     console.log(pretty)
+    toast('info', 'Clipboard blocked — settings logged to console')
   }
 }
 
@@ -113,8 +178,16 @@ export async function copySettingsToClipboard(): Promise<void> {
  *  `settings.json`. Drop the downloaded file into `src/settings/` to make it
  *  the new baked-in default (Vite picks up the JSON on next HMR / reload). */
 export async function downloadSettingsJson(filename = 'settings.json'): Promise<void> {
-  const live = await captureLiveSettings()
-  const pretty = JSON.stringify(live, null, 2)
+  let pretty: string
+  try {
+    const live = await captureLiveSettings()
+    pretty = JSON.stringify(live, null, 2)
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[settings] capture failed:', err)
+    toast('error', `Capture failed: ${String(err)}`)
+    return
+  }
   const blob = new Blob([pretty], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -128,6 +201,7 @@ export async function downloadSettingsJson(filename = 'settings.json'): Promise<
   setTimeout(() => URL.revokeObjectURL(url), 1000)
   // eslint-disable-next-line no-console
   console.log('[settings] downloaded ' + filename)
+  toast('success', `Downloaded ${filename}`)
 }
 
 /** Writes a (partial or full) Settings object into the live runtime state —
@@ -258,8 +332,16 @@ export function flattenSettingsForLeva(s: Partial<Settings>): Record<string, unk
  *  writable settings). HMR picks up the file change and the app re-evaluates
  *  module-scope uniforms with the new defaults on the next reload. */
 export async function commitSettingsToDisk(): Promise<void> {
-  const live = await captureLiveSettings()
-  const pretty = JSON.stringify(live, null, 2)
+  let pretty: string
+  try {
+    const live = await captureLiveSettings()
+    pretty = JSON.stringify(live, null, 2)
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[settings] capture failed:', err)
+    toast('error', `Capture failed: ${String(err)}`)
+    return
+  }
   try {
     const res = await fetch('/__settings/commit', {
       method: 'POST',
@@ -270,15 +352,16 @@ export async function commitSettingsToDisk(): Promise<void> {
     if (!res.ok || !payload.ok) {
       // eslint-disable-next-line no-console
       console.error('[settings] commit failed:', payload)
-      alert('Commit failed — see console. (Only works in `npm run dev`.)')
+      toast('error', `Commit failed: ${payload.error ?? 'unknown'} (only works in npm run dev)`)
       return
     }
     // eslint-disable-next-line no-console
     console.log('[settings] committed to', payload.path)
+    toast('success', `Committed to ${payload.path}`)
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error('[settings] commit error:', err)
-    alert('Commit error — see console. (Only works in `npm run dev`.)')
+    toast('error', `Commit error: ${String(err)} (only works in npm run dev)`)
   }
 }
 
@@ -298,10 +381,11 @@ export async function pickAndApplySettings(
       const parsed = JSON.parse(text) as Partial<Settings>
       await applySettings(parsed)
       onAfterApply?.(flattenSettingsForLeva(parsed))
+      toast('success', `Applied ${file.name}`)
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[settings] apply failed:', err)
-      alert('Failed to apply settings — see console.')
+      toast('error', `Apply failed: ${String(err)}`)
     }
   }
   input.click()
