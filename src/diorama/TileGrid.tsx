@@ -883,15 +883,18 @@ export function TileGrid({ mode = 'split', bezier }: {
         swapCancelled = true
       }
 
-      // HMR hot-reload: Vite plugin fires `diorama:changed` when
-      // public/diorama.glb is rewritten (by the Blender addon's Live Mode).
-      // We refetch with a cache-bust query, swap scene in place — no page
-      // reload, so Leva knobs + camera angle + tutorial state all survive.
+      // HMR hot-reload: Vite plugin fires `diorama:changed` with a `slug`
+      // identifying which level was rewritten (Blender addon's Live Mode).
+      // Only swap if the change targets the level we're currently rendering
+      // — irrelevant changes to sibling level slots are skipped.
       // `fallbackMode='none'` → if the new file is briefly invalid (mid-
       // write race), keep the previous scene instead of dropping back to
       // imperative.
       if (import.meta.hot) {
-        const onDioramaChanged = ({ ts }: { ts: number }) => {
+        const onDioramaChanged = ({ slug, ts }: { slug?: string; ts: number }) => {
+          // Slug is optional for back-compat with anything that still emits
+          // the old shape. When present, gate on equality with current planet.
+          if (slug && slug !== getCurrentPlanet().slug) return
           void swapInScene(`${glbPath}?t=${ts}`, 'none')
         }
         import.meta.hot.on('diorama:changed', onDioramaChanged)
