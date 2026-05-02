@@ -221,14 +221,35 @@ export async function bakeDioramaGlb(opts: BakeOptions = {}): Promise<BakeResult
 }
 
 /**
- * POST the baked bytes through the existing /__diorama/commit-glb middleware
- * (which patches accessor names and writes to disk). Returns the server JSON.
+ * POST the baked bytes through /__diorama/commit-glb. Chunked because
+ * Playwright's CDP transport overflows V8's max-string-length when a
+ * single in-page POST body crosses ~100 MB; per-chunk fetches keep every
+ * CDP frame small, and the dev middleware concatenates server-side.
  */
 export async function commitBakedGlb(bytes: ArrayBuffer): Promise<{ ok: boolean; size?: number; path?: string; error?: string }> {
-  const res = await fetch('/__diorama/commit-glb', {
-    method: 'POST',
-    headers: { 'Content-Type': 'model/gltf-binary' },
-    body: bytes,
-  })
-  return await res.json().catch(() => ({ ok: false, error: 'non-JSON response' }))
+  const CHUNK = 8 * 1024 * 1024
+  // Browser-side UUID — crypto.randomUUID is in all evergreens; fall back
+  // to a timestamp+rand id for any environment that lacks it.
+  const session = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  for (let off = 0; off < bytes.byteLength; off += CHUNK) {
+    const slice = bytes.slice(off, Math.min(off + CHUNK, bytes.byteLength))
+    const isLast = off + CHUNK >= bytes.byteLength
+    const params = new URLSearchParams({ session, offset: String(off) })
+    if (isLast) params.set('commit', '1')
+    const res = await fetch(`/__diorama/commit-glb?${params}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'model/gltf-binary' },
+      body: slice,
+    })
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '<no body>')
+      return { ok: false, error: `chunk @${off} failed: ${res.status} ${txt.slice(0, 200)}` }
+    }
+    if (isLast) return await res.json().catch(() => ({ ok: false, error: 'non-JSON response' }))
+  }
+  // Empty body fallback (shouldn't happen with a real bake, but keeps the
+  // function total).
+  return { ok: false, error: 'no chunks sent' }
 }

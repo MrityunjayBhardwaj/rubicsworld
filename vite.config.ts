@@ -262,14 +262,22 @@ function patchGlbColorAccessorNames(body: Buffer, names: readonly string[]): Buf
 }
 
 /**
- * Dev-only endpoint to bake the imperative diorama back to public/diorama.glb.
- * The Leva "Bake → diorama.glb" button POSTs the GLTFExporter output here
- * so the on-disk asset matches whatever buildDiorama produces (props,
- * colliders, baked procedural animations) — that is, "?glb=1" loads an
- * exact copy of the imperative render.
+ * Dev-only endpoint that receives a baked glb (post-process of the canonical
+ * Blender-authored asset, NOT a regenerate-from-React) and writes it to
+ * public/diorama.glb. Body is patched with grass/flowers/colliders accessor
+ * names on its way to disk so the .blend round-trip stays self-documenting.
+ *
+ * Supports chunked upload via ?session=ID&offset=N (and ?commit=1 to flush).
+ * A single-shot full-body POST also works (legacy path). Chunking exists
+ * because Playwright's CDP transport blows up V8's 512 MB max-string-length
+ * when the in-page POST body crosses ~100 MB; chunks of ~8 MB each keep
+ * every CDP message comfortably small.
  */
 function dioramaCommit(): Plugin {
   const targetPath = path.resolve(__dirname, 'public/diorama.glb')
+  // Per-session in-memory accumulator. Sessions are short-lived (one bake),
+  // dev-only, and not user-facing; no eviction policy needed beyond delete-on-commit.
+  const sessions = new Map<string, Buffer[]>()
   return {
     name: 'diorama-commit',
     configureServer(server) {
@@ -281,27 +289,32 @@ function dioramaCommit(): Plugin {
           return
         }
         try {
+          const url = new URL(req.url ?? '', 'http://x')
+          const session = url.searchParams.get('session')
+          const isCommit = url.searchParams.get('commit') === '1'
           const chunks: Buffer[] = []
           for await (const chunk of req) chunks.push(chunk as Buffer)
-          const body = Buffer.concat(chunks)
-          // GLB magic: 'glTF' (0x46546C67 little-endian) at byte 0.
-          if (body.length < 12 || body.readUInt32LE(0) !== 0x46546C67) {
-            res.statusCode = 400
-            res.setHeader('Content-Type', 'application/json')
-            res.end(JSON.stringify({ ok: false, error: 'body is not a GLB' }))
+
+          // Chunked path: append to session, finalise on commit=1.
+          if (session) {
+            const acc = sessions.get(session) ?? []
+            for (const c of chunks) acc.push(c)
+            sessions.set(session, acc)
+            if (!isCommit) {
+              res.statusCode = 200
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ ok: true, accumulated: acc.reduce((n, b) => n + b.length, 0) }))
+              return
+            }
+            const body = Buffer.concat(acc)
+            sessions.delete(session)
+            await writeBakedGlb(body, targetPath, res)
             return
           }
-          // Three.js's GLTFExporter doesn't propagate BufferAttribute.name
-          // to glTF accessor names, but Blender's glTF importer DOES use
-          // accessor names for Color Attribute layer names. Patch the
-          // terrain mesh's COLOR_0/1/2 accessors to "grass"/"flowers"/
-          // "colliders" so the .blend round-trip arrives self-documenting
-          // instead of with default "Color"/"Color.001"/"Color.002".
-          const patched = patchGlbColorAccessorNames(body, ['grass', 'flowers', 'colliders'])
-          await fs.promises.writeFile(targetPath, patched)
-          res.statusCode = 200
-          res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ ok: true, path: 'public/diorama.glb', size: patched.length }))
+
+          // Single-shot path: write the full body.
+          const body = Buffer.concat(chunks)
+          await writeBakedGlb(body, targetPath, res)
         } catch (err) {
           res.statusCode = 500
           res.setHeader('Content-Type', 'application/json')
@@ -310,6 +323,25 @@ function dioramaCommit(): Plugin {
       })
     },
   }
+}
+
+async function writeBakedGlb(body: Buffer, targetPath: string, res: import('http').ServerResponse): Promise<void> {
+  if (body.length < 12 || body.readUInt32LE(0) !== 0x46546C67) {
+    res.statusCode = 400
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({ ok: false, error: 'body is not a GLB' }))
+    return
+  }
+  // Three.js's GLTFExporter doesn't propagate BufferAttribute.name to glTF
+  // accessor names, but Blender's glTF importer DOES use accessor names for
+  // Color Attribute layer names. Patch the terrain mesh's COLOR_0/1/2
+  // accessors to "grass"/"flowers"/"colliders" so the .blend round-trip
+  // arrives self-documenting instead of with default Color/Color.001/Color.002.
+  const patched = patchGlbColorAccessorNames(body, ['grass', 'flowers', 'colliders'])
+  await fs.promises.writeFile(targetPath, patched)
+  res.statusCode = 200
+  res.setHeader('Content-Type', 'application/json')
+  res.end(JSON.stringify({ ok: true, path: 'public/diorama.glb', size: patched.length }))
 }
 
 export default defineConfig({
