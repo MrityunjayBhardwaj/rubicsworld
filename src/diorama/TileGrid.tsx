@@ -69,7 +69,7 @@ const probe = {
 let probeLogLast = 0
 import { buildGrass, grassRefs } from './buildGrass'
 import { loadGlbDiorama } from './loadGlbDiorama'
-import { getCurrentPlanet } from '../world/planetManifest'
+import { getCurrentPlanet, PLANETS } from '../world/planetManifest'
 import { audioBus } from '../world/audio/bus'
 import { buildSphereVisibility, applySphereVisibility, restoreSphereVisibility, type SphereVisibility } from './sphereVisibility'
 import { buildBatchedDiorama, applyBatchVisibility, restoreBatchVisibility, type DioramaBatch } from './buildBatchedDiorama'
@@ -593,6 +593,12 @@ export function TileGrid({ mode = 'split', bezier }: {
   // below and swaps the glb. Without this, the effect resolves the URL
   // once at first mount and stays pinned to PLANETS[0].
   const currentPlanetSlug = usePlanet(s => s.currentPlanetSlug)
+  // Title screen always shows the default planet (lvl_1 / Country Land)
+  // as backdrop regardless of which level the player has saved as their
+  // current progression slot. Without this gate the menu would flash the
+  // last-played placeholder when returning from a deep-progression run,
+  // which reads as the menu glitching.
+  const gamePhase = usePlanet(s => s.gamePhase)
   const dioramaRef = useRef<DioramaScene | null>(null)
   const sphereVisRef = useRef<SphereVisibility | null>(null)
   const dioramaBatchRef = useRef<DioramaBatch | null>(null)
@@ -682,7 +688,14 @@ export function TileGrid({ mode = 'split', bezier }: {
     const isGameRoute = typeof window !== 'undefined' &&
       window.location.pathname.toLowerCase().startsWith('/game')
     const effectiveGlb = glbParam ?? (isGameRoute ? '1' : null)
-    const glbPath = effectiveGlb === '1' ? getCurrentPlanet(currentPlanetSlug).dioramaUrl : effectiveGlb
+    // On the /game/ title screen the visible planet is purely backdrop —
+    // pin it to the default slot regardless of saved progression. Begin
+    // / Select Level both flip gamePhase → 'playing', re-running this
+    // effect with the player's actual currentPlanetSlug.
+    const slugToRender = (isGameRoute && gamePhase === 'title')
+      ? PLANETS[0]!.slug
+      : currentPlanetSlug
+    const glbPath = effectiveGlb === '1' ? getCurrentPlanet(slugToRender).dioramaUrl : effectiveGlb
 
     // In sphere mode, terrain is rendered as a single global SphereGeometry
     // mesh (see globalTerrainScene below) — the flat "terrain" plane stays
@@ -900,7 +913,7 @@ export function TileGrid({ mode = 'split', bezier }: {
         const onDioramaChanged = ({ slug, ts }: { slug?: string; ts: number }) => {
           // Slug is optional for back-compat with anything that still emits
           // the old shape. When present, gate on equality with current planet.
-          if (slug && slug !== currentPlanetSlug) return
+          if (slug && slug !== slugToRender) return
           void swapInScene(`${glbPath}?t=${ts}`, 'none')
         }
         import.meta.hot.on('diorama:changed', onDioramaChanged)
@@ -1222,7 +1235,7 @@ export function TileGrid({ mode = 'split', bezier }: {
         }
       })
     }
-  }, [gl, mode, currentPlanetSlug])
+  }, [gl, mode, currentPlanetSlug, gamePhase])
 
   useFrame(({ clock }) => {
     const diorama = dioramaRef.current
