@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'node:path'
 import fs from 'node:fs'
+import crypto from 'node:crypto'
 
 /**
  * Watch public/diorama.glb for changes and emit a custom HMR event. Vite
@@ -122,6 +123,68 @@ function maskCommit(): Plugin {
           }
         })
       }
+    },
+  }
+}
+
+/**
+ * Dev-only endpoint for persisting an uploaded HDRI across reloads. Browser
+ * blob URLs (URL.createObjectURL) die on navigation, so without disk
+ * persistence the HDRIPanel always reverts to the dropdown preset on reload.
+ * POST /__hdri/commit?filename=foo.hdr with the raw HDR/EXR/PNG bytes;
+ * we hash the body, write to public/hdri/custom-<sha8>.<ext> (extension
+ * derived from filename), and return the public path. Same body uploaded
+ * twice = same path (content-hashed dedup).
+ *
+ * Files in public/hdri/ are served by Vite's static-asset path under /hdri/*
+ * — no Vite import-graph involvement, no HMR. The hdriStore reads
+ * settings.hdri.customPath at module load and points its `url` field at it,
+ * so the HDRI auto-restores on next page load.
+ */
+function hdriCommit(): Plugin {
+  const dir = path.resolve(__dirname, 'public/hdri')
+  return {
+    name: 'hdri-commit',
+    configureServer(server) {
+      server.middlewares.use('/__hdri/commit', async (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: 'POST only' }))
+          return
+        }
+        try {
+          // Buffer the body and derive the extension from the ?filename= query.
+          const chunks: Buffer[] = []
+          for await (const chunk of req) chunks.push(chunk as Buffer)
+          const body = Buffer.concat(chunks)
+          const url = new URL(req.url ?? '', 'http://localhost')
+          const filename = url.searchParams.get('filename') ?? ''
+          const ext = filename.toLowerCase().match(/\.(hdr|exr|png)$/)?.[1]
+          if (!ext) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: 'filename must end in .hdr / .exr / .png' }))
+            return
+          }
+          const hash = crypto.createHash('sha256').update(body).digest('hex').slice(0, 8)
+          const outName = `custom-${hash}.${ext}`
+          const outPath = path.join(dir, outName)
+          await fs.promises.mkdir(dir, { recursive: true })
+          await fs.promises.writeFile(outPath, body)
+          res.statusCode = 200
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({
+            ok: true,
+            path: `/hdri/${outName}`,
+            filename,
+          }))
+        } catch (err) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: String(err) }))
+        }
+      })
     },
   }
 }
@@ -250,5 +313,5 @@ function dioramaCommit(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), dioramaHotReload(), settingsCommit(), maskCommit(), dioramaCommit()],
+  plugins: [react(), dioramaHotReload(), settingsCommit(), maskCommit(), hdriCommit(), dioramaCommit()],
 })

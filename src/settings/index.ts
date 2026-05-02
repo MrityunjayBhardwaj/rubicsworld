@@ -77,6 +77,13 @@ export async function captureLiveSettings(): Promise<Settings> {
       envMapIntensity:   hs.envMapIntensity,
       roughnessBoost:    hs.roughnessBoost,
       fresnelEnabled:    hs.fresnelEnabled,
+      // Persistent custom HDRI: only round-trip a non-blob URL. Blob URLs
+      // die on reload, so committing one would recreate "loaded HDRI but
+      // wrong on next visit" — record null instead, which leaves the next
+      // session on the preset until the user re-uploads or the upload's
+      // /__hdri/commit succeeded and swapped the URL to a public path.
+      customPath:     hs.url && !hs.url.startsWith('blob:') ? hs.url : null,
+      customFilename: hs.url && !hs.url.startsWith('blob:') ? hs.filename : null,
     },
     // Snapshot of the PostFx component's live useControls state, mirrored
     // by PostFx.tsx into postfxLive. If PostFx hasn't mounted yet (e.g.
@@ -183,6 +190,10 @@ export async function applySettings(partial: Partial<Settings>): Promise<string[
     if (h.envMapIntensity   !== undefined) hs.setEnvMapIntensity(h.envMapIntensity)
     if (h.roughnessBoost    !== undefined) hs.setRoughnessBoost(h.roughnessBoost)
     if (h.fresnelEnabled    !== undefined) hs.setFresnelEnabled(h.fresnelEnabled)
+    // Loading from JSON: if a customPath is provided, hand it to setUrl
+    // (filename is just for display). null/undefined customPath means
+    // "use the preset" — drop any existing custom URL.
+    if (h.customPath !== undefined) hs.setUrl(h.customPath, h.customFilename ?? null)
   }
 
   if (partial.postfx) {

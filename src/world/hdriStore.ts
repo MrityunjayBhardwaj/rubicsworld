@@ -58,9 +58,17 @@ interface HdriStore {
   setEnvTexture: (t: THREE.Texture | null) => void
 }
 
+// If a custom HDRI was committed in a previous session, settings.hdri.
+// customPath holds its public URL (e.g. "/hdri/custom-7a3f9b2c.hdr"); seed
+// `url` to that path so the HDRIEnvironment auto-loads it on this page load.
+// On a fresh project (or when the user has cleared the custom HDRI),
+// customPath is null and `url` stays null → preset path is used.
+const initialCustomPath = settings.hdri.customPath ?? null
+const initialCustomFilename = settings.hdri.customFilename ?? null
+
 export const useHdri = create<HdriStore>(set => ({
-  url: null,
-  filename: null,
+  url: initialCustomPath,
+  filename: initialCustomFilename,
   preset: settings.hdri.preset as HdriPreset,
   blur: settings.hdri.blur,
   intensity: settings.hdri.intensity,

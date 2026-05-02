@@ -151,10 +151,38 @@ export function HDRIPanel() {
     }
     // Revoke the old blob URL if present
     if (url && url.startsWith('blob:')) URL.revokeObjectURL(url)
+    // Show the upload immediately via blob URL — instant feedback while the
+    // disk-commit is in flight.
     const blobUrl = URL.createObjectURL(file)
     setUrl(blobUrl, file.name)
     // Reset the native input so the same file can be re-selected
     e.target.value = ''
+
+    // Dev-only: persist to public/hdri/ via vite middleware so the HDRI
+    // survives reloads. On success, swap the blob:URL out for the public
+    // path and revoke the blob — keeps memory clean and means the next
+    // settings commit captures the persistent path. Failures (production
+    // build / endpoint missing / disk error) leave the blob URL in place;
+    // session works, but reload reverts to preset.
+    void file.arrayBuffer().then(async buf => {
+      const res = await fetch(`/__hdri/commit?filename=${encodeURIComponent(file.name)}`, {
+        method: 'POST',
+        body: buf,
+      })
+      const payload = await res.json().catch(() => ({ ok: false }))
+      if (!res.ok || !payload.ok) {
+        // eslint-disable-next-line no-console
+        console.warn('[hdri] commit failed (HDRI works for this session only):', payload)
+        return
+      }
+      if (url && url.startsWith('blob:')) URL.revokeObjectURL(url)
+      setUrl(payload.path as string, file.name)
+      // eslint-disable-next-line no-console
+      console.log('[hdri] persisted to', payload.path)
+    }).catch(err => {
+      // eslint-disable-next-line no-console
+      console.warn('[hdri] commit error (HDRI works for this session only):', err)
+    })
   }
 
   const onUsePreset = () => {
