@@ -3,6 +3,7 @@ import { buildSolvedTiles, isSolved, type Tile } from './tile'
 import { rotateSlice, randomMove, inverseMove, type Axis, type Direction, type Move } from './rotation'
 import type { FaceIndex } from './faces'
 import { audioBus } from './audio/bus'
+import { PLANETS, getPlanet, getNextPlanet } from './planetManifest'
 
 // localStorage keys for the menu/jam-route persistence layer. TutorialOverlay
 // also writes 'rubicsworld:tutorialSeen' from its own copy of the literal —
@@ -11,6 +12,42 @@ import { audioBus } from './audio/bus'
 // to import from store.
 const TUTORIAL_SEEN_KEY = 'rubicsworld:tutorialSeen'
 const AUDIO_MUTED_KEY = 'rubicsworld:audioMuted'
+const PROGRESS_KEY = 'rubicsworld:progress'
+
+interface PersistedProgress {
+  currentPlanetSlug: string
+  solvedPlanets: string[]
+}
+
+function readPersistedProgress(): PersistedProgress {
+  const fallback: PersistedProgress = {
+    currentPlanetSlug: PLANETS[0]!.slug,
+    solvedPlanets: [],
+  }
+  try {
+    if (typeof localStorage === 'undefined') return fallback
+    const raw = localStorage.getItem(PROGRESS_KEY)
+    if (!raw) return fallback
+    const parsed = JSON.parse(raw) as Partial<PersistedProgress>
+    if (
+      typeof parsed.currentPlanetSlug !== 'string' ||
+      !Array.isArray(parsed.solvedPlanets) ||
+      !getPlanet(parsed.currentPlanetSlug)
+    ) {
+      return fallback
+    }
+    // Filter out stale slugs from the solved list (e.g. older slug names that
+    // no longer exist in the manifest after a rename).
+    const cleaned = parsed.solvedPlanets.filter(s => typeof s === 'string' && getPlanet(s))
+    return { currentPlanetSlug: parsed.currentPlanetSlug, solvedPlanets: cleaned }
+  } catch {
+    return fallback
+  }
+}
+
+function writePersistedProgress(p: PersistedProgress) {
+  try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(p)) } catch { /* ignore */ }
+}
 
 function readPersistedMute(): boolean {
   try {
@@ -66,6 +103,25 @@ interface PlanetStore {
    *  its own menu, this is the overlay shown via Esc while playing. Opening
    *  it forces cameraMode→'orbit' so the cursor is free for the overlay. */
   menuOpen: boolean
+  /** Sequential progression — issue #48. Slug of the planet currently being
+   *  played; localStorage-persisted so a refresh resumes the same planet.
+   *  Always points at a valid manifest entry (validated on read). */
+  currentPlanetSlug: string
+  /** Slugs the player has solved, in order. localStorage-persisted. Used by
+   *  StatsOverlay to gate the "Continue" button vs end-of-game. */
+  solvedPlanets: string[]
+  /** performance.now() at the moment gamePhase flipped to 'playing'. Drives
+   *  the timer shown in StatsOverlay on solve. Null while on title or after
+   *  the post-solve overlay has consumed it. NOT persisted — refresh resets
+   *  the run timer (a finished run is the unit, not wall-clock continuity). */
+  playStartedAt: number | null
+  /** ms elapsed between playStartedAt and the markSolved call. Snapshotted
+   *  into store so StatsOverlay reads a stable value while it's open. */
+  lastSolveTimeMs: number | null
+  /** Post-solve overlay visibility. Mirrors menuOpen's pattern (independent
+   *  of gamePhase). Set true by markSolved, cleared by closeStatsOverlay /
+   *  advancePlanet. */
+  statsOverlayOpen: boolean
   /** Persisted to localStorage; bound to audioBus.setMasterMute on every
    *  setAudioMuted call AND once at module load below. */
   audioMuted: boolean
@@ -116,6 +172,18 @@ interface PlanetStore {
   setMenuOpen: (v: boolean) => void
   toggleMenu: () => void
   setAudioMuted: (v: boolean) => void
+  /** Mark the given slug solved + open the stats overlay + snapshot the
+   *  elapsed time. Idempotent: re-calling for an already-solved slug does
+   *  nothing (the overlay can re-open via gamePhase transitions). */
+  markSolved: (slug: string) => void
+  /** Hide the stats overlay without advancing. Currently unused by UI but
+   *  kept for future "stats peek" affordances. */
+  closeStatsOverlay: () => void
+  /** Pick the next planet via getNextPlanet, swap currentPlanetSlug, reset
+   *  the puzzle to a fresh attract state, restart the run timer. If there
+   *  is no next planet (end of progression), wipes solvedPlanets and falls
+   *  back to title — placeholder UX until the credits flow lands. */
+  advancePlanet: () => void
   /** Wipe localStorage flags (tutorial-seen, audio-muted) and reset
    *  in-memory mute to fresh-install default. Does NOT reload the page —
    *  caller is responsible for follow-up nav (e.g. returnToTitle). */
@@ -166,6 +234,7 @@ function makeScrambledTiles(n: number): { tiles: Tile[]; moves: Move[] } {
 // slow-orbiting for ~3 s, then play an animated scramble. IntroCinematic
 // drives that sequence; end-user scramble/reset paths are unchanged.
 const initialTiles = buildSolvedTiles()
+const initialProgress = readPersistedProgress()
 
 let animCounter = 0
 let animResolver: (() => void) | null = null
@@ -207,6 +276,11 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   introPhase: 'orbit-solved',
   gamePhase: 'title',
   menuOpen: false,
+  currentPlanetSlug: initialProgress.currentPlanetSlug,
+  solvedPlanets: initialProgress.solvedPlanets,
+  playStartedAt: null,
+  lastSolveTimeMs: null,
+  statsOverlayOpen: false,
   audioMuted: readPersistedMute(),
   sceneGrade: 'stylized',
   tutorialQueue: [],
@@ -223,7 +297,18 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   setOnPlanet: v => set(s => (s.onPlanet === v ? {} : { onPlanet: v })),
   setEasyMode: v => set({ easyMode: v }),
   setCameraMode: v => set(s => (s.cameraMode === v ? {} : { cameraMode: v })),
-  setGamePhase: v => set(s => (s.gamePhase === v ? {} : { gamePhase: v })),
+  setGamePhase: v => set(s => {
+    if (s.gamePhase === v) return {}
+    if (v === 'playing') {
+      // Stamp the run timer when leaving the title screen. Pre-existing flow:
+      // Begin click → setGamePhase('playing') → IntroCinematic mounts and the
+      // scramble/tutorial sequence runs. Timer counts that time as part of
+      // the run (per issue #48 proposal); refine to first-rotation later if
+      // play-test feedback wants a tighter "active solve" measure.
+      return { gamePhase: v, playStartedAt: performance.now(), lastSolveTimeMs: null }
+    }
+    return { gamePhase: v, playStartedAt: null }
+  }),
   setMenuOpen: v => set(s => {
     if (s.menuOpen === v) return {}
     // Opening the menu while in walk forces orbit so the cursor is free for
@@ -242,6 +327,59 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
     try { localStorage.setItem(AUDIO_MUTED_KEY, v ? '1' : '0') } catch { /* ignore */ }
     set({ audioMuted: v })
   },
+  markSolved: slug => set(s => {
+    if (s.solvedPlanets.includes(slug)) return {}
+    const elapsed = s.playStartedAt != null ? performance.now() - s.playStartedAt : 0
+    const nextSolved = [...s.solvedPlanets, slug]
+    writePersistedProgress({ currentPlanetSlug: s.currentPlanetSlug, solvedPlanets: nextSolved })
+    return {
+      solvedPlanets: nextSolved,
+      lastSolveTimeMs: elapsed,
+      statsOverlayOpen: true,
+    }
+  }),
+  closeStatsOverlay: () => set(s => (s.statsOverlayOpen ? { statsOverlayOpen: false } : {})),
+  advancePlanet: () => set(s => {
+    const next = getNextPlanet(s.currentPlanetSlug)
+    // Shared reset shape — both the next-planet and end-of-progression paths
+    // need to drop the puzzle back into a fresh attract state.
+    const puzzleReset = {
+      tiles: buildSolvedTiles(),
+      solved: true,
+      anim: null,
+      drag: null,
+      history: [] as Move[],
+      hudAttractMode: true,
+      introPhase: 'orbit-solved' as const,
+      aiHasFired: false,
+      lastPlayerActionAt: performance.now(),
+      menuOpen: false,
+      cameraMode: 'orbit' as const,
+      statsOverlayOpen: false,
+      lastSolveTimeMs: null,
+    }
+    if (!next) {
+      // End of progression — placeholder UX: wipe solved list, return to
+      // title. Replace with a credits / replay flow once authored.
+      writePersistedProgress({ currentPlanetSlug: PLANETS[0]!.slug, solvedPlanets: [] })
+      return {
+        ...puzzleReset,
+        currentPlanetSlug: PLANETS[0]!.slug,
+        solvedPlanets: [],
+        playStartedAt: null,
+        gamePhase: 'title' as const,
+      }
+    }
+    writePersistedProgress({ currentPlanetSlug: next.slug, solvedPlanets: s.solvedPlanets })
+    return {
+      ...puzzleReset,
+      currentPlanetSlug: next.slug,
+      // Continue button keeps gamePhase === 'playing'; the new planet's
+      // IntroCinematic re-runs from 'orbit-solved' just like first launch.
+      // Restart the timer for the new planet's run.
+      playStartedAt: performance.now(),
+    }
+  }),
   resetProgress: () => {
     try {
       localStorage.removeItem(TUTORIAL_SEEN_KEY)
