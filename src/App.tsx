@@ -9,6 +9,7 @@ import { WalkControls } from './world/WalkControls'
 import { IntroCinematic } from './world/IntroCinematic'
 import { MenuOverlay } from './world/MenuOverlay'
 import { StatsOverlay } from './world/StatsOverlay'
+import { Stopwatch } from './world/Stopwatch'
 import { TutorialHint, TutorialChrome } from './world/TutorialOverlay'
 import { FpsMeter } from './world/FpsMeter'
 import { AiSeed } from './world/AiSeed'
@@ -315,6 +316,7 @@ export default function App({ route = 'dev' }: AppProps) {
       </Canvas>
       {isGame && <MenuOverlay />}
       {isGame && <StatsOverlay />}
+      {isGame && <Stopwatch />}
     </>
   )
 }

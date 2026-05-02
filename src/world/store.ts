@@ -266,6 +266,11 @@ function makeScrambledTiles(n: number): { tiles: Tile[]; moves: Move[] } {
 // drives that sequence; end-user scramble/reset paths are unchanged.
 const initialTiles = buildSolvedTiles()
 const initialProgress = readPersistedProgress()
+// Read the autoStart flag exactly once at module init — the readAutoStart
+// helper consumes the flag (clears localStorage), so calling it twice
+// would return false the second time. Both gamePhase and playStartedAt
+// below depend on this single decision.
+const _bootAutoStart = readAutoStart()
 
 let animCounter = 0
 let animResolver: (() => void) | null = null
@@ -309,11 +314,15 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   // path so the level pick doesn't dump the user back at the title screen
   // (the reload is needed to re-seed HDRI / grass / postfx consumers
   // from the new slug's settings.json — see reloadIntoLevel above).
-  gamePhase: readAutoStart() ? 'playing' : 'title',
+  // Capture the autoStart decision once so playStartedAt below stays in
+  // sync — without the timer stamp here, the post-reload session would
+  // boot directly into 'playing' with playStartedAt=null and markSolved
+  // would compute elapsed=0 (visible as 00:00 in StatsOverlay).
+  gamePhase: ((): 'title' | 'playing' => (_bootAutoStart ? 'playing' : 'title'))(),
   menuOpen: false,
   currentPlanetSlug: initialProgress.currentPlanetSlug,
   solvedPlanets: initialProgress.solvedPlanets,
-  playStartedAt: null,
+  playStartedAt: _bootAutoStart ? performance.now() : null,
   lastSolveTimeMs: null,
   statsOverlayOpen: false,
   audioMuted: readPersistedMute(),
