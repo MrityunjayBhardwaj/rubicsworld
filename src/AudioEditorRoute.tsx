@@ -1,8 +1,25 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import App from './App'
-import { audioBus, type LoopDef, type EventDef } from './world/audio/bus'
+import { audioBus, type LoopDef, type EventDef, type ParamSpec } from './world/audio/bus'
 import { audioLive, audioBootSlug } from './world/audio/audioLive'
 import { useLastTriggered } from './world/audio/lastTriggered'
+
+/** Loop keys whose params have been edited via the ParamsEditor (#53,
+ *  #54). Commit emits these entries' full params block so the persisted
+ *  audio.json matches what the user is hearing. Module-scope (not React
+ *  state) because Inspector unmounts when selection changes — we'd lose
+ *  the set if it lived in component state. */
+const editedParamKeys = new Set<string>()
+
+/** Filter-type params the editor knows how to add. Bus already wires
+ *  BiquadFilters for these names (#54). */
+const FILTER_TYPES = ['lowpass', 'highpass', 'bandpass'] as const
+
+/** All knobs the editor can manage on a loop. `vol` and `rate` are
+ *  always present once a user touches them; filters are opt-in via the
+ *  Add Filter buttons. */
+const PARAM_TYPES = ['vol', 'rate', ...FILTER_TYPES] as const
+type ParamType = typeof PARAM_TYPES[number]
 
 /**
  * Audio editor route — `/edit/levels/<slug>/audio` (issue #51).
@@ -344,9 +361,183 @@ function Inspector({ entry }: { entry: Entry | null }) {
       </div>
       <SampleSwap entry={entry} />
       {entry.kind === 'loop'
-        ? <LoopOverrides entry={entry.def} />
+        ? <>
+            <LoopOverrides entry={entry.def} />
+            <ParamsEditor loopKey={entry.def.key} />
+          </>
         : <EventOverrides entry={entry.def} />
       }
+    </div>
+  )
+}
+
+// ── ParamsEditor — modulator + min/max + filters (#53, #54) ────────────
+
+/**
+ * Edits the persistent param spec (`{ base, modulator, min, max, invert }`)
+ * for each knob on a loop. Distinct from LoopOverrides above:
+ *   - LoopOverrides = ephemeral live multipliers (vol/speed/radius). Resets
+ *     on reload unless Commit folds them into base.
+ *   - ParamsEditor   = direct edits to the registry-shape spec, applied
+ *     instantly via `audioBus.setLoopParamSpec` (no node teardown). Commit
+ *     emits the full params block for any loop touched here.
+ *
+ * Filter params (lowpass/highpass/bandpass) are just regular params — the
+ * bus reads `params.lowpass` and routes it to a BiquadFilter's frequency
+ * AudioParam. So #54 falls out of the same UI: an "Add Filter" button
+ * inserts a new param key with sensible defaults, then the row edits it.
+ */
+function ParamsEditor({ loopKey }: { loopKey: string }) {
+  const [, force] = useState(0)
+  const rerender = () => force(x => x + 1)
+
+  const def = audioBus.getLoopRuntimeDef(loopKey)
+  if (!def) {
+    return (
+      <div style={{ marginTop: 12, opacity: 0.5, fontSize: 11, fontStyle: 'italic' }}>
+        Loop not yet attached — params hidden until the bus initialises.
+      </div>
+    )
+  }
+
+  const params = def.params ?? {}
+  const presentKeys = Object.keys(params) as ParamType[]
+  const missingFilters = FILTER_TYPES.filter(t => !presentKeys.includes(t))
+  const modNames = audioBus.listModulatorNames()
+
+  const updateParam = (name: string, partial: Partial<ParamSpec>) => {
+    const cur = params[name] ?? {}
+    audioBus.setLoopParamSpec(loopKey, name, { ...cur, ...partial })
+    editedParamKeys.add(loopKey)
+    rerender()
+  }
+
+  const addParam = (name: ParamType) => {
+    // Sensible defaults per param type. Filters open at midband so the
+    // user can immediately drag toward the sound they want.
+    const defaults: Record<ParamType, ParamSpec> = {
+      vol:      { base: 1 },
+      rate:     { base: 1 },
+      lowpass:  { base: 4000 },
+      highpass: { base: 200 },
+      bandpass: { base: 1500 },
+    }
+    audioBus.setLoopParamSpec(loopKey, name, defaults[name])
+    editedParamKeys.add(loopKey)
+    rerender()
+  }
+
+  return (
+    <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #1e242e' }}>
+      <div style={{ fontSize: 10, opacity: 0.55, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
+        Params
+      </div>
+      {presentKeys.length === 0 && (
+        <div style={{ fontSize: 11, opacity: 0.5, fontStyle: 'italic', marginBottom: 8 }}>
+          No params defined. Add one below.
+        </div>
+      )}
+      {presentKeys.map(name => (
+        <ParamRow
+          key={name}
+          name={name}
+          spec={params[name]}
+          modNames={modNames}
+          onChange={partial => updateParam(name, partial)}
+        />
+      ))}
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 8 }}>
+        {!presentKeys.includes('vol') && (
+          <button onClick={() => addParam('vol')} style={smallBtn}>+ Volume</button>
+        )}
+        {!presentKeys.includes('rate') && (
+          <button onClick={() => addParam('rate')} style={smallBtn}>+ Pitch</button>
+        )}
+        {missingFilters.map(t => (
+          <button key={t} onClick={() => addParam(t)} style={smallBtn}>
+            + {t.charAt(0).toUpperCase() + t.slice(1)}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ParamRow({
+  name, spec, modNames, onChange,
+}: {
+  name: string
+  spec: ParamSpec
+  modNames: string[]
+  onChange: (partial: Partial<ParamSpec>) => void
+}) {
+  const isFilter = (FILTER_TYPES as readonly string[]).includes(name)
+  // Filter cutoffs span 20Hz – 20kHz; vol is 0–2; rate is 0.25–4. Pick
+  // the slider range that matches what the user expects.
+  const range = isFilter ? { min: 20, max: 20000, step: 1 }
+    : name === 'vol' ? { min: 0, max: 2, step: 0.01 }
+    : name === 'rate' ? { min: 0.25, max: 4, step: 0.01 }
+    : { min: 0, max: 2, step: 0.01 }
+
+  // When min+max are both set, the spec acts as a remap (modulator 0..1
+  // → min..max). Otherwise base × modulator. UI shows different controls
+  // for the two modes.
+  const isRemap = spec.min != null && spec.max != null
+
+  const modValue = Array.isArray(spec.modulator) ? spec.modulator.join(',') : (spec.modulator ?? '')
+
+  return (
+    <div style={{
+      marginBottom: 10,
+      padding: 8,
+      background: '#141a23',
+      borderRadius: 4,
+      border: '1px solid #1e242e',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+        <span style={{ fontWeight: 600, fontSize: 11 }}>{name}</span>
+        <button
+          onClick={() => onChange(isRemap ? { min: undefined, max: undefined } : { min: range.min, max: range.max })}
+          style={{ ...smallBtn, padding: '2px 6px', fontSize: 9 }}
+          title={isRemap ? 'Switch to base×mod mode' : 'Switch to remap min..max mode'}
+        >
+          {isRemap ? 'mode: remap' : 'mode: base×mod'}
+        </button>
+      </div>
+
+      {!isRemap && (
+        <Slider label="base" value={spec.base ?? 1} min={range.min} max={range.max} step={range.step}
+                onChange={v => onChange({ base: v })} />
+      )}
+      {isRemap && (
+        <>
+          <Slider label="min" value={spec.min ?? range.min} min={range.min} max={range.max} step={range.step}
+                  onChange={v => onChange({ min: v })} />
+          <Slider label="max" value={spec.max ?? range.max} min={range.min} max={range.max} step={range.step}
+                  onChange={v => onChange({ max: v })} />
+        </>
+      )}
+
+      <label style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
+        <span style={{ opacity: 0.7, display: 'block', marginBottom: 2 }}>modulator</span>
+        <select
+          value={modValue}
+          onChange={e => onChange({ modulator: e.target.value || undefined })}
+          style={{
+            width: '100%', padding: '3px 6px', fontSize: 11,
+            background: '#0e1118', color: '#cfd6e0',
+            border: '1px solid #2a323d', borderRadius: 3,
+          }}
+        >
+          <option value="">(none — constant)</option>
+          {modNames.map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </label>
+
+      {isRemap && (
+        <Toggle label="invert (mod=0 → max)" value={spec.invert ?? false}
+                onChange={v => onChange({ invert: v || undefined })} />
+      )}
     </div>
   )
 }
@@ -496,6 +687,16 @@ const btn: React.CSSProperties = {
   fontSize: 11,
 }
 
+const smallBtn: React.CSSProperties = {
+  padding: '3px 8px',
+  background: '#1a2330',
+  color: '#cfd6e0',
+  border: '1px solid #2a323d',
+  borderRadius: 3,
+  cursor: 'pointer',
+  fontSize: 10,
+}
+
 // ── Commit shape ───────────────────────────────────────────────────────
 
 /**
@@ -515,13 +716,25 @@ function buildSparseAudioJson(): { loops?: LoopDef[]; events?: EventDef[] } {
   const loops: LoopDef[] = []
   for (const def of audioLive.loops) {
     const ovr = audioBus.getLoopOverride(def.key)
-    if (!ovr || (ovr.vol == null && ovr.speed == null && ovr.radius == null && !ovr.mute)) continue
+    const hasOverride = ovr && (ovr.vol != null || ovr.speed != null || ovr.radius != null || ovr.mute)
+    const hasParamEdit = editedParamKeys.has(def.key)
+    if (!hasOverride && !hasParamEdit) continue
     const baked: LoopDef = { key: def.key, anchor: def.anchor, src: def.src }
-    if (ovr.vol != null) {
-      const baseVol = def.params?.vol?.base ?? def.vol ?? 1
-      baked.params = { ...(def.params ?? {}), vol: { ...(def.params?.vol ?? {}), base: baseVol * ovr.vol } }
+    // Param edits — emit the FULL params block as it now stands on
+    // audioLive (setLoopParamSpec keeps audioLive in sync). The boot
+    // XHR's keyed-merge replaces unchanged entries' params at this key,
+    // so emitting verbatim is what we want.
+    if (hasParamEdit) {
+      baked.params = { ...(def.params ?? {}) }
     }
-    if (ovr.radius != null) baked.radius = ovr.radius
+    // Volume override — multiplied into params.vol.base. If we already
+    // emitted params via param edit, the user's edited base is the
+    // truth; ovr.vol is layered on top.
+    if (ovr?.vol != null) {
+      const baseVol = baked.params?.vol?.base ?? def.params?.vol?.base ?? def.vol ?? 1
+      baked.params = { ...(baked.params ?? def.params ?? {}), vol: { ...(baked.params?.vol ?? def.params?.vol ?? {}), base: baseVol * ovr.vol } }
+    }
+    if (ovr?.radius != null) baked.radius = ovr.radius
     loops.push(baked)
   }
   if (loops.length) out.loops = loops

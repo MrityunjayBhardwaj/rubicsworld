@@ -27,6 +27,11 @@ export interface ParamSpec {
   invert?: boolean
 }
 
+// Re-export so the editor can construct/mutate specs without poking the
+// shape via 'any'. ParamSpec was already exported above; this is just a
+// readability anchor for downstream editor code.
+export type { ParamSpec as LoopParamSpec }
+
 /**
  * Volume envelope baked from a Blender Speaker's keyframed `.volume`
  * property. The runtime samples it per frame against an external clock —
@@ -453,6 +458,45 @@ class AudioBus {
 
   setModulator(name: string, fn: Modulator) {
     this.modulators.set(name, fn)
+  }
+
+  /** Names of every registered modulator. Used by the audio editor's
+   *  param dropdown to populate "what can I bind this param to?" */
+  listModulatorNames(): string[] {
+    return Array.from(this.modulators.keys()).sort()
+  }
+
+  /** Live-edit a param spec on a loop. Bypasses registerLoop's teardown
+   *  (no node-detach, no buffer reload) — applyParams picks up the new
+   *  spec on its next tick, so dragging base/min/max in the editor
+   *  produces a smooth audible sweep without pops.
+   *
+   *  Mutates BOTH the runtime def (what applyParams reads) AND the
+   *  audioLive entry (what the Commit button bakes into audio.json),
+   *  so the two never drift mid-session.
+   */
+  setLoopParamSpec(key: string, name: string, spec: ParamSpec) {
+    const lr = this.loops.get(key)
+    if (lr) {
+      lr.def.params = { ...(lr.def.params ?? {}), [name]: { ...spec } }
+    }
+    // audioLive is the editor's commit source; keep it in sync. Search
+    // both static loops + runtimeLoops so glb-imported KHR_audio_emitter
+    // entries also accept edits.
+    const live = audioLive.loops.find(l => l.key === key)
+    if (live) {
+      live.params = { ...(live.params ?? {}), [name]: { ...spec } }
+    } else {
+      const rt = this.runtimeLoops.get(key)
+      if (rt) rt.params = { ...(rt.params ?? {}), [name]: { ...spec } }
+    }
+  }
+
+  /** Read the current runtime def for a loop. Editor uses this to
+   *  populate sliders with what applyParams is actually using right
+   *  now (post any setLoopParamSpec edits). */
+  getLoopRuntimeDef(key: string): LoopDef | undefined {
+    return this.loops.get(key)?.def
   }
 
   setWindStrengthSource(fn: () => number) {
