@@ -752,6 +752,17 @@ function ParamRow({
         <Toggle label="invert (mod=0 → max)" value={spec.invert ?? false}
                 onChange={v => onChange({ invert: v || undefined })} />
       )}
+
+      {isFilter && (
+        <Slider
+          label="Q (resonance)"
+          value={spec.q ?? 0.7}
+          min={0.1}
+          max={20}
+          step={0.05}
+          onChange={v => onChange({ q: v })}
+        />
+      )}
     </div>
   )
 }

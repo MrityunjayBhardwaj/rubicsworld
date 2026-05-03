@@ -25,6 +25,12 @@ export interface ParamSpec {
   min?: number
   max?: number
   invert?: boolean
+  // Filter resonance — only meaningful for lowpass/highpass/bandpass
+  // params. Default 0.7 (transparent in lowpass, gentle peak in
+  // bandpass). Higher Q = narrower filter, more emphasis at cutoff.
+  // Read at applyParams time so the editor's Q slider takes effect on
+  // next tick without rebuilding the BiquadFilter.
+  q?: number
 }
 
 // Re-export so the editor can construct/mutate specs without poking the
@@ -793,10 +799,14 @@ class AudioBus {
       }
 
       // Filter params (lowpass / highpass / bandpass) — smooth-sweep the
-      // sample-loop's BiquadFilter, OR a synth-exposed AudioParam.
+      // sample-loop's BiquadFilter, OR a synth-exposed AudioParam. Q
+      // updates apply on the same tick — bus reads spec.q each frame so
+      // the editor's slider is heard immediately, with the same smoothSet
+      // ramp as frequency to avoid zipper noise on rapid drags.
       const filt = lr.filters?.[name]
       if (filt) {
         smoothSet(filt.frequency, value, ctx, SMOOTH_HORIZON_FILT)
+        if (spec.q != null) smoothSet(filt.Q, spec.q, ctx, SMOOTH_HORIZON_FILT)
         continue
       }
       const ap = lr.synth?.params?.[name]
