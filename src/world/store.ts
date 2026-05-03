@@ -3,6 +3,7 @@ import { buildSolvedTiles, isSolved, type Tile } from './tile'
 import { rotateSlice, randomMove, inverseMove, type Axis, type Direction, type Move } from './rotation'
 import type { FaceIndex } from './faces'
 import { audioBus } from './audio/bus'
+import { Trigger } from './audio/triggers'
 import { PLANETS, getPlanet, getNextPlanet } from './planetManifest'
 
 // localStorage keys for the menu/jam-route persistence layer. TutorialOverlay
@@ -349,7 +350,12 @@ function applyRotation(
 ) {
   const newTiles = rotateSlice(s.tiles, axis, slice, dir)
   const nowSolved = isSolved(newTiles)
+  // Tile snap — fires every commit (one per gesture). Solve fires only
+  // on the unsolved → solved transition. audioBus handles the dev-mode
+  // "no listener yet" case internally; safe to call from any thread.
+  audioBus.play(Trigger.TileSnap)
   if (!s.solved && nowSolved) {
+    audioBus.play(Trigger.Solve)
     window.dispatchEvent(new CustomEvent('planet:settled'))
   }
   return {
@@ -425,6 +431,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   }),
   setMenuOpen: v => set(s => {
     if (s.menuOpen === v) return {}
+    audioBus.play(v ? Trigger.MenuOpen : Trigger.MenuClose)
     // Opening the menu while in walk forces orbit so the cursor is free for
     // the overlay. Closing the menu does NOT auto-restore walk — player
     // re-enters via Tab if they want.
@@ -433,6 +440,7 @@ export const usePlanet = create<PlanetStore>((set, get) => ({
   }),
   toggleMenu: () => set(s => {
     const next = !s.menuOpen
+    audioBus.play(next ? Trigger.MenuOpen : Trigger.MenuClose)
     if (next && s.cameraMode === 'walk') return { menuOpen: true, cameraMode: 'orbit' as const }
     return { menuOpen: next }
   }),

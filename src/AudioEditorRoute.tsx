@@ -3,6 +3,7 @@ import App from './App'
 import { audioBus, type LoopDef, type EventDef, type ParamSpec } from './world/audio/bus'
 import { audioLive, audioBootSlug } from './world/audio/audioLive'
 import { useLastTriggered } from './world/audio/lastTriggered'
+import { ALL_TRIGGERS } from './world/audio/triggers'
 
 /** Loop keys whose params have been edited via the ParamsEditor (#53,
  *  #54). Commit emits these entries' full params block so the persisted
@@ -212,25 +213,28 @@ function AudioWorkspace() {
             {slug ?? 'no level'}
           </div>
         </div>
-        <button
-          onClick={onCommit}
-          disabled={!slug || committing === 'committing'}
-          style={{
-            padding: '6px 12px',
-            background: committing === 'ok' ? '#244a30' : committing === 'err' ? '#4a2424' : '#1e242e',
-            color: '#cfd6e0',
-            border: '1px solid #2a323d',
-            borderRadius: 4,
-            cursor: slug ? 'pointer' : 'not-allowed',
-            fontSize: 12,
-            fontWeight: 600,
-          }}
-        >
-          {committing === 'committing' ? 'Committing…'
-            : committing === 'ok' ? 'Committed'
-            : committing === 'err' ? 'Failed'
-            : 'Commit Audio'}
-        </button>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <ForceTrigger />
+          <button
+            onClick={onCommit}
+            disabled={!slug || committing === 'committing'}
+            style={{
+              padding: '6px 12px',
+              background: committing === 'ok' ? '#244a30' : committing === 'err' ? '#4a2424' : '#1e242e',
+              color: '#cfd6e0',
+              border: '1px solid #2a323d',
+              borderRadius: 4,
+              cursor: slug ? 'pointer' : 'not-allowed',
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            {committing === 'committing' ? 'Committing…'
+              : committing === 'ok' ? 'Committed'
+              : committing === 'err' ? 'Failed'
+              : 'Commit Audio'}
+          </button>
+        </div>
       </div>
 
       {/* Two-row split inside the workspace: list (top) + inspector (bottom) */}
@@ -244,6 +248,40 @@ function AudioWorkspace() {
         <Inspector entry={selected} />
       </div>
     </>
+  )
+}
+
+// ── ForceTrigger — fire any registered trigger directly ───────────────
+
+/**
+ * Some SFX are hard to reach by gesture (Solve requires actually
+ * solving; tile_snap requires a full drag-to-90°-commit gesture). This
+ * dropdown fires any trigger from the typed enum, routing through
+ * audioBus.play so the override + lastTriggered + audition flow is
+ * identical to the in-game path.
+ */
+function ForceTrigger() {
+  return (
+    <select
+      onChange={e => {
+        const v = e.target.value
+        e.target.value = ''   // reset so re-selecting the same row fires again
+        if (v) audioBus.play(v)
+      }}
+      style={{
+        padding: '5px 8px',
+        background: '#1e242e',
+        color: '#cfd6e0',
+        border: '1px solid #2a323d',
+        borderRadius: 4,
+        fontSize: 11,
+        cursor: 'pointer',
+      }}
+      title="Fire any trigger directly"
+    >
+      <option value="">▶ Fire trigger…</option>
+      {ALL_TRIGGERS.map(t => <option key={t} value={t}>{t}</option>)}
+    </select>
   )
 }
 

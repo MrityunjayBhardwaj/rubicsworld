@@ -18,8 +18,18 @@
  *   3. Call `audioBus.play(Trigger.YourId)` from the game code.
  */
 export const Trigger = {
-  Footstep: 'footstep',
-  Jump: 'jump',
+  Footstep:   'footstep',
+  Jump:       'jump',
+  // Slice-rotation commit lock — fires once per gesture when the slice
+  // snaps to its final 90° pose (not on continuous drag).
+  TileSnap:   'tile_snap',
+  // Cube reaches solved state. Fires once on the unsolved→solved
+  // transition, not every time a solved cube settles.
+  Solve:      'solve',
+  // Pause/preferences overlay open + close. Two triggers because the
+  // sounds typically differ in mood (open: settle, close: release).
+  MenuOpen:   'menu_open',
+  MenuClose:  'menu_close',
 } as const
 
 export type TriggerId = (typeof Trigger)[keyof typeof Trigger]

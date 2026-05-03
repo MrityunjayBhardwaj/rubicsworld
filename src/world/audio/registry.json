@@ -68,7 +68,11 @@
     }
   ],
   "events": [
-    { "key": "footstep", "anchor": "object:player", "src": "audio/footstep_grass.ogg", "pitchJitter": 0.08 },
-    { "key": "jump",     "anchor": "world",         "src": "audio/jump_grass.ogg" }
+    { "key": "footstep",   "anchor": "object:player", "src": "audio/footstep_grass.ogg", "pitchJitter": 0.08 },
+    { "key": "jump",       "anchor": "world",         "src": "audio/jump_grass.ogg" },
+    { "key": "tile_snap",  "anchor": "world",         "src": "synth:click" },
+    { "key": "solve",      "anchor": "world",         "src": "synth:chime" },
+    { "key": "menu_open",  "anchor": "world",         "src": "synth:click" },
+    { "key": "menu_close", "anchor": "world",         "src": "synth:click" }
   ]
 }
