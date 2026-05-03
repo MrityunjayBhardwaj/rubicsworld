@@ -658,6 +658,14 @@ class AudioBus {
     })
   }
 
+  /** Public wrapper around loadBuffer — the audio editor needs the
+   *  decoded AudioBuffer to compute waveform peaks (#52). Reuses the
+   *  buffer cache, so calling this from the editor doesn't re-decode
+   *  samples that are already loaded for runtime playback. */
+  loadSampleBuffer(src: string): Promise<AudioBuffer> {
+    return this.loadBuffer(src)
+  }
+
   private loadBuffer(src: string): Promise<AudioBuffer> {
     // Registry entries are public/-relative ("audio/foo.ogg"). Without a
     // leading slash, fetch resolves them against document.baseURI — fine on

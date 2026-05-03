@@ -356,9 +356,10 @@ function Inspector({ entry }: { entry: Entry | null }) {
   return (
     <div style={{ flex: '1 1 50%', minHeight: 200, padding: 12, overflowY: 'auto' }}>
       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>{entry.def.key}</div>
-      <div style={{ fontSize: 11, opacity: 0.7, fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all', marginBottom: 12 }}>
+      <div style={{ fontSize: 11, opacity: 0.7, fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all', marginBottom: 8 }}>
         {entry.def.src}
       </div>
+      <WaveformCanvas src={entry.def.src} />
       <SampleSwap entry={entry} />
       {entry.kind === 'loop'
         ? <>
@@ -367,6 +368,177 @@ function Inspector({ entry }: { entry: Entry | null }) {
           </>
         : <EventOverrides entry={entry.def} />
       }
+    </div>
+  )
+}
+
+// ── WaveformCanvas — peaks sidecar + render (#52) ──────────────────────
+
+interface PeaksSidecar {
+  /** Length-N min/max pairs flattened: [min0, max0, min1, max1, ...]. */
+  peaks: number[]
+  duration: number
+  sampleRate: number
+  /** Generator version — bump to force regenerate when the algorithm
+   *  changes. Sidecar files older than `PEAKS_VERSION` are recomputed. */
+  v: number
+}
+
+const PEAKS_VERSION = 1
+const PEAKS_BUCKETS = 512   // canvas columns; one min/max pair per bucket
+
+/**
+ * Downsample an AudioBuffer to PEAKS_BUCKETS min/max pairs. Single
+ * channel only (mix down to mono if multi-channel) — the editor's
+ * waveform is for visual orientation, not stereo analysis.
+ */
+function computePeaks(buf: AudioBuffer): PeaksSidecar {
+  const ch0 = buf.getChannelData(0)
+  const ch1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null
+  const stride = Math.max(1, Math.floor(ch0.length / PEAKS_BUCKETS))
+  const peaks: number[] = []
+  for (let i = 0; i < PEAKS_BUCKETS; i++) {
+    let mn = 1, mx = -1
+    const start = i * stride
+    const end = Math.min(ch0.length, start + stride)
+    for (let j = start; j < end; j++) {
+      const v = ch1 ? (ch0[j] + ch1[j]) * 0.5 : ch0[j]
+      if (v < mn) mn = v
+      if (v > mx) mx = v
+    }
+    if (mn > mx) { mn = 0; mx = 0 } // empty bucket — flat line
+    peaks.push(mn, mx)
+  }
+  return { peaks, duration: buf.duration, sampleRate: buf.sampleRate, v: PEAKS_VERSION }
+}
+
+/** Try to fetch a sidecar peaks file. Returns null if missing or stale
+ *  (different generator version). */
+async function fetchPeaks(src: string): Promise<PeaksSidecar | null> {
+  try {
+    // Sidecars are public-relative — same as `src`. Add leading slash
+    // to match bus.loadBuffer normalisation (P46).
+    const url = '/' + src + '.peaks.json'
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const json = await res.json() as PeaksSidecar
+    if (json.v !== PEAKS_VERSION) return null
+    return json
+  } catch { return null }
+}
+
+/** Generate peaks client-side (decode via the bus' cached buffer if
+ *  available) and POST sidecar for next time. */
+async function generateAndCachePeaks(src: string): Promise<PeaksSidecar | null> {
+  try {
+    const buf = await audioBus.loadSampleBuffer(src)
+    const sidecar = computePeaks(buf)
+    // Fire-and-forget — render even if the sidecar write fails.
+    void fetch(`/__audio/peaks?src=${encodeURIComponent(src)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sidecar),
+    }).catch(() => { /* ignore */ })
+    return sidecar
+  } catch (err) {
+    console.warn('[audio-editor] peaks generation failed:', err)
+    return null
+  }
+}
+
+function WaveformCanvas({ src }: { src: string }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [peaks, setPeaks] = useState<PeaksSidecar | null>(null)
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
+
+  // Synth-backed loops have no buffer — short-circuit. The check is on
+  // the registry-shape src, before any fetch.
+  const isSynth = src.startsWith('synth:')
+
+  useEffect(() => {
+    if (isSynth) { setStatus('ready'); setPeaks(null); return }
+    let cancelled = false
+    setStatus('loading')
+    setPeaks(null)
+    ;(async () => {
+      const cached = await fetchPeaks(src)
+      if (cancelled) return
+      if (cached) { setPeaks(cached); setStatus('ready'); return }
+      const generated = await generateAndCachePeaks(src)
+      if (cancelled) return
+      if (generated) { setPeaks(generated); setStatus('ready') }
+      else setStatus('error')
+    })()
+    return () => { cancelled = true }
+  }, [src, isSynth])
+
+  // Render — runs on peaks change, on canvas mount, and on resize via
+  // the ResizeObserver below.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !peaks) return
+    const dpr = window.devicePixelRatio || 1
+    const w = canvas.clientWidth
+    const h = canvas.clientHeight
+    canvas.width = w * dpr
+    canvas.height = h * dpr
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.scale(dpr, dpr)
+    ctx.fillStyle = '#0a0d12'
+    ctx.fillRect(0, 0, w, h)
+    // Centre line
+    ctx.strokeStyle = '#1e242e'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(0, h / 2)
+    ctx.lineTo(w, h / 2)
+    ctx.stroke()
+    // Peaks — one vertical line per bucket from min..max.
+    ctx.strokeStyle = '#4a8eef'
+    ctx.lineWidth = 1
+    const n = peaks.peaks.length / 2
+    for (let i = 0; i < n; i++) {
+      const x = (i / n) * w
+      const mn = peaks.peaks[i * 2]
+      const mx = peaks.peaks[i * 2 + 1]
+      const y0 = h / 2 - mx * (h / 2 - 1)
+      const y1 = h / 2 - mn * (h / 2 - 1)
+      ctx.beginPath()
+      ctx.moveTo(x, y0)
+      ctx.lineTo(x, y1 || y0 + 1) // ensure a 1px line for silent buckets
+      ctx.stroke()
+    }
+  }, [peaks])
+
+  if (isSynth) {
+    return (
+      <div style={{
+        marginBottom: 12, padding: 12, background: '#141a23',
+        border: '1px dashed #2a323d', borderRadius: 4,
+        fontSize: 11, opacity: 0.6, fontStyle: 'italic',
+      }}>
+        Synth voice — no sample buffer to display.
+      </div>
+    )
+  }
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <canvas
+        ref={canvasRef}
+        style={{ width: '100%', height: 80, display: 'block', borderRadius: 3, background: '#0a0d12' }}
+      />
+      {status === 'loading' && (
+        <div style={{ fontSize: 10, opacity: 0.5, marginTop: 2 }}>Generating peaks…</div>
+      )}
+      {status === 'error' && (
+        <div style={{ fontSize: 10, opacity: 0.6, color: '#ef9a7a', marginTop: 2 }}>Peaks unavailable</div>
+      )}
+      {status === 'ready' && peaks && (
+        <div style={{ fontSize: 10, opacity: 0.5, marginTop: 2, fontFamily: 'ui-monospace, monospace' }}>
+          {peaks.duration.toFixed(2)}s · {peaks.sampleRate} Hz
+        </div>
+      )}
     </div>
   )
 }

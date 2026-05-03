@@ -305,6 +305,48 @@ function audioCommit(): Plugin {
         }
       })
 
+      // /__audio/peaks?src=<registry-shape-path>  body: { peaks: number[], duration, sampleRate }
+      // Writes a sidecar `<src>.peaks.json` next to the sample so the
+      // editor can render the waveform without redecoding the buffer
+      // on every selection. Whitelisted prefixes:
+      //   levels/<slug>/audio/...  (per-level uploaded samples)
+      //   audio/...                (global registry samples)
+      // Anything else is rejected — we don't want a malformed query
+      // touching arbitrary files under public/.
+      server.middlewares.use('/__audio/peaks', async (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: 'POST only' }))
+          return
+        }
+        try {
+          const url = new URL(req.url ?? '', 'http://x')
+          const src = url.searchParams.get('src') ?? ''
+          // Reject path-traversal + restrict to known prefixes.
+          if (src.includes('..') || (!src.startsWith('audio/') && !/^levels\/lvl_\d+\/audio\//.test(src))) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: `invalid src: ${src}` }))
+            return
+          }
+          const chunks: Buffer[] = []
+          for await (const chunk of req) chunks.push(chunk as Buffer)
+          const body = Buffer.concat(chunks).toString('utf8')
+          const parsed: unknown = JSON.parse(body)
+          const targetPath = path.resolve(__dirname, 'public', `${src}.peaks.json`)
+          await fs.promises.mkdir(path.dirname(targetPath), { recursive: true })
+          await fs.promises.writeFile(targetPath, JSON.stringify(parsed) + '\n', 'utf8')
+          res.statusCode = 200
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: true, path: `public/${src}.peaks.json` }))
+        } catch (err) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: String(err) }))
+        }
+      })
+
       server.middlewares.use('/__audio/upload', async (req, res) => {
         if (req.method !== 'POST') {
           res.statusCode = 405
