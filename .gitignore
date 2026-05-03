@@ -48,3 +48,9 @@ public/diorama.glb.before-bake
 
 # Local research / planning notes — keep out of version control
 artifacts/
+
+# Audio editor — peaks sidecars are auto-regenerated client-side on
+# selection (see src/AudioEditorRoute.tsx WaveformCanvas), so tracking
+# them adds noise. Per-level uploads still version-control the actual
+# WAV/MP3/OGG files; only the .peaks.json caches are ignored.
+*.peaks.json

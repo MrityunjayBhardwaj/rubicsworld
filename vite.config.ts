@@ -250,6 +250,159 @@ function hdriCommit(): Plugin {
 }
 
 /**
+ * Dev-only endpoints for the audio editor (issue #51).
+ *
+ *   POST /__audio/commit?level=<slug>   body: audio.json (sparse override)
+ *   POST /__audio/upload?level=<slug>&filename=<name>   body: WAV/MP3/OGG bytes
+ *
+ * Slug-scoped on read AND write (P55) — the boot-time XHR in audioLive.ts
+ * fetches /levels/<slug>/audio.json, so commit must target the same path
+ * or the editor's edits would silently land on the wrong level.
+ *
+ * Commit writes a JSON file. Upload writes the binary into a slug-local
+ * audio/ directory + returns a public URL the editor can drop into a
+ * loop/event's `src` field. Body is content-hashed so re-uploading the
+ * same sample is a no-op (matches hdriCommit).
+ *
+ * Slug whitelist via `levelGlbPath()` — same guard the other commit
+ * endpoints use. A malformed query can't create directories outside the
+ * level set on disk.
+ */
+function audioCommit(): Plugin {
+  return {
+    name: 'audio-commit',
+    configureServer(server) {
+      server.middlewares.use('/__audio/commit', async (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: 'POST only' }))
+          return
+        }
+        try {
+          const url = new URL(req.url ?? '', 'http://x')
+          const slug = url.searchParams.get('level')
+          if (!slug || !levelGlbPath(slug)) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: `unknown or missing level slug: ${slug ?? '(none)'}` }))
+            return
+          }
+          const targetPath = path.resolve(__dirname, 'public', 'levels', slug, 'audio.json')
+          const chunks: Buffer[] = []
+          for await (const chunk of req) chunks.push(chunk as Buffer)
+          const body = Buffer.concat(chunks).toString('utf8')
+          const parsed: unknown = JSON.parse(body)
+          const pretty = JSON.stringify(parsed, null, 2) + '\n'
+          await fs.promises.writeFile(targetPath, pretty, 'utf8')
+          res.statusCode = 200
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: true, level: slug, path: `public/levels/${slug}/audio.json` }))
+        } catch (err) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: String(err) }))
+        }
+      })
+
+      // /__audio/peaks?src=<registry-shape-path>  body: { peaks: number[], duration, sampleRate }
+      // Writes a sidecar `<src>.peaks.json` next to the sample so the
+      // editor can render the waveform without redecoding the buffer
+      // on every selection. Whitelisted prefixes:
+      //   levels/<slug>/audio/...  (per-level uploaded samples)
+      //   audio/...                (global registry samples)
+      // Anything else is rejected — we don't want a malformed query
+      // touching arbitrary files under public/.
+      server.middlewares.use('/__audio/peaks', async (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: 'POST only' }))
+          return
+        }
+        try {
+          const url = new URL(req.url ?? '', 'http://x')
+          const src = url.searchParams.get('src') ?? ''
+          // Reject path-traversal + restrict to known prefixes.
+          if (src.includes('..') || (!src.startsWith('audio/') && !/^levels\/lvl_\d+\/audio\//.test(src))) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: `invalid src: ${src}` }))
+            return
+          }
+          const chunks: Buffer[] = []
+          for await (const chunk of req) chunks.push(chunk as Buffer)
+          const body = Buffer.concat(chunks).toString('utf8')
+          const parsed: unknown = JSON.parse(body)
+          const targetPath = path.resolve(__dirname, 'public', `${src}.peaks.json`)
+          await fs.promises.mkdir(path.dirname(targetPath), { recursive: true })
+          await fs.promises.writeFile(targetPath, JSON.stringify(parsed) + '\n', 'utf8')
+          res.statusCode = 200
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: true, path: `public/${src}.peaks.json` }))
+        } catch (err) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: String(err) }))
+        }
+      })
+
+      server.middlewares.use('/__audio/upload', async (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: 'POST only' }))
+          return
+        }
+        try {
+          const url = new URL(req.url ?? '', 'http://x')
+          const slug = url.searchParams.get('level')
+          const filename = url.searchParams.get('filename') ?? ''
+          if (!slug || !levelGlbPath(slug)) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: `unknown or missing level slug: ${slug ?? '(none)'}` }))
+            return
+          }
+          const ext = filename.toLowerCase().match(/\.(wav|mp3|ogg|flac)$/)?.[1]
+          if (!ext) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: 'filename must end in .wav / .mp3 / .ogg / .flac' }))
+            return
+          }
+          const chunks: Buffer[] = []
+          for await (const chunk of req) chunks.push(chunk as Buffer)
+          const body = Buffer.concat(chunks)
+          const hash = crypto.createHash('sha256').update(body).digest('hex').slice(0, 8)
+          // Sanitise the user-supplied filename to a slug-safe stem; keep the
+          // original spelling visible in the on-disk name for human grokability.
+          const stem = filename.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 40) || 'sample'
+          const outName = `${stem}-${hash}.${ext}`
+          const dir = path.resolve(__dirname, 'public', 'levels', slug, 'audio')
+          await fs.promises.mkdir(dir, { recursive: true })
+          await fs.promises.writeFile(path.join(dir, outName), body)
+          res.statusCode = 200
+          res.setHeader('Content-Type', 'application/json')
+          // Return a registry-shape `src` (public-relative, no leading slash)
+          // — bus.ts:loadBuffer adds the slash on its end.
+          res.end(JSON.stringify({
+            ok: true,
+            level: slug,
+            src: `levels/${slug}/audio/${outName}`,
+            filename,
+          }))
+        } catch (err) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: String(err) }))
+        }
+      })
+    },
+  }
+}
+
+/**
  * Rewrite a GLB so the terrain mesh's COLOR_0/1/2 accessors carry the given
  * names ("grass", "flowers", "colliders"). Three.js's GLTFExporter doesn't
  * write BufferAttribute.name to accessor.name; Blender's glTF importer
@@ -495,5 +648,5 @@ function activeLevelBeacon(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), dioramaHotReload(), settingsCommit(), maskCommit(), hdriCommit(), dioramaCommit(), activeLevelBeacon()],
+  plugins: [react(), dioramaHotReload(), settingsCommit(), maskCommit(), hdriCommit(), dioramaCommit(), audioCommit(), activeLevelBeacon()],
 })

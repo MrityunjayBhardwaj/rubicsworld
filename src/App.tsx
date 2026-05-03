@@ -111,12 +111,23 @@ interface AppProps {
    *  no Leva chrome, no dev tools, no preview modes. Settings panels
    *  (HDRI / Audio / Grass) stay mounted-but-hidden so their useControls
    *  side effects (mask rasterisation, HDRI selection, audio bus init)
-   *  still shape the scene. */
-  route?: 'dev' | 'game'
+   *  still shape the scene.
+   *
+   *  'audio-edit' = inside `/edit/levels/<slug>/audio` (issue #51). Same
+   *  chrome-hidden behavior as 'game' (audio editor owns its own UI on
+   *  the left), but the Canvas is wrapped in a fixed-positioned div that
+   *  reads `--audio-editor-canvas-left` from the document root so the
+   *  splitter can drag the boundary. Without this, R3F's default 100vw
+   *  Canvas overlaps the workspace panel. */
+  route?: 'dev' | 'game' | 'audio-edit'
 }
 
 export default function App({ route = 'dev' }: AppProps) {
   const isGame = route === 'game'
+  const isAudioEdit = route === 'audio-edit'
+  // Treat audio-edit like game for chrome decisions — hide Leva, hide
+  // dev-only HUD. Canvas wrapping is handled separately below.
+  const noChrome = isGame || isAudioEdit
   const [preview, setPreview] = useState<false | 'grid' | 'split' | 'cube' | 'rubik'>(false)
   const [bezier, setBezier] = useState({ cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 })
   const onBezierChange = useCallback((cx1: number, cy1: number, cx2: number, cy2: number) => {
@@ -195,7 +206,7 @@ export default function App({ route = 'dev' }: AppProps) {
           overflowX: 'hidden',     // resize handle still works with non-visible overflow
           overflowY: 'auto',       // vertical scroll when Audio panel rows expand past viewport
           zIndex: 1000,
-          display: (levaHidden || isGame) ? 'none' : 'block',
+          display: (levaHidden || noChrome) ? 'none' : 'block',
         }}
       >
         {/* On /game/ Leva itself stays mounted (with hidden=true and the
@@ -208,24 +219,38 @@ export default function App({ route = 'dev' }: AppProps) {
             on screen. Pure dev-only UI (Controls, BezierCurveEditor,
             TileLabelsLegend, FpsMeter) stays gated below — they're not
             settings, they're dev tools. */}
-        <Leva fill hidden={levaHidden || isGame} />
+        <Leva fill hidden={levaHidden || noChrome} />
       </div>
-      {!isGame && <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />}
+      {!noChrome && <Controls dioramaPreview={preview} setDioramaPreview={setPreview} />}
       <Cursor />
-      {!isGame && <TileLabelsLegend />}
+      {!noChrome && <TileLabelsLegend />}
       {/* HDRIPanel mounts its OWN fixed-position div (not inside Leva), so
           hiding Leva chrome doesn't hide it. Wrap with display:none on
           /game/ so the useControls schema registration + side effects
           still run (HDRI selection, image upload callback) — only the
           visible panel chrome is hidden. */}
-      <div style={{ display: isGame ? 'none' : 'contents' }}>
+      <div style={{ display: noChrome ? 'none' : 'contents' }}>
         <HDRIPanel />
       </div>
       {!preview && <AudioPanel />}
       {!preview && <GrassPanel />}
-      {!isGame && !preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
+      {!noChrome && !preview && <BezierCurveEditor {...bezier} onChange={onBezierChange} />}
       <TutorialChrome />
-      {!isGame && <FpsMeter />}
+      {!noChrome && <FpsMeter />}
+      {/* Audio-edit route wraps the Canvas in a fixed-positioned div whose
+          left edge tracks `--audio-editor-canvas-left` (set by the editor's
+          splitter component on document.documentElement). Without this,
+          R3F's default 100vw Canvas overlaps the workspace panel. The
+          Canvas inherits its parent's box, so position:fixed with explicit
+          left/right/top/bottom is what constrains it. */}
+      <div
+        style={isAudioEdit ? {
+          position: 'fixed',
+          top: 0, right: 0, bottom: 0,
+          left: 'var(--audio-editor-canvas-left, 480px)',
+          overflow: 'hidden',
+        } : { display: 'contents' }}
+      >
       <Canvas
         camera={{
           position: isTopDownPreview ? [0, 22, 0.1] : isRubik ? [3.2, 2.2, 3.2] : [2.4, 1.6, 2.8],
@@ -314,6 +339,7 @@ export default function App({ route = 'dev' }: AppProps) {
           <SphereCamera />
         )}
       </Canvas>
+      </div>
       {isGame && <MenuOverlay />}
       {isGame && <StatsOverlay />}
       {isGame && <Stopwatch />}

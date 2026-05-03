@@ -5,6 +5,7 @@ import App from './App.tsx'
 import { DOFTest } from './DOFtest.tsx'
 import { GrassTest } from './GrassTest.tsx'
 import { BakeRoute } from './BakeRoute.tsx'
+import AudioEditorRoute from './AudioEditorRoute.tsx'
 import { FluidTest } from './FluidTest.tsx'
 import { usePlanet } from './world/store.ts'
 import { getPlanet } from './world/planetManifest.ts'
@@ -26,6 +27,11 @@ import { getPlanet } from './world/planetManifest.ts'
 //                                  the URL so TileGrid + bake commits hit
 //                                  that slot, with glb hot-reload watching
 //                                  it. Falls back to lvl_1 if slug unknown.
+//   /edit/levels/lvl_<N>/audio   → audio editor (issue #51). Splits the
+//                                  viewport: AudioWorkspace left, live App
+//                                  canvas right. App's audio-edit route
+//                                  hides Leva chrome and constrains the
+//                                  Canvas via --audio-editor-canvas-left.
 //   else                         → full app (dev playground with all panels)
 const path = typeof window !== 'undefined' ? window.location.pathname.toLowerCase() : ''
 const isDofTest   = path.startsWith('/doftest')
@@ -33,6 +39,10 @@ const isGrassTest = path.startsWith('/grasstest')
 const isBake      = path.startsWith('/bake')
 const isFluid     = path.startsWith('/fluid')
 const isGame      = path.startsWith('/game')
+// /edit/levels/<slug>/audio — audio editor takes precedence over the
+// generic /edit/levels/ playground gate below; the slug pre-set still
+// runs for both so TileGrid + audioLive boot point at the same level.
+const isAudioEdit = /^\/edit\/levels\/lvl_\d+\/audio\/?$/.test(path)
 
 // /edit/levels/lvl_<N>/ — extract level slug from URL and pre-set the store
 // before App mounts. This fires before any consumer reads currentPlanetSlug,
@@ -55,6 +65,7 @@ createRoot(document.getElementById('root')!).render(
       ? <BakeRoute />
       : isFluid ? <FluidTest />
       : isDofTest ? <DOFTest /> : isGrassTest ? <GrassTest />
+      : isAudioEdit ? <AudioEditorRoute />
       : <App route={isGame ? 'game' : 'dev'} />}
   </StrictMode>,
 )

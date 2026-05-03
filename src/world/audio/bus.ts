@@ -7,9 +7,9 @@
 // registered yet; modulator tick; master/category mute & volume.
 
 import * as THREE from 'three'
-import registryJson from './registry.json'
 import { SYNTHS, SYNTH_LOOPS, type SynthLoopHandle } from './synth'
 import { cubeNetToSphere } from './sphereProject'
+import { useLastTriggered } from './lastTriggered'
 
 export type AnchorRef = 'world' | 'camera_motion' | `object:${string}`
 
@@ -25,7 +25,18 @@ export interface ParamSpec {
   min?: number
   max?: number
   invert?: boolean
+  // Filter resonance — only meaningful for lowpass/highpass/bandpass
+  // params. Default 0.7 (transparent in lowpass, gentle peak in
+  // bandpass). Higher Q = narrower filter, more emphasis at cutoff.
+  // Read at applyParams time so the editor's Q slider takes effect on
+  // next tick without rebuilding the BiquadFilter.
+  q?: number
 }
+
+// Re-export so the editor can construct/mutate specs without poking the
+// shape via 'any'. ParamSpec was already exported above; this is just a
+// readability anchor for downstream editor code.
+export type { ParamSpec as LoopParamSpec }
 
 /**
  * Volume envelope baked from a Blender Speaker's keyframed `.volume`
@@ -73,6 +84,12 @@ export interface EventDef {
   anchor: AnchorRef
   src: string                // 'synth:<name>' or 'audio/<file>.ogg'
   pitchJitter?: number       // ± playbackRate variation for sample one-shots
+  // Maximum simultaneous voices. Each new play() while at the cap
+  // stops the OLDEST source (FIFO voice stealing), so the texture stays
+  // tidy even when triggers fire faster than the sample's duration.
+  // Undefined = unlimited (legacy behaviour). Sample events only —
+  // synth: voices ignore this for now (they're fire-and-forget).
+  polyphony?: number
 }
 export interface Registry {
   loops: LoopDef[]
@@ -81,7 +98,18 @@ export interface Registry {
 
 export type Category = 'master' | 'ambient' | 'sfx'
 
-export const REGISTRY = registryJson as unknown as Registry
+// Live mirror — same shape as registry.json, but with per-level overrides
+// merged in at boot AND mutable at runtime so the audio editor (issue #51)
+// can adjust params/swap samples and have the bus pick changes up on the
+// next tick. External consumers (panels, audioSettings) keep importing
+// REGISTRY; the alias keeps that surface stable.
+//
+// Circular-import guard: bus.ts → audioLive.ts → bus.ts (for the Registry
+// type). Type-only re-import means no runtime cycle. The runtime value
+// (`audioLive`) is read on demand below, so the import resolves after both
+// modules' bodies have finished.
+import { audioLive } from './audioLive'
+export const REGISTRY: Registry = audioLive
 
 type Modulator = () => number
 
@@ -232,6 +260,9 @@ class AudioBus {
   // the reach in real time.
   private loopOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean; radius?: number }>()
   private eventOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean }>()
+  // Active BufferSourceNodes per event key. Pushed on play(), removed on
+  // 'ended'. Polyphony cap enforced by stopping voices[0] (oldest first).
+  private activeEventSources = new Map<string, AudioBufferSourceNode[]>()
   // Slice-rotation rumble: target (0|1) is set by subscriptions.ts when
   // drag||anim transitions; tick() smooths the actual value with separate
   // attack/release rates so the rumble fades in/out rather than snapping.
@@ -444,6 +475,45 @@ class AudioBus {
     this.modulators.set(name, fn)
   }
 
+  /** Names of every registered modulator. Used by the audio editor's
+   *  param dropdown to populate "what can I bind this param to?" */
+  listModulatorNames(): string[] {
+    return Array.from(this.modulators.keys()).sort()
+  }
+
+  /** Live-edit a param spec on a loop. Bypasses registerLoop's teardown
+   *  (no node-detach, no buffer reload) — applyParams picks up the new
+   *  spec on its next tick, so dragging base/min/max in the editor
+   *  produces a smooth audible sweep without pops.
+   *
+   *  Mutates BOTH the runtime def (what applyParams reads) AND the
+   *  audioLive entry (what the Commit button bakes into audio.json),
+   *  so the two never drift mid-session.
+   */
+  setLoopParamSpec(key: string, name: string, spec: ParamSpec) {
+    const lr = this.loops.get(key)
+    if (lr) {
+      lr.def.params = { ...(lr.def.params ?? {}), [name]: { ...spec } }
+    }
+    // audioLive is the editor's commit source; keep it in sync. Search
+    // both static loops + runtimeLoops so glb-imported KHR_audio_emitter
+    // entries also accept edits.
+    const live = audioLive.loops.find(l => l.key === key)
+    if (live) {
+      live.params = { ...(live.params ?? {}), [name]: { ...spec } }
+    } else {
+      const rt = this.runtimeLoops.get(key)
+      if (rt) rt.params = { ...(rt.params ?? {}), [name]: { ...spec } }
+    }
+  }
+
+  /** Read the current runtime def for a loop. Editor uses this to
+   *  populate sliders with what applyParams is actually using right
+   *  now (post any setLoopParamSpec edits). */
+  getLoopRuntimeDef(key: string): LoopDef | undefined {
+    return this.loops.get(key)?.def
+  }
+
   setWindStrengthSource(fn: () => number) {
     this.windStrengthGetter = fn
   }
@@ -549,6 +619,11 @@ class AudioBus {
     if (!def) return
     const ovr = this.eventOverrides.get(key)
     if (ovr?.mute) return
+    // Publish to the audio editor's left-panel selector. Fires before the
+    // mute-gate would also publish silenced triggers — but mute is editor-
+    // owned, and a silenced trigger still represents an interaction the
+    // user wants to see. Net: publish unconditionally on a known def.
+    useLastTriggered.getState().publish(key)
     const ctx = this.listener?.context
     if (!ctx || !this.sfxGain) return
     // Resume the context if the browser auto-suspended it (autoplay policy).
@@ -579,6 +654,18 @@ class AudioBus {
     // (most useful for footsteps); user-set speed override multiplies on top.
     void this.loadBuffer(def.src).then(buf => {
       if (!this.sfxGain) return
+      // Polyphony gate — if at the cap, stop the oldest active voice
+      // BEFORE adding the new one. Stopping triggers the 'ended' handler
+      // below which prunes the list, but we explicitly shift here too so
+      // the slot is free synchronously.
+      if (def.polyphony != null && def.polyphony >= 1) {
+        const list = this.activeEventSources.get(key) ?? []
+        while (list.length >= def.polyphony) {
+          const old = list.shift()
+          if (old) { try { old.stop() } catch { /* ignore — already ended */ } }
+        }
+        this.activeEventSources.set(key, list)
+      }
       const src = ctx.createBufferSource()
       src.buffer = buf
       let rate = speedMul
@@ -591,11 +678,30 @@ class AudioBus {
         ? (() => { const g = ctx.createGain(); g.gain.value = volMul; g.connect(this.sfxGain!); return g })()
         : this.sfxGain
       src.connect(dst)
+      // Track + auto-remove. 'ended' fires on natural finish AND on
+      // explicit .stop() — same handler covers both paths.
+      const list = this.activeEventSources.get(key) ?? []
+      list.push(src)
+      this.activeEventSources.set(key, list)
+      src.addEventListener('ended', () => {
+        const cur = this.activeEventSources.get(key)
+        if (!cur) return
+        const idx = cur.indexOf(src)
+        if (idx >= 0) cur.splice(idx, 1)
+      })
       src.start()
     }).catch(err => {
       // eslint-disable-next-line no-console
       console.warn('[audio] failed to load event sample', def.src, err)
     })
+  }
+
+  /** Public wrapper around loadBuffer — the audio editor needs the
+   *  decoded AudioBuffer to compute waveform peaks (#52). Reuses the
+   *  buffer cache, so calling this from the editor doesn't re-decode
+   *  samples that are already loaded for runtime playback. */
+  loadSampleBuffer(src: string): Promise<AudioBuffer> {
+    return this.loadBuffer(src)
   }
 
   private loadBuffer(src: string): Promise<AudioBuffer> {
@@ -693,10 +799,14 @@ class AudioBus {
       }
 
       // Filter params (lowpass / highpass / bandpass) — smooth-sweep the
-      // sample-loop's BiquadFilter, OR a synth-exposed AudioParam.
+      // sample-loop's BiquadFilter, OR a synth-exposed AudioParam. Q
+      // updates apply on the same tick — bus reads spec.q each frame so
+      // the editor's slider is heard immediately, with the same smoothSet
+      // ramp as frequency to avoid zipper noise on rapid drags.
       const filt = lr.filters?.[name]
       if (filt) {
         smoothSet(filt.frequency, value, ctx, SMOOTH_HORIZON_FILT)
+        if (spec.q != null) smoothSet(filt.Q, spec.q, ctx, SMOOTH_HORIZON_FILT)
         continue
       }
       const ap = lr.synth?.params?.[name]
