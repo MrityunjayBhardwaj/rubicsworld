@@ -78,6 +78,12 @@ export interface EventDef {
   anchor: AnchorRef
   src: string                // 'synth:<name>' or 'audio/<file>.ogg'
   pitchJitter?: number       // ± playbackRate variation for sample one-shots
+  // Maximum simultaneous voices. Each new play() while at the cap
+  // stops the OLDEST source (FIFO voice stealing), so the texture stays
+  // tidy even when triggers fire faster than the sample's duration.
+  // Undefined = unlimited (legacy behaviour). Sample events only —
+  // synth: voices ignore this for now (they're fire-and-forget).
+  polyphony?: number
 }
 export interface Registry {
   loops: LoopDef[]
@@ -248,6 +254,9 @@ class AudioBus {
   // the reach in real time.
   private loopOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean; radius?: number }>()
   private eventOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean }>()
+  // Active BufferSourceNodes per event key. Pushed on play(), removed on
+  // 'ended'. Polyphony cap enforced by stopping voices[0] (oldest first).
+  private activeEventSources = new Map<string, AudioBufferSourceNode[]>()
   // Slice-rotation rumble: target (0|1) is set by subscriptions.ts when
   // drag||anim transitions; tick() smooths the actual value with separate
   // attack/release rates so the rumble fades in/out rather than snapping.
@@ -639,6 +648,18 @@ class AudioBus {
     // (most useful for footsteps); user-set speed override multiplies on top.
     void this.loadBuffer(def.src).then(buf => {
       if (!this.sfxGain) return
+      // Polyphony gate — if at the cap, stop the oldest active voice
+      // BEFORE adding the new one. Stopping triggers the 'ended' handler
+      // below which prunes the list, but we explicitly shift here too so
+      // the slot is free synchronously.
+      if (def.polyphony != null && def.polyphony >= 1) {
+        const list = this.activeEventSources.get(key) ?? []
+        while (list.length >= def.polyphony) {
+          const old = list.shift()
+          if (old) { try { old.stop() } catch { /* ignore — already ended */ } }
+        }
+        this.activeEventSources.set(key, list)
+      }
       const src = ctx.createBufferSource()
       src.buffer = buf
       let rate = speedMul
@@ -651,6 +672,17 @@ class AudioBus {
         ? (() => { const g = ctx.createGain(); g.gain.value = volMul; g.connect(this.sfxGain!); return g })()
         : this.sfxGain
       src.connect(dst)
+      // Track + auto-remove. 'ended' fires on natural finish AND on
+      // explicit .stop() — same handler covers both paths.
+      const list = this.activeEventSources.get(key) ?? []
+      list.push(src)
+      this.activeEventSources.set(key, list)
+      src.addEventListener('ended', () => {
+        const cur = this.activeEventSources.get(key)
+        if (!cur) return
+        const idx = cur.indexOf(src)
+        if (idx >= 0) cur.splice(idx, 1)
+      })
       src.start()
     }).catch(err => {
       // eslint-disable-next-line no-console

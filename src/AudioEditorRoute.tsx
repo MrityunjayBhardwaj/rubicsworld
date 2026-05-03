@@ -12,6 +12,10 @@ import { ALL_TRIGGERS } from './world/audio/triggers'
  *  the set if it lived in component state. */
 const editedParamKeys = new Set<string>()
 
+/** Event keys whose persistent fields (polyphony, etc) have been edited.
+ *  Commit emits the full event def for these. */
+const editedEventKeys = new Set<string>()
+
 /** Filter-type params the editor knows how to add. Bus already wires
  *  BiquadFilters for these names (#54). */
 const FILTER_TYPES = ['lowpass', 'highpass', 'bandpass'] as const
@@ -839,11 +843,23 @@ function EventOverrides({ entry }: { entry: EventDef }) {
     audioBus.setEventOverride(entry.key, next)
     force(x => x + 1)
   }
+  // Polyphony lives on the EventDef (persistent), not in overrides
+  // (ephemeral). Mutate the audioLive entry directly — bus reads
+  // def.polyphony each play() call so the change is picked up next
+  // trigger without a registerEvent equivalent.
+  const setPolyphony = (v: number) => {
+    entry.polyphony = v >= 16 ? undefined : v   // 16 = "unlimited" sentinel
+    editedEventKeys.add(entry.key)
+    force(x => x + 1)
+  }
+  // 0..15 maps to 1..15 voices; 16 maps to "unlimited" (undefined).
+  const polySliderValue = entry.polyphony ?? 16
   return (
     <div>
       <Slider label="Volume mul" value={ovr.vol ?? 1} min={0} max={2} step={0.01} onChange={v => set({ vol: v })} />
       <Slider label="Speed mul"  value={ovr.speed ?? 1} min={0.25} max={2} step={0.01} onChange={v => set({ speed: v })} />
       <Toggle label="Mute" value={ovr.mute ?? false} onChange={v => set({ mute: v })} />
+      <PolyphonySlider value={polySliderValue} onChange={setPolyphony} />
       <button
         style={{ ...btn, marginTop: 8 }}
         onClick={() => audioBus.play(entry.key)}
@@ -851,6 +867,30 @@ function EventOverrides({ entry }: { entry: EventDef }) {
         ▶ Audition
       </button>
     </div>
+  )
+}
+
+/** Sample event polyphony. 1..15 voices, or unlimited at 16. Sample
+ *  events only — synth voices are fire-and-forget today (#57 follow-up
+ *  could add tracking by wrapping the gain node). */
+function PolyphonySlider({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const display = value >= 16 ? '∞' : String(value)
+  return (
+    <label style={{ display: 'block', marginBottom: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 2 }}>
+        <span style={{ opacity: 0.7 }}>polyphony</span>
+        <span style={{ fontFamily: 'ui-monospace, monospace', opacity: 0.9 }}>{display}</span>
+      </div>
+      <input
+        type="range"
+        min={1}
+        max={16}
+        step={1}
+        value={value}
+        onChange={e => onChange(Number(e.target.value))}
+        style={{ width: '100%', accentColor: '#4a8eef' }}
+      />
+    </label>
   )
 }
 
@@ -952,8 +992,13 @@ function buildSparseAudioJson(): { loops?: LoopDef[]; events?: EventDef[] } {
   const events: EventDef[] = []
   for (const def of audioLive.events) {
     const ovr = audioBus.getEventOverride(def.key)
-    if (!ovr || (ovr.vol == null && ovr.speed == null && !ovr.mute)) continue
-    events.push({ key: def.key, anchor: def.anchor, src: def.src, pitchJitter: def.pitchJitter })
+    const hasOverride = ovr && (ovr.vol != null || ovr.speed != null || ovr.mute)
+    const hasFieldEdit = editedEventKeys.has(def.key)
+    if (!hasOverride && !hasFieldEdit) continue
+    const baked: EventDef = { key: def.key, anchor: def.anchor, src: def.src }
+    if (def.pitchJitter != null) baked.pitchJitter = def.pitchJitter
+    if (def.polyphony != null) baked.polyphony = def.polyphony
+    events.push(baked)
   }
   if (events.length) out.events = events
 
