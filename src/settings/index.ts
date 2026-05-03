@@ -19,7 +19,17 @@ import { PLANETS, getPlanet } from '../world/planetManifest'
  * at globals.
  */
 
-export type Settings = typeof defaultsJson
+type RawDefaults = typeof defaultsJson
+// `customPath` / `customFilename` are `null` in defaults.json — JSON literal
+// inference narrows to the `null` type, but at runtime hdriStore round-trips
+// a real path string when a user uploads a custom HDRI. Widen here so capture
+// + level-override layers type-check.
+export type Settings = Omit<RawDefaults, 'hdri'> & {
+  hdri: Omit<RawDefaults['hdri'], 'customPath' | 'customFilename'> & {
+    customPath: string | null
+    customFilename: string | null
+  }
+}
 
 function deepClone<T>(v: T): T { return JSON.parse(JSON.stringify(v)) as T }
 
@@ -215,6 +225,9 @@ export async function captureLiveSettings(): Promise<Settings> {
     // capture called pre-canvas) postfxLive still holds the JSON defaults
     // because it's seeded from settings.postfx at module init.
     postfx: safeSection('postfx', () => ({ ...postfxLive })),
+    walk: safeSection('walk', () => ({
+      playerHeight: settings.walk.playerHeight,
+    })),
   }
 }
 
