@@ -51,10 +51,25 @@ export interface VolumeEnvelope {
   samples: number[]
 }
 
+/**
+ * Per-play amplitude envelope. Attack/decay/release in milliseconds,
+ * sustain is the 0..1 hold level. Authored in the audio editor; emitted
+ * to per-level audio.json for sample events. Currently wired for sample
+ * EventDef plays only — LoopDef carries the field for forward-compat
+ * (continuous loops have no natural release trigger today).
+ */
+export interface ADSR {
+  attack: number   // ms
+  decay: number    // ms
+  sustain: number  // 0..1
+  release: number  // ms
+}
+
 export interface LoopDef {
   key: string
   anchor: AnchorRef
   src: string
+  adsr?: ADSR
   // New shape: per-param bindings. Common keys:
   //   `vol`     — volume (sample loops via setVolume; synth 2D via synthGain;
   //               synth POSITIONAL via positional setVolume)
@@ -84,6 +99,11 @@ export interface EventDef {
   anchor: AnchorRef
   src: string                // 'synth:<name>' or 'audio/<file>.ogg'
   pitchJitter?: number       // ± playbackRate variation for sample one-shots
+  gainJitter?: number        // ± gain variation per play (0..1)
+  // Per-play amplitude envelope. Sample events only — synth voices manage
+  // their own envelopes inside the synth fn. Voice-stealing fires the
+  // release ramp instead of stopping abruptly.
+  adsr?: ADSR
   // Maximum simultaneous voices. Each new play() while at the cap
   // stops the OLDEST source (FIFO voice stealing), so the texture stays
   // tidy even when triggers fire faster than the sample's duration.
@@ -263,6 +283,10 @@ class AudioBus {
   // Active BufferSourceNodes per event key. Pushed on play(), removed on
   // 'ended'. Polyphony cap enforced by stopping voices[0] (oldest first).
   private activeEventSources = new Map<string, AudioBufferSourceNode[]>()
+  // Per-source ADSR sidecar: the per-play GainNode that holds the envelope
+  // automation, plus the release time in seconds. Voice-stealing reads
+  // releaseSec to schedule a fade instead of an abrupt stop.
+  private eventAdsrInfo = new WeakMap<AudioBufferSourceNode, { gain: GainNode; releaseSec: number }>()
   // Slice-rotation rumble: target (0|1) is set by subscriptions.ts when
   // drag||anim transitions; tick() smooths the actual value with separate
   // attack/release rates so the rumble fades in/out rather than snapping.
@@ -654,15 +678,16 @@ class AudioBus {
     // (most useful for footsteps); user-set speed override multiplies on top.
     void this.loadBuffer(def.src).then(buf => {
       if (!this.sfxGain) return
-      // Polyphony gate — if at the cap, stop the oldest active voice
-      // BEFORE adding the new one. Stopping triggers the 'ended' handler
-      // below which prunes the list, but we explicitly shift here too so
-      // the slot is free synchronously.
+      // Polyphony gate — if at the cap, evict the oldest active voice
+      // BEFORE adding the new one. With ADSR present we trigger the
+      // release ramp on the old voice; without ADSR we stop immediately.
+      // 'ended' fires once src.stop completes either way, so the list
+      // self-prunes — we also shift here so the slot is synchronously free.
       if (def.polyphony != null && def.polyphony >= 1) {
         const list = this.activeEventSources.get(key) ?? []
         while (list.length >= def.polyphony) {
           const old = list.shift()
-          if (old) { try { old.stop() } catch { /* ignore — already ended */ } }
+          if (old) this.releaseAndStop(old)
         }
         this.activeEventSources.set(key, list)
       }
@@ -674,10 +699,51 @@ class AudioBus {
         rate *= 1 - j + Math.random() * (2 * j)
       }
       src.playbackRate.value = rate
-      const dst: AudioNode = volMul !== 1
-        ? (() => { const g = ctx.createGain(); g.gain.value = volMul; g.connect(this.sfxGain!); return g })()
-        : this.sfxGain
-      src.connect(dst)
+      let voiceVol = volMul
+      if (def.gainJitter && def.gainJitter > 0) {
+        const j = Math.min(1, def.gainJitter)
+        voiceVol *= Math.max(0, 1 - j + Math.random() * (2 * j))
+      }
+      // Per-play graph:
+      //   src → [adsrGain?] → [voiceGain?] → sfxGain
+      // adsrGain is only inserted when adsr is set (idle-default = no node,
+      // identical to legacy path). voiceGain only inserted when voiceVol≠1
+      // (matches prior behaviour to keep the unmodulated graph small).
+      const adsr = def.adsr
+      let adsrGain: GainNode | null = null
+      const now = ctx.currentTime
+      if (adsr) {
+        adsrGain = ctx.createGain()
+        const A = Math.max(0.001, (adsr.attack ?? 0) / 1000)
+        const D = Math.max(0, (adsr.decay ?? 0) / 1000)
+        const S = Math.max(0, Math.min(1, adsr.sustain ?? 1))
+        const R = Math.max(0.001, (adsr.release ?? 0) / 1000)
+        const effDur = buf.duration / Math.max(0.0001, rate)
+        const g = adsrGain.gain
+        g.setValueAtTime(0, now)
+        g.linearRampToValueAtTime(1, now + A)
+        g.linearRampToValueAtTime(S, now + A + D)
+        // Schedule release so the voice tails to silence right at
+        // effective end-of-buffer. If A+D leaves no room for R, push the
+        // release start to the latest moment that still fits.
+        const releaseStart = Math.max(now + A + D, now + Math.max(0, effDur - R))
+        g.setValueAtTime(S, releaseStart)
+        g.linearRampToValueAtTime(0, releaseStart + R)
+        this.eventAdsrInfo.set(src, { gain: adsrGain, releaseSec: R })
+      }
+      let dst: AudioNode = this.sfxGain
+      if (voiceVol !== 1) {
+        const vg = ctx.createGain()
+        vg.gain.value = voiceVol
+        vg.connect(this.sfxGain)
+        dst = vg
+      }
+      if (adsrGain) {
+        adsrGain.connect(dst)
+        src.connect(adsrGain)
+      } else {
+        src.connect(dst)
+      }
       // Track + auto-remove. 'ended' fires on natural finish AND on
       // explicit .stop() — same handler covers both paths.
       const list = this.activeEventSources.get(key) ?? []
@@ -702,6 +768,26 @@ class AudioBus {
    *  samples that are already loaded for runtime playback. */
   loadSampleBuffer(src: string): Promise<AudioBuffer> {
     return this.loadBuffer(src)
+  }
+
+  /** Stop a per-play sample event with ADSR-aware fade. If the voice has
+   *  an ADSR gain, cancel pending automation, ramp the current value to
+   *  0 over `releaseSec`, then defer src.stop until the ramp completes.
+   *  Without ADSR, falls back to immediate stop (legacy behaviour). */
+  private releaseAndStop(src: AudioBufferSourceNode) {
+    const info = this.eventAdsrInfo.get(src)
+    const ctx = this.listener?.context
+    if (!info || !ctx) {
+      try { src.stop() } catch { /* already ended */ }
+      return
+    }
+    const now = ctx.currentTime
+    const g = info.gain.gain
+    const p = g as AudioParam & { cancelAndHoldAtTime?: (t: number) => AudioParam }
+    if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(now)
+    else g.cancelScheduledValues(now)
+    g.linearRampToValueAtTime(0, now + info.releaseSec)
+    try { src.stop(now + info.releaseSec) } catch { /* already ended */ }
   }
 
   private loadBuffer(src: string): Promise<AudioBuffer> {
