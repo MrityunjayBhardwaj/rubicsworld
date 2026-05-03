@@ -7,6 +7,7 @@ import { sphereDirToFlat } from './walkMask'
 import { isPointBlocked, updateDynamicColliders } from './colliderRefs'
 import { grassRefs } from '../diorama/buildGrass'
 import { audioBus } from './audio/bus'
+import { Trigger } from './audio/triggers'
 import { getPlayerHeight } from '../settings/levelSettings'
 
 /**
@@ -162,7 +163,7 @@ export function WalkControls() {
         // brings vertOffset back to zero on landing.
         if (vertOffsetRef.current <= 1e-4 && vertVelRef.current <= 1e-4) {
           vertVelRef.current = JUMP_SPEED
-          audioBus.play('jump')
+          audioBus.play(Trigger.Jump)
         }
         return
       }
@@ -305,7 +306,7 @@ export function WalkControls() {
       if (stepLen > 0 && vertOffsetRef.current < 1e-3) {
         distAccumRef.current += stepLen
         if (distAccumRef.current >= FOOTSTEP_DIST) {
-          audioBus.play('footstep')
+          audioBus.play(Trigger.Footstep)
           distAccumRef.current = 0
         }
       }

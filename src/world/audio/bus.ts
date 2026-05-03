@@ -7,9 +7,9 @@
 // registered yet; modulator tick; master/category mute & volume.
 
 import * as THREE from 'three'
-import registryJson from './registry.json'
 import { SYNTHS, SYNTH_LOOPS, type SynthLoopHandle } from './synth'
 import { cubeNetToSphere } from './sphereProject'
+import { useLastTriggered } from './lastTriggered'
 
 export type AnchorRef = 'world' | 'camera_motion' | `object:${string}`
 
@@ -81,7 +81,18 @@ export interface Registry {
 
 export type Category = 'master' | 'ambient' | 'sfx'
 
-export const REGISTRY = registryJson as unknown as Registry
+// Live mirror — same shape as registry.json, but with per-level overrides
+// merged in at boot AND mutable at runtime so the audio editor (issue #51)
+// can adjust params/swap samples and have the bus pick changes up on the
+// next tick. External consumers (panels, audioSettings) keep importing
+// REGISTRY; the alias keeps that surface stable.
+//
+// Circular-import guard: bus.ts → audioLive.ts → bus.ts (for the Registry
+// type). Type-only re-import means no runtime cycle. The runtime value
+// (`audioLive`) is read on demand below, so the import resolves after both
+// modules' bodies have finished.
+import { audioLive } from './audioLive'
+export const REGISTRY: Registry = audioLive
 
 type Modulator = () => number
 
@@ -549,6 +560,11 @@ class AudioBus {
     if (!def) return
     const ovr = this.eventOverrides.get(key)
     if (ovr?.mute) return
+    // Publish to the audio editor's left-panel selector. Fires before the
+    // mute-gate would also publish silenced triggers — but mute is editor-
+    // owned, and a silenced trigger still represents an interaction the
+    // user wants to see. Net: publish unconditionally on a known def.
+    useLastTriggered.getState().publish(key)
     const ctx = this.listener?.context
     if (!ctx || !this.sfxGain) return
     // Resume the context if the browser auto-suspended it (autoplay policy).
