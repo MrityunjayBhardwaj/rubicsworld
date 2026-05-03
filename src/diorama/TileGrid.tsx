@@ -69,7 +69,7 @@ const probe = {
 let probeLogLast = 0
 import { buildGrass, grassRefs } from './buildGrass'
 import { loadGlbDiorama } from './loadGlbDiorama'
-import { getCurrentPlanet } from '../world/planetManifest'
+import { getCurrentPlanet, PLANETS } from '../world/planetManifest'
 import { audioBus } from '../world/audio/bus'
 import { buildSphereVisibility, applySphereVisibility, restoreSphereVisibility, type SphereVisibility } from './sphereVisibility'
 import { buildBatchedDiorama, applyBatchVisibility, restoreBatchVisibility, type DioramaBatch } from './buildBatchedDiorama'
@@ -587,6 +587,18 @@ export function TileGrid({ mode = 'split', bezier }: {
 }) {
   const { gl, scene, camera } = useThree()
   const bz = bezier ?? { cx1: 0.25, cy1: 0.1, cx2: 0.75, cy2: 0.9 }
+  // Active level slug. Reading it as a hooks subscription means changing
+  // it (selectLevel from the menu, advancePlanet on solve, the /edit/
+  // route's pre-set, /__levels/active beacon) re-runs the loader effect
+  // below and swaps the glb. Without this, the effect resolves the URL
+  // once at first mount and stays pinned to PLANETS[0].
+  const currentPlanetSlug = usePlanet(s => s.currentPlanetSlug)
+  // Title screen always shows the default planet (lvl_1 / Country Land)
+  // as backdrop regardless of which level the player has saved as their
+  // current progression slot. Without this gate the menu would flash the
+  // last-played placeholder when returning from a deep-progression run,
+  // which reads as the menu glitching.
+  const gamePhase = usePlanet(s => s.gamePhase)
   const dioramaRef = useRef<DioramaScene | null>(null)
   const sphereVisRef = useRef<SphereVisibility | null>(null)
   const dioramaBatchRef = useRef<DioramaBatch | null>(null)
@@ -676,7 +688,14 @@ export function TileGrid({ mode = 'split', bezier }: {
     const isGameRoute = typeof window !== 'undefined' &&
       window.location.pathname.toLowerCase().startsWith('/game')
     const effectiveGlb = glbParam ?? (isGameRoute ? '1' : null)
-    const glbPath = effectiveGlb === '1' ? getCurrentPlanet().dioramaUrl : effectiveGlb
+    // On the /game/ title screen the visible planet is purely backdrop —
+    // pin it to the default slot regardless of saved progression. Begin
+    // / Select Level both flip gamePhase → 'playing', re-running this
+    // effect with the player's actual currentPlanetSlug.
+    const slugToRender = (isGameRoute && gamePhase === 'title')
+      ? PLANETS[0]!.slug
+      : currentPlanetSlug
+    const glbPath = effectiveGlb === '1' ? getCurrentPlanet(slugToRender).dioramaUrl : effectiveGlb
 
     // In sphere mode, terrain is rendered as a single global SphereGeometry
     // mesh (see globalTerrainScene below) — the flat "terrain" plane stays
@@ -883,15 +902,18 @@ export function TileGrid({ mode = 'split', bezier }: {
         swapCancelled = true
       }
 
-      // HMR hot-reload: Vite plugin fires `diorama:changed` when
-      // public/diorama.glb is rewritten (by the Blender addon's Live Mode).
-      // We refetch with a cache-bust query, swap scene in place — no page
-      // reload, so Leva knobs + camera angle + tutorial state all survive.
+      // HMR hot-reload: Vite plugin fires `diorama:changed` with a `slug`
+      // identifying which level was rewritten (Blender addon's Live Mode).
+      // Only swap if the change targets the level we're currently rendering
+      // — irrelevant changes to sibling level slots are skipped.
       // `fallbackMode='none'` → if the new file is briefly invalid (mid-
       // write race), keep the previous scene instead of dropping back to
       // imperative.
       if (import.meta.hot) {
-        const onDioramaChanged = ({ ts }: { ts: number }) => {
+        const onDioramaChanged = ({ slug, ts }: { slug?: string; ts: number }) => {
+          // Slug is optional for back-compat with anything that still emits
+          // the old shape. When present, gate on equality with current planet.
+          if (slug && slug !== slugToRender) return
           void swapInScene(`${glbPath}?t=${ts}`, 'none')
         }
         import.meta.hot.on('diorama:changed', onDioramaChanged)
@@ -1213,7 +1235,7 @@ export function TileGrid({ mode = 'split', bezier }: {
         }
       })
     }
-  }, [gl, mode])
+  }, [gl, mode, currentPlanetSlug, gamePhase])
 
   useFrame(({ clock }) => {
     const diorama = dioramaRef.current

@@ -1,5 +1,5 @@
 {
-  "$schema": "Single source of truth for default Leva / uniform values. Shapes here are consumed by both the panels (useControls value:) and the module-scope uniform defaults (grassUniforms, hdriStore) — so anywhere a value appears, it's sourced from THIS file and nowhere else. The 'Copy Settings' button in Leva serializes live state back into this exact shape; paste the output over this file to make a new default.",
+  "$schema": "Sparse per-level override. Layered on top of src/settings/defaults.json by src/settings/levelSettings.ts on level switch. Add only the fields this level wants to differ from globals; missing fields fall through to defaults.",
   "grass": {
     "visible": true,
     "density": 25,
@@ -44,8 +44,8 @@
     "envMapIntensity": 1,
     "roughnessBoost": 0,
     "fresnelEnabled": true,
-    "customPath": null,
-    "customFilename": null
+    "customPath": "/hdri/custom-bc3d6e3a.png",
+    "customFilename": "sky_38_2k.png"
   },
   "postfx": {
     "dofEnabled": true,
@@ -80,8 +80,5 @@
     "gradeBrightness": 0,
     "noiseEnabled": true,
     "noiseOpacity": 0.035
-  },
-  "walk": {
-    "playerHeight": 0.16
   }
 }

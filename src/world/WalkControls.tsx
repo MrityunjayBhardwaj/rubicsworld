@@ -7,6 +7,7 @@ import { sphereDirToFlat } from './walkMask'
 import { isPointBlocked, updateDynamicColliders } from './colliderRefs'
 import { grassRefs } from '../diorama/buildGrass'
 import { audioBus } from './audio/bus'
+import { getPlayerHeight } from '../settings/levelSettings'
 
 /**
  * First-person surface walk on the planet.
@@ -14,7 +15,7 @@ import { audioBus } from './audio/bus'
  * Camera invariants while mounted:
  *   • position rides the actual ground surface — a per-frame raycast from
  *     PLANET_R outward toward the planet centre lands on the diorama
- *     terrain mesh; we then place the camera at hit + PLAYER_H along the
+ *     terrain mesh; we then place the camera at hit + getPlayerHeight() along the
  *     local up. Falls back to the smooth sphere when the ray misses.
  *   • up = normalize(position) — gravity points to planet centre, so "up"
  *     for the camera is the surface normal at our current spot.
@@ -38,7 +39,11 @@ import { audioBus } from './audio/bus'
  */
 
 const PLANET_R = 1.0
-const PLAYER_H = 0.16   // doubled from 0.08 for a taller eye-line
+// Eye-line altitude is now per-level — sourced from settings.walk.playerHeight
+// via getPlayerHeight() (defaults.json + per-level sparse override). Read at
+// each call site so a level switch / Leva edit takes effect on the next frame
+// without re-mounting WalkControls. Reference value here is the global
+// default; consumers should NEVER capture it once at module load.
 const PLAYER_R = 0.03   // capsule radius — Minkowski-inflates each AABB
 const WALK_SPEED = 0.3
 const MOUSE_YAW   = 0.0025
@@ -54,7 +59,7 @@ export function WalkControls() {
   const cameraMode = usePlanet(s => s.cameraMode)
   const setCameraMode = usePlanet(s => s.setCameraMode)
 
-  const posRef = useRef<THREE.Vector3>(new THREE.Vector3(0, PLANET_R + PLAYER_H, 0))
+  const posRef = useRef<THREE.Vector3>(new THREE.Vector3(0, PLANET_R + getPlayerHeight(), 0))
   const fwdRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, -1))
   const pitchRef = useRef<number>(0)
   const keysRef = useRef<Set<string>>(new Set())
@@ -72,7 +77,7 @@ export function WalkControls() {
 
     const camPos = camera.position.clone()
     const normal = camPos.clone().normalize()
-    posRef.current.copy(normal).multiplyScalar(PLANET_R + PLAYER_H)
+    posRef.current.copy(normal).multiplyScalar(PLANET_R + getPlayerHeight())
     const camFwd = new THREE.Vector3()
     camera.getWorldDirection(camFwd)
     camFwd.addScaledVector(normal, -camFwd.dot(normal))
@@ -222,7 +227,7 @@ export function WalkControls() {
 
       const up = posRef.current.clone().normalize()
       const groundR = sampleTerrainRadiusAlong(up)
-      const targetPos = up.clone().multiplyScalar(groundR + PLAYER_H)
+      const targetPos = up.clone().multiplyScalar(groundR + getPlayerHeight())
       const targetLook = targetPos.clone().add(fwdRef.current)
 
       const blendedPos = ease.from.clone().lerp(targetPos, t)
@@ -317,7 +322,7 @@ export function WalkControls() {
       vertOffsetRef.current = 0
       vertVelRef.current = 0
     }
-    posRef.current.copy(upNow).multiplyScalar(groundR + PLAYER_H + vertOffsetRef.current)
+    posRef.current.copy(upNow).multiplyScalar(groundR + getPlayerHeight() + vertOffsetRef.current)
 
     // Pitched look-direction: rotate tangent forward toward up by pitchRef.
     const cp = Math.cos(pitchRef.current)

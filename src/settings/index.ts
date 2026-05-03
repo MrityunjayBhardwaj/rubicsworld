@@ -1,4 +1,5 @@
 import defaultsJson from './defaults.json'
+import { PLANETS, getPlanet } from '../world/planetManifest'
 
 /**
  * Typed handle on `defaults.json`. Every Leva `useControls` default value
@@ -8,11 +9,121 @@ import defaultsJson from './defaults.json'
  *
  * Runtime is still driven by mutable refs / uniform objects; this module
  * only provides the STARTING values.
+ *
+ * Per-level layering (issue #48): at module init we synchronously fetch
+ * `/levels/<slug>/settings.json` and deep-merge it on top of defaults
+ * BEFORE any consumer imports `settings` (consumers run AFTER this
+ * module's body in ES module ordering). The slug is taken from the URL
+ * (`/edit/levels/<slug>/`) or — on the /game/ route — from the
+ * persisted progression in localStorage. Without a slug, settings stays
+ * at globals.
  */
 
-export type Settings = typeof defaultsJson
+type RawDefaults = typeof defaultsJson
+// `customPath` / `customFilename` are `null` in defaults.json — JSON literal
+// inference narrows to the `null` type, but at runtime hdriStore round-trips
+// a real path string when a user uploads a custom HDRI. Widen here so capture
+// + level-override layers type-check.
+export type Settings = Omit<RawDefaults, 'hdri'> & {
+  hdri: Omit<RawDefaults['hdri'], 'customPath' | 'customFilename'> & {
+    customPath: string | null
+    customFilename: string | null
+  }
+}
 
-export const settings: Settings = defaultsJson
+function deepClone<T>(v: T): T { return JSON.parse(JSON.stringify(v)) as T }
+
+function deepMergeInto(base: Record<string, unknown>, src: Record<string, unknown>): void {
+  for (const key of Object.keys(src)) {
+    const sv = src[key]
+    if (sv && typeof sv === 'object' && !Array.isArray(sv)) {
+      const bv = base[key]
+      const target = (bv && typeof bv === 'object' && !Array.isArray(bv))
+        ? bv as Record<string, unknown>
+        : {}
+      deepMergeInto(target, sv as Record<string, unknown>)
+      base[key] = target
+    } else {
+      base[key] = sv
+    }
+  }
+}
+
+/** Resolve the level slug for the current page load — URL takes priority,
+ *  else /game/ progression in localStorage, else PLANETS[0] on /game/, else
+ *  null (use globals — for /bake/, root /, test routes that have no level). */
+function bootResolveSlug(): string | null {
+  if (typeof window === 'undefined') return null
+  const path = window.location.pathname.toLowerCase()
+  const m = path.match(/^\/edit\/levels\/(lvl_\d+)\/?/)
+  if (m && getPlanet(m[1])) return m[1]
+  if (path.startsWith('/game')) {
+    // selectLevel / advancePlanet set rubicsworld:autoStart=1 right before
+    // reloading; presence of that flag means the post-reload boot will
+    // resume directly at gamePhase='playing'. Use the persisted slug's
+    // settings so the level they're about to play has matching HDRI /
+    // grass / postfx.
+    //
+    // Absence means we're landing on the title screen. The title backdrop
+    // is forced to lvl_1 by TileGrid (regardless of saved slot) — seed
+    // settings from lvl_1 too so the HDRI matches the visible planet.
+    // Begin / Select Level both flip to 'playing' via reloadIntoLevel,
+    // which sets autoStart=1 → next boot picks up the right slug.
+    let autoStart = false
+    try { autoStart = localStorage.getItem('rubicsworld:autoStart') === '1' } catch { /* ignore */ }
+    if (autoStart) {
+      try {
+        const raw = localStorage.getItem('rubicsworld:progress')
+        if (raw) {
+          const p = JSON.parse(raw) as { currentPlanetSlug?: unknown }
+          if (typeof p.currentPlanetSlug === 'string' && getPlanet(p.currentPlanetSlug)) {
+            return p.currentPlanetSlug
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    return PLANETS[0]?.slug ?? null
+  }
+  return null
+}
+
+/** Synchronous XHR — yes, deprecated, but it's the only way to seed the
+ *  exported `settings` value before downstream module bodies run. Dev-
+ *  loop only; no impact on production consumers (the bundle still ships
+ *  the global defaults and per-level files served from /public/).
+ *
+ *  Cache-bust query: the browser's HTTP cache (and any intermediate
+ *  proxy) WILL otherwise serve a stale settings.json when the user has
+ *  just committed an edit and refreshed — staleness in this path looks
+ *  like "the level didn't reload its settings". Forcing a unique URL
+ *  per page load sidesteps that without a Cache-Control header on the
+ *  static file middleware. */
+function bootFetchOverride(slug: string): Record<string, unknown> | null {
+  try {
+    const xhr = new XMLHttpRequest()
+    xhr.open('GET', `/levels/${slug}/settings.json?t=${Date.now()}`, /* async */ false)
+    xhr.send()
+    if (xhr.status !== 200) return null
+    const parsed = JSON.parse(xhr.responseText) as Record<string, unknown>
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+const merged: Settings = deepClone(defaultsJson)
+const _bootSlug = bootResolveSlug()
+if (_bootSlug) {
+  const override = bootFetchOverride(_bootSlug)
+  if (override) deepMergeInto(merged as unknown as Record<string, unknown>, override)
+}
+
+export const settings: Settings = merged
+/** The slug whose settings.json was layered into `settings` at boot.
+ *  Null when the boot URL/localStorage resolved no slug (e.g. /bake/,
+ *  root /, test routes). Read by commitSettingsToDisk to target the
+ *  same file the consumers were seeded from. */
+export const bootLevelSlug: string | null = _bootSlug
 
 /** Captures the current runtime state in the shape of settings.json. Called
  *  by the Copy Settings button. Imports live values lazily (inside the
@@ -114,6 +225,9 @@ export async function captureLiveSettings(): Promise<Settings> {
     // capture called pre-canvas) postfxLive still holds the JSON defaults
     // because it's seeded from settings.postfx at module init.
     postfx: safeSection('postfx', () => ({ ...postfxLive })),
+    walk: safeSection('walk', () => ({
+      playerHeight: settings.walk.playerHeight,
+    })),
   }
 }
 
@@ -326,12 +440,27 @@ export function flattenSettingsForLeva(s: Partial<Settings>): Record<string, unk
   return out
 }
 
-/** Commit the current live settings to disk at `src/settings/defaults.json`
- *  via the Vite dev-server middleware at POST /__settings/commit. Dev-only —
- *  there's no equivalent in production (and production doesn't need
- *  writable settings). HMR picks up the file change and the app re-evaluates
- *  module-scope uniforms with the new defaults on the next reload. */
+/** Commit the current live settings to disk at
+ *  `public/levels/<slug>/settings.json` via the Vite dev-server middleware
+ *  at POST /__settings/commit?level=<slug>. Dev-only — there's no
+ *  equivalent in production (and production doesn't need writable
+ *  settings). HMR picks up the file change; on the next page load this
+ *  module's boot-time sync layer reads the level's settings.json and
+ *  consumers see the committed values.
+ *
+ *  The slug is whichever level was layered into `settings` at boot —
+ *  ensures Commit writes to the same file the live consumers were
+ *  seeded from, so a session is internally consistent. Errors out when
+ *  there's no boot slug (root /, /bake/, etc.) — committing to "global
+ *  defaults" was the source of the cross-level pollution bug; we don't
+ *  silently fall back to it. */
 export async function commitSettingsToDisk(): Promise<void> {
+  if (!bootLevelSlug) {
+    // eslint-disable-next-line no-console
+    console.error('[settings] no boot level slug — open /edit/levels/<slug>/ or /game/ to commit')
+    toast('error', 'No active level — open /edit/levels/<slug>/ first')
+    return
+  }
   let pretty: string
   try {
     const live = await captureLiveSettings()
@@ -343,7 +472,7 @@ export async function commitSettingsToDisk(): Promise<void> {
     return
   }
   try {
-    const res = await fetch('/__settings/commit', {
+    const res = await fetch(`/__settings/commit?level=${encodeURIComponent(bootLevelSlug)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: pretty,

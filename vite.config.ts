@@ -5,50 +5,94 @@ import fs from 'node:fs'
 import crypto from 'node:crypto'
 
 /**
- * Watch public/diorama.glb for changes and emit a custom HMR event. Vite
+ * Watch every per-level glb for changes and emit a custom HMR event. Vite
  * normally hot-reloads JS modules, but files in `public/` are served as
  * static assets — they don't go through the module graph, so a glb
  * overwrite (from the Blender addon's Live Mode) doesn't trigger anything
  * client-side. This plugin wires the gap: on file change, push a
- * `diorama:changed` event with a timestamp over the HMR socket. TileGrid
- * listens for it and re-fetches the glb with a cache-busting query, then
- * swaps the scene in place — no page reload, Leva knob state preserved.
+ * `diorama:changed` event with `{ slug, ts }` over the HMR socket. TileGrid
+ * listens, ignores events for other planets, and re-fetches its own slot
+ * with a cache-busting query — no page reload, Leva knob state preserved.
  */
-// Phase A of issue #48: per-planet asset folders. Until the manifest is
-// queryable from middleware (Phase B), watch + commit target the meadow slot
-// directly. When planet-switching lands, this becomes "watch all planets'
-// glb paths" + "commit accepts ?planet=slug to pick the target file".
-const MEADOW_GLB_PATH = 'public/planets/meadow/diorama.glb'
+
+const LEVELS_MANIFEST_PATH = 'public/levels/index.json'
+
+interface LevelEntry {
+  slug: string
+  name: string
+  order: number
+  dioramaUrl: string
+  audioOverlapMs: number
+}
+
+/** Read public/levels/index.json from disk and return its entries. Re-read
+ *  on every call (the manifest is small and the dev plugin needs it fresh
+ *  if the user adds a level mid-session). */
+function loadLevels(): LevelEntry[] {
+  const p = path.resolve(__dirname, LEVELS_MANIFEST_PATH)
+  try {
+    const raw = fs.readFileSync(p, 'utf-8')
+    const parsed = JSON.parse(raw) as { levels?: LevelEntry[] }
+    return Array.isArray(parsed.levels) ? parsed.levels : []
+  } catch {
+    return []
+  }
+}
+
+/** Resolve a level slug to its on-disk glb path under public/. Returns null
+ *  if the slug isn't in the manifest — caller should reject rather than
+ *  guess at a path (commit endpoint must NOT write to a non-whitelisted
+ *  path; that would let a malformed query touch arbitrary files). */
+function levelGlbPath(slug: string): string | null {
+  const levels = loadLevels()
+  const e = levels.find(l => l.slug === slug)
+  if (!e) return null
+  // Strip leading '/' so it joins under public/ rather than rooting absolute.
+  const rel = e.dioramaUrl.replace(/^\/+/, '')
+  return path.resolve(__dirname, 'public', rel)
+}
 
 function dioramaHotReload(): Plugin {
-  const watchPath = path.resolve(__dirname, MEADOW_GLB_PATH)
   return {
     name: 'diorama-hot-reload',
     configureServer(server) {
-      server.watcher.add(watchPath)
+      const levels = loadLevels()
+      // Map absolute path → slug so the change handler can identify which
+      // level was rewritten in O(1) without a manifest re-read per event.
+      const pathToSlug = new Map<string, string>()
+      for (const lvl of levels) {
+        const abs = path.resolve(__dirname, 'public', lvl.dioramaUrl.replace(/^\/+/, ''))
+        pathToSlug.set(abs, lvl.slug)
+        server.watcher.add(abs)
+      }
       server.watcher.on('change', (file) => {
-        if (path.resolve(file) === watchPath) {
-          server.ws.send({
-            type: 'custom',
-            event: 'diorama:changed',
-            data: { ts: Date.now() },
-          })
-        }
+        const abs = path.resolve(file)
+        const slug = pathToSlug.get(abs)
+        if (!slug) return
+        server.ws.send({
+          type: 'custom',
+          event: 'diorama:changed',
+          data: { slug, ts: Date.now() },
+        })
       })
     },
   }
 }
 
 /**
- * Dev-only endpoint for the "Commit Settings" Leva button: POST a JSON body
- * to /__settings/commit and we write it to src/settings/defaults.json. The
- * browser sandbox can't touch disk directly, so this tiny middleware is the
- * bridge. Only wired in dev — production builds don't need writable
- * settings. Vite's HMR picks up the file change and the app re-evaluates
- * with the new defaults.
+ * Dev-only endpoint for the "Commit Settings" Leva button. Writes the
+ * captured live state to a per-level file at
+ * `public/levels/<slug>/settings.json` so each planet keeps its own
+ * HDRI / grass / postfx tuning. Without `?level=<slug>` the request is
+ * rejected — the legacy "write to global defaults.json" path was the
+ * source of the bug where editing one level's HDRI propagated to every
+ * other level (#48).
+ *
+ * Slug is whitelisted against the manifest before any file write —
+ * `levelGlbPath()` returns null for unknown slugs, which keeps the
+ * endpoint from creating arbitrary directories on disk.
  */
 function settingsCommit(): Plugin {
-  const targetPath = path.resolve(__dirname, 'src/settings/defaults.json')
   return {
     name: 'settings-commit',
     configureServer(server) {
@@ -60,6 +104,15 @@ function settingsCommit(): Plugin {
           return
         }
         try {
+          const url = new URL(req.url ?? '', 'http://x')
+          const slug = url.searchParams.get('level')
+          if (!slug || !levelGlbPath(slug)) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: `unknown or missing level slug: ${slug ?? '(none)'}` }))
+            return
+          }
+          const targetPath = path.resolve(__dirname, 'public', 'levels', slug, 'settings.json')
           // Buffer the request body.
           const chunks: Buffer[] = []
           for await (const chunk of req) chunks.push(chunk as Buffer)
@@ -71,7 +124,8 @@ function settingsCommit(): Plugin {
           await fs.promises.writeFile(targetPath, pretty, 'utf8')
           res.statusCode = 200
           res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ ok: true, path: 'src/settings/defaults.json' }))
+          const rel = `public/levels/${slug}/settings.json`
+          res.end(JSON.stringify({ ok: true, level: slug, path: rel }))
         } catch (err) {
           res.statusCode = 500
           res.setHeader('Content-Type', 'application/json')
@@ -280,10 +334,11 @@ function patchGlbColorAccessorNames(body: Buffer, names: readonly string[]): Buf
  * every CDP message comfortably small.
  */
 function dioramaCommit(): Plugin {
-  const targetPath = path.resolve(__dirname, MEADOW_GLB_PATH)
   // Per-session in-memory accumulator. Sessions are short-lived (one bake),
   // dev-only, and not user-facing; no eviction policy needed beyond delete-on-commit.
-  const sessions = new Map<string, Buffer[]>()
+  // Key includes the level slug so two sessions targeting different levels
+  // can interleave without colliding on the chunk buffer.
+  const sessions = new Map<string, { slug: string; chunks: Buffer[] }>()
   return {
     name: 'diorama-commit',
     configureServer(server) {
@@ -298,29 +353,48 @@ function dioramaCommit(): Plugin {
           const url = new URL(req.url ?? '', 'http://x')
           const session = url.searchParams.get('session')
           const isCommit = url.searchParams.get('commit') === '1'
+          // Default to lvl_1 so legacy callers that don't know about the
+          // multi-level layout keep working — the slot they always wrote to.
+          const levelSlug = url.searchParams.get('level') ?? 'lvl_1'
+          const targetPath = levelGlbPath(levelSlug)
+          if (!targetPath) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: `unknown level slug: ${levelSlug}` }))
+            return
+          }
           const chunks: Buffer[] = []
           for await (const chunk of req) chunks.push(chunk as Buffer)
 
           // Chunked path: append to session, finalise on commit=1.
           if (session) {
-            const acc = sessions.get(session) ?? []
-            for (const c of chunks) acc.push(c)
-            sessions.set(session, acc)
+            const entry = sessions.get(session) ?? { slug: levelSlug, chunks: [] }
+            // Pin the slug to the first chunk's value to prevent a malformed
+            // mid-session retarget; reject if a later chunk asks for a
+            // different level than the first one established.
+            if (entry.slug !== levelSlug) {
+              res.statusCode = 400
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ ok: false, error: `session ${session} pinned to ${entry.slug}, got ${levelSlug}` }))
+              return
+            }
+            for (const c of chunks) entry.chunks.push(c)
+            sessions.set(session, entry)
             if (!isCommit) {
               res.statusCode = 200
               res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({ ok: true, accumulated: acc.reduce((n, b) => n + b.length, 0) }))
+              res.end(JSON.stringify({ ok: true, accumulated: entry.chunks.reduce((n, b) => n + b.length, 0) }))
               return
             }
-            const body = Buffer.concat(acc)
+            const body = Buffer.concat(entry.chunks)
             sessions.delete(session)
-            await writeBakedGlb(body, targetPath, res)
+            await writeBakedGlb(body, targetPath, res, levelSlug)
             return
           }
 
           // Single-shot path: write the full body.
           const body = Buffer.concat(chunks)
-          await writeBakedGlb(body, targetPath, res)
+          await writeBakedGlb(body, targetPath, res, levelSlug)
         } catch (err) {
           res.statusCode = 500
           res.setHeader('Content-Type', 'application/json')
@@ -331,7 +405,12 @@ function dioramaCommit(): Plugin {
   }
 }
 
-async function writeBakedGlb(body: Buffer, targetPath: string, res: import('http').ServerResponse): Promise<void> {
+async function writeBakedGlb(
+  body: Buffer,
+  targetPath: string,
+  res: import('http').ServerResponse,
+  levelSlug: string,
+): Promise<void> {
   if (body.length < 12 || body.readUInt32LE(0) !== 0x46546C67) {
     res.statusCode = 400
     res.setHeader('Content-Type', 'application/json')
@@ -347,9 +426,74 @@ async function writeBakedGlb(body: Buffer, targetPath: string, res: import('http
   await fs.promises.writeFile(targetPath, patched)
   res.statusCode = 200
   res.setHeader('Content-Type', 'application/json')
-  res.end(JSON.stringify({ ok: true, path: 'public/planets/meadow/diorama.glb', size: patched.length }))
+  // Report the public-relative path so the client can log/display it.
+  const rel = path.relative(path.resolve(__dirname), targetPath).replace(/\\/g, '/')
+  res.end(JSON.stringify({ ok: true, level: levelSlug, path: rel, size: patched.length }))
+}
+
+/**
+ * Last-active-level beacon. The browser POSTs `{ slug }` here every couple
+ * seconds; GET returns the most recent value (with `ageMs` so the consumer
+ * can decide if it's stale). The Blender addon's "Auto" live-link mode
+ * polls this endpoint to learn which level slot the user is currently
+ * editing, so a Live-Mode export writes to the right slug without manual
+ * dropdown bookkeeping.
+ *
+ * In-memory only — no persistence. Multiple tabs are last-write-wins:
+ * whatever tab POSTed most recently is what the addon picks up.
+ */
+function activeLevelBeacon(): Plugin {
+  let latest: { slug: string; ts: number } | null = null
+  return {
+    name: 'active-level-beacon',
+    configureServer(server) {
+      server.middlewares.use('/__levels/active', async (req, res) => {
+        try {
+          if (req.method === 'POST') {
+            const chunks: Buffer[] = []
+            for await (const chunk of req) chunks.push(chunk as Buffer)
+            const body = Buffer.concat(chunks).toString('utf-8')
+            const parsed = JSON.parse(body) as { slug?: unknown }
+            // Whitelist against the manifest — refuse beacons for slugs that
+            // don't exist (a stale tab on an old build shouldn't poison the
+            // addon's pick).
+            if (typeof parsed.slug === 'string' && levelGlbPath(parsed.slug)) {
+              latest = { slug: parsed.slug, ts: Date.now() }
+              res.statusCode = 200
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ ok: true }))
+              return
+            }
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ ok: false, error: 'invalid or unknown slug' }))
+            return
+          }
+          if (req.method === 'GET') {
+            res.statusCode = 200
+            res.setHeader('Content-Type', 'application/json')
+            res.setHeader('Cache-Control', 'no-store')
+            if (!latest) {
+              res.end(JSON.stringify({ ok: true, slug: null, ageMs: null }))
+              return
+            }
+            const ageMs = Date.now() - latest.ts
+            res.end(JSON.stringify({ ok: true, slug: latest.slug, ageMs }))
+            return
+          }
+          res.statusCode = 405
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: 'GET or POST only' }))
+        } catch (err) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: false, error: String(err) }))
+        }
+      })
+    },
+  }
 }
 
 export default defineConfig({
-  plugins: [react(), dioramaHotReload(), settingsCommit(), maskCommit(), hdriCommit(), dioramaCommit()],
+  plugins: [react(), dioramaHotReload(), settingsCommit(), maskCommit(), hdriCommit(), dioramaCommit(), activeLevelBeacon()],
 })

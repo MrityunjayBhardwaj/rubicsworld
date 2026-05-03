@@ -1,0 +1,6 @@
+{
+  "$schema": "Sparse per-level override. Layered on top of src/settings/defaults.json by src/settings/levelSettings.ts on level switch. Add only the fields this level wants to differ from globals; missing fields fall through to defaults.",
+  "walk": {
+    "playerHeight": 0.12
+  }
+}

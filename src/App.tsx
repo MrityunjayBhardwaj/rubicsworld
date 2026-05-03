@@ -8,6 +8,8 @@ import { Interaction } from './world/Interaction'
 import { WalkControls } from './world/WalkControls'
 import { IntroCinematic } from './world/IntroCinematic'
 import { MenuOverlay } from './world/MenuOverlay'
+import { StatsOverlay } from './world/StatsOverlay'
+import { Stopwatch } from './world/Stopwatch'
 import { TutorialHint, TutorialChrome } from './world/TutorialOverlay'
 import { FpsMeter } from './world/FpsMeter'
 import { AiSeed } from './world/AiSeed'
@@ -28,6 +30,7 @@ import { usePlanet } from './world/store'
 import { NEIGHBOR_IDX } from './world/rotation'
 import { hudUniforms } from './diorama/buildDiorama'
 import { useHdri } from './world/hdriStore'
+import { loadLevelSettings } from './settings/levelSettings'
 
 if (import.meta.env.DEV && typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__planet = usePlanet
@@ -137,6 +140,37 @@ export default function App({ route = 'dev' }: AppProps) {
   // the scramble cinematic (or first-visit tutorial). returnToTitle
   // unmounts it so the next Begin gets a clean first-mount.
   const gamePhase = usePlanet(s => s.gamePhase)
+
+  // Per-level settings layering: load <slug>/settings.json and deep-merge
+  // it onto the global defaults whenever the active level changes. Walk
+  // mode reads playerHeight from the merged view so each planet's eye-line
+  // can differ. Best-effort — fetch failure leaves the live view at globals.
+  const currentPlanetSlug = usePlanet(s => s.currentPlanetSlug)
+  useEffect(() => {
+    void loadLevelSettings(currentPlanetSlug)
+  }, [currentPlanetSlug])
+
+  // Live-link beacon: post the active level slug to the dev server every
+  // few seconds so the Blender addon's "Auto" mode knows which slot to
+  // export into. Dev-only — production builds skip the heartbeat entirely.
+  // The beacon is best-effort; failures are silently swallowed (the addon
+  // falls back to its dropdown selection if the endpoint is unreachable).
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    let cancelled = false
+    const post = () => {
+      if (cancelled) return
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      void fetch('/__levels/active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: currentPlanetSlug }),
+      }).catch(() => { /* best-effort, ignore */ })
+    }
+    post() // fire immediately on slug change so Auto picks up the switch fast
+    const id = window.setInterval(post, 2000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [currentPlanetSlug])
 
   return (
     <>
@@ -281,6 +315,8 @@ export default function App({ route = 'dev' }: AppProps) {
         )}
       </Canvas>
       {isGame && <MenuOverlay />}
+      {isGame && <StatsOverlay />}
+      {isGame && <Stopwatch />}
     </>
   )
 }

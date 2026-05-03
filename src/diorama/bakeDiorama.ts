@@ -227,17 +227,20 @@ export async function bakeDioramaGlb(opts: BakeOptions = {}): Promise<BakeResult
  * single in-page POST body crosses ~100 MB; per-chunk fetches keep every
  * CDP frame small, and the dev middleware concatenates server-side.
  */
-export async function commitBakedGlb(bytes: ArrayBuffer): Promise<{ ok: boolean; size?: number; path?: string; error?: string }> {
+export async function commitBakedGlb(bytes: ArrayBuffer, levelSlug?: string): Promise<{ ok: boolean; size?: number; path?: string; error?: string }> {
   const CHUNK = 8 * 1024 * 1024
   // Browser-side UUID — crypto.randomUUID is in all evergreens; fall back
   // to a timestamp+rand id for any environment that lacks it.
   const session = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  // Default to the current planet's slug so callers that just say "save"
+  // hit the right slot. Pass an explicit slug to target a specific level.
+  const slug = levelSlug ?? getCurrentPlanet().slug
   for (let off = 0; off < bytes.byteLength; off += CHUNK) {
     const slice = bytes.slice(off, Math.min(off + CHUNK, bytes.byteLength))
     const isLast = off + CHUNK >= bytes.byteLength
-    const params = new URLSearchParams({ session, offset: String(off) })
+    const params = new URLSearchParams({ session, offset: String(off), level: slug })
     if (isLast) params.set('commit', '1')
     const res = await fetch(`/__diorama/commit-glb?${params}`, {
       method: 'POST',

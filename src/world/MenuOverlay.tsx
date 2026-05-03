@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { usePlanet } from './store'
+import { usePlanet, type Tier } from './store'
+import { PLANETS } from './planetManifest'
 
 /**
  * Title screen + in-game pause menu.
@@ -22,19 +23,34 @@ export function MenuOverlay() {
   const gamePhase = usePlanet(s => s.gamePhase)
   const menuOpen = usePlanet(s => s.menuOpen)
   const audioMuted = usePlanet(s => s.audioMuted)
-  const setGamePhase = usePlanet(s => s.setGamePhase)
   const toggleMenu = usePlanet(s => s.toggleMenu)
   const setMenuOpen = usePlanet(s => s.setMenuOpen)
   const setAudioMuted = usePlanet(s => s.setAudioMuted)
   const resetProgress = usePlanet(s => s.resetProgress)
   const returnToTitle = usePlanet(s => s.returnToTitle)
+  const selectLevel = usePlanet(s => s.selectLevel)
+  const solvedPlanets = usePlanet(s => s.solvedPlanets)
+  const currentPlanetSlug = usePlanet(s => s.currentPlanetSlug)
 
   // Title fade-in on first paint (~1.2s) so the planet+ring read first.
   const [titleFaded, setTitleFaded] = useState(false)
+  // Level-select roster (title-screen only). Local state because closing
+  // belongs to the overlay's own lifecycle, not the global menu pattern.
+  const [rosterOpen, setRosterOpen] = useState(false)
+  // Preferences panel (title-screen only). Same local-state pattern.
+  const [prefsOpen, setPrefsOpen] = useState(false)
   useEffect(() => {
     if (gamePhase !== 'title') return
     const id = requestAnimationFrame(() => setTitleFaded(true))
     return () => cancelAnimationFrame(id)
+  }, [gamePhase])
+  // Closing roster when leaving title — keeps state clean if the user clicks
+  // Begin/Select Level → menu re-opens later in another session.
+  useEffect(() => {
+    if (gamePhase !== 'title') {
+      setRosterOpen(false)
+      setPrefsOpen(false)
+    }
   }, [gamePhase])
 
   useEffect(() => {
@@ -50,11 +66,30 @@ export function MenuOverlay() {
   }, [toggleMenu])
 
   if (gamePhase === 'title') {
+    if (rosterOpen) {
+      return (
+        <LevelRosterView
+          solvedSlugs={solvedPlanets}
+          onPick={(slug) => { selectLevel(slug) }}
+          onCancel={() => setRosterOpen(false)}
+        />
+      )
+    }
+    if (prefsOpen) {
+      return <PreferencesView onCancel={() => setPrefsOpen(false)} />
+    }
     return (
       <TitleView
         faded={titleFaded}
         audioMuted={audioMuted}
-        onBegin={() => setGamePhase('playing')}
+        // Route Begin through selectLevel so it triggers the same reload
+        // path Select Level uses — boot then seeds HDRI / grass / postfx
+        // from the persisted level's settings.json. Without this, Begin
+        // played on the saved slot but settings stayed seeded from lvl_1
+        // (the title's backdrop), so the actual gameplay HDRI was wrong.
+        onBegin={() => selectLevel(currentPlanetSlug)}
+        onSelectLevel={() => setRosterOpen(true)}
+        onPreferences={() => setPrefsOpen(true)}
         onToggleAudio={() => setAudioMuted(!audioMuted)}
         onReset={resetProgress}
       />
@@ -79,17 +114,21 @@ interface TitleProps {
   faded: boolean
   audioMuted: boolean
   onBegin: () => void
+  onSelectLevel: () => void
+  onPreferences: () => void
   onToggleAudio: () => void
   onReset: () => void
 }
 
-function TitleView({ faded, audioMuted, onBegin, onToggleAudio, onReset }: TitleProps) {
+function TitleView({ faded, audioMuted, onBegin, onSelectLevel, onPreferences, onToggleAudio, onReset }: TitleProps) {
   return (
     <div style={{ ...overlayBase, opacity: faded ? 1 : 0, transition: 'opacity 1200ms ease-out' }}>
       <div style={titleStack}>
         <h1 style={titleText}>Rubic&rsquo;s World</h1>
         <div style={taglineText}>Solve the world. Then be in it.</div>
         <button style={primaryButton} onClick={onBegin} autoFocus>Begin</button>
+        <button style={secondaryButton} onClick={onSelectLevel}>Select level</button>
+        <button style={secondaryButton} onClick={onPreferences}>Preferences</button>
       </div>
       <div style={titleFootBar}>
         <button style={textLink} onClick={onToggleAudio}>
@@ -99,6 +138,131 @@ function TitleView({ faded, audioMuted, onBegin, onToggleAudio, onReset }: Title
         <button style={textLink} onClick={onReset} title="Clears tutorial-seen flag and audio settings">
           reset progress
         </button>
+      </div>
+    </div>
+  )
+}
+
+function PreferencesView({ onCancel }: { onCancel: () => void }) {
+  // Subscribe to each pref independently so a slider drag doesn't churn
+  // the other panels' selectors.
+  const difficulty = usePlanet(s => s.difficulty)
+  const visuals = usePlanet(s => s.visuals)
+  const masterVolume = usePlanet(s => s.masterVolume)
+  const sfxVolume = usePlanet(s => s.sfxVolume)
+  const audioMuted = usePlanet(s => s.audioMuted)
+  const setDifficulty = usePlanet(s => s.setDifficulty)
+  const setVisuals = usePlanet(s => s.setVisuals)
+  const setMasterVolume = usePlanet(s => s.setMasterVolume)
+  const setSfxVolume = usePlanet(s => s.setSfxVolume)
+  const setAudioMuted = usePlanet(s => s.setAudioMuted)
+
+  const tiers: Tier[] = ['low', 'medium', 'high']
+  const scrambleHint = (t: Tier) => t === 'low' ? '3 moves' : t === 'high' ? '8 moves' : '5 moves'
+
+  return (
+    <div style={overlayBase}>
+      <div style={prefsCard}>
+        <div style={rosterHeader}>Preferences</div>
+
+        <div style={prefsSection}>
+          <div style={prefsLabel}>Difficulty</div>
+          <div style={prefsTierRow}>
+            {tiers.map(t => (
+              <button
+                key={t}
+                style={t === difficulty ? prefsTierActive : prefsTierIdle}
+                onClick={() => setDifficulty(t)}
+              >
+                {t.toUpperCase()}
+              </button>
+            ))}
+          </div>
+          <div style={prefsHint}>scramble — {scrambleHint(difficulty)}</div>
+        </div>
+
+        <div style={prefsSection}>
+          <div style={prefsLabel}>Visuals</div>
+          <div style={prefsTierRow}>
+            {tiers.map(t => (
+              <button
+                key={t}
+                style={t === visuals ? prefsTierActive : prefsTierIdle}
+                onClick={() => setVisuals(t)}
+              >
+                {t.toUpperCase()}
+              </button>
+            ))}
+          </div>
+          <div style={prefsHint}>placeholder — no renderer flag yet</div>
+        </div>
+
+        <div style={prefsSection}>
+          <div style={prefsLabel}>Audio</div>
+          <div style={prefsSliderRow}>
+            <span style={prefsSliderLabel}>Master</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={masterVolume}
+              onChange={e => setMasterVolume(parseFloat(e.target.value))}
+              style={prefsSlider}
+            />
+            <span style={prefsSliderValue}>{Math.round(masterVolume * 100)}</span>
+          </div>
+          <div style={prefsSliderRow}>
+            <span style={prefsSliderLabel}>SFX</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={sfxVolume}
+              onChange={e => setSfxVolume(parseFloat(e.target.value))}
+              style={prefsSlider}
+            />
+            <span style={prefsSliderValue}>{Math.round(sfxVolume * 100)}</span>
+          </div>
+          <button style={prefsToggleButton} onClick={() => setAudioMuted(!audioMuted)}>
+            {audioMuted ? 'Unmute' : 'Mute'} all
+          </button>
+        </div>
+
+        <button style={textLink} onClick={onCancel}>back</button>
+      </div>
+    </div>
+  )
+}
+
+interface RosterProps {
+  solvedSlugs: string[]
+  onPick: (slug: string) => void
+  onCancel: () => void
+}
+
+function LevelRosterView({ solvedSlugs, onPick, onCancel }: RosterProps) {
+  // Manifest is the source of order; sort defensively in case entries
+  // arrive out of order.
+  const sorted = [...PLANETS].sort((a, b) => a.order - b.order)
+  return (
+    <div style={overlayBase}>
+      <div style={rosterCard}>
+        <div style={rosterHeader}>Select level</div>
+        <div style={rosterGrid}>
+          {sorted.map(p => {
+            const solved = solvedSlugs.includes(p.slug)
+            return (
+              <button key={p.slug} style={rosterTile} onClick={() => onPick(p.slug)}>
+                <div style={rosterIndex}>{String(p.order + 1).padStart(2, '0')}</div>
+                <div style={rosterName}>{p.name}</div>
+                <div style={rosterStatus}>{solved ? 'solved' : 'unplayed'}</div>
+              </button>
+            )
+          })}
+        </div>
+        <button style={textLink} onClick={onCancel}>back</button>
       </div>
     </div>
   )
@@ -262,4 +426,178 @@ const pauseHint: React.CSSProperties = {
   letterSpacing: '0.18em',
   textTransform: 'lowercase',
   opacity: 0.4,
+}
+
+const rosterCard: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: 18,
+  padding: '40px 56px',
+  borderRadius: 18,
+  background: 'rgba(20, 24, 32, 0.78)',
+  border: '1px solid rgba(245, 234, 211, 0.08)',
+  backdropFilter: 'blur(8px)',
+  minWidth: 360,
+  maxWidth: 'min(820px, 92vw)',
+}
+
+const rosterHeader: React.CSSProperties = {
+  fontSize: 14,
+  letterSpacing: '0.22em',
+  textTransform: 'uppercase',
+  opacity: 0.6,
+}
+
+const rosterGrid: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+  gap: 14,
+  width: '100%',
+}
+
+const rosterTile: React.CSSProperties = {
+  appearance: 'none',
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: 6,
+  padding: '20px 14px',
+  background: 'rgba(245, 234, 211, 0.04)',
+  border: '1px solid rgba(245, 234, 211, 0.16)',
+  borderRadius: 12,
+  color: '#f5ead3',
+  fontFamily: 'inherit',
+  cursor: 'pointer',
+  transition: 'background 160ms ease, border-color 160ms ease, transform 160ms ease',
+}
+
+const rosterIndex: React.CSSProperties = {
+  fontVariantNumeric: 'tabular-nums',
+  fontSize: 11,
+  letterSpacing: '0.22em',
+  opacity: 0.45,
+}
+
+const rosterName: React.CSSProperties = {
+  fontSize: 18,
+  letterSpacing: '0.02em',
+}
+
+const rosterStatus: React.CSSProperties = {
+  fontSize: 10,
+  letterSpacing: '0.18em',
+  textTransform: 'uppercase',
+  opacity: 0.42,
+}
+
+const prefsCard: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'stretch',
+  gap: 22,
+  padding: '36px 44px',
+  borderRadius: 18,
+  background: 'rgba(20, 24, 32, 0.78)',
+  border: '1px solid rgba(245, 234, 211, 0.08)',
+  backdropFilter: 'blur(8px)',
+  width: 'min(420px, 92vw)',
+}
+
+const prefsSection: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 8,
+}
+
+const prefsLabel: React.CSSProperties = {
+  fontSize: 11,
+  letterSpacing: '0.22em',
+  textTransform: 'uppercase',
+  opacity: 0.55,
+}
+
+const prefsTierRow: React.CSSProperties = {
+  display: 'flex',
+  gap: 8,
+}
+
+const prefsTierBase: React.CSSProperties = {
+  appearance: 'none',
+  flex: 1,
+  fontFamily: 'inherit',
+  fontSize: 12,
+  letterSpacing: '0.16em',
+  padding: '9px 0',
+  borderRadius: 8,
+  cursor: 'pointer',
+  transition: 'background 140ms ease, border-color 140ms ease, color 140ms ease',
+}
+
+const prefsTierIdle: React.CSSProperties = {
+  ...prefsTierBase,
+  background: 'transparent',
+  border: '1px solid rgba(245, 234, 211, 0.15)',
+  color: '#f5ead3',
+  opacity: 0.62,
+}
+
+const prefsTierActive: React.CSSProperties = {
+  ...prefsTierBase,
+  background: 'rgba(245, 234, 211, 0.10)',
+  border: '1px solid rgba(245, 234, 211, 0.55)',
+  color: '#f5ead3',
+}
+
+const prefsHint: React.CSSProperties = {
+  fontSize: 10,
+  letterSpacing: '0.14em',
+  textTransform: 'lowercase',
+  opacity: 0.4,
+  marginTop: -2,
+}
+
+const prefsSliderRow: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 12,
+}
+
+const prefsSliderLabel: React.CSSProperties = {
+  fontSize: 11,
+  letterSpacing: '0.18em',
+  textTransform: 'uppercase',
+  opacity: 0.7,
+  width: 56,
+  flexShrink: 0,
+}
+
+const prefsSlider: React.CSSProperties = {
+  flex: 1,
+  accentColor: '#f5ead3',
+  cursor: 'pointer',
+}
+
+const prefsSliderValue: React.CSSProperties = {
+  fontVariantNumeric: 'tabular-nums',
+  fontSize: 11,
+  width: 28,
+  textAlign: 'right',
+  opacity: 0.7,
+}
+
+const prefsToggleButton: React.CSSProperties = {
+  appearance: 'none',
+  marginTop: 6,
+  background: 'transparent',
+  border: '1px solid rgba(245, 234, 211, 0.25)',
+  color: '#f5ead3',
+  fontFamily: 'inherit',
+  fontSize: 12,
+  letterSpacing: '0.18em',
+  textTransform: 'uppercase',
+  padding: '8px 14px',
+  borderRadius: 999,
+  cursor: 'pointer',
+  alignSelf: 'flex-start',
 }

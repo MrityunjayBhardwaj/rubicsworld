@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { usePlanet } from './store'
+import { usePlanet, scrambleCountFor } from './store'
 import { inverseMove, type Move } from './rotation'
 
 /**
@@ -18,7 +18,10 @@ import { inverseMove, type Move } from './rotation'
  */
 
 const INTRO_HOLD_MS = 2800
-const ATTRACT_SCRAMBLE_MOVES = 18
+// Scramble move count is now driven by the difficulty preference (set in
+// Preferences). Read at scramble time so a change between levels takes
+// effect on the next boot. The tutorial path still uses its own fixed
+// 3-move sequence so the guided demo stays deterministic.
 const TUTORIAL_SEEN_KEY = 'rubicsworld:tutorialSeen'
 
 // Deterministic 3-move scramble — curated to touch three different axes and
@@ -63,7 +66,8 @@ export function IntroCinematic() {
       if (skipTutorial) {
         // Original attract path.
         if (usePlanet.getState().introPhase === 'done') return
-        await scrambleAnimated(ATTRACT_SCRAMBLE_MOVES)
+        const moves = scrambleCountFor(usePlanet.getState().difficulty)
+        await scrambleAnimated(moves)
         if (aborted) return
         if (usePlanet.getState().introPhase !== 'done') {
           setIntroPhase('orbit-scrambled')
