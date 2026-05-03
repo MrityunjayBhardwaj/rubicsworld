@@ -55,6 +55,11 @@ export interface LoopDef {
   key: string
   anchor: AnchorRef
   src: string
+  /** Convolution kernel — Bézier-curve impulse response (#65). For
+   *  loops the kernel applies serially through setFilters; the wet
+   *  factor scales the kernel buffer values, which acts as dry/wet
+   *  mix only if the curve carries an impulse at t=0. */
+  kernel?: KernelSpec
   // New shape: per-param bindings. Common keys:
   //   `vol`     — volume (sample loops via setVolume; synth 2D via synthGain;
   //               synth POSITIONAL via positional setVolume)
@@ -90,6 +95,41 @@ export interface EventDef {
   // Undefined = unlimited (legacy behaviour). Sample events only —
   // synth: voices ignore this for now (they're fire-and-forget).
   polyphony?: number
+  /** Convolution kernel — Bézier-curve-defined impulse response (#65). */
+  kernel?: KernelSpec
+}
+
+/**
+ * Convolution kernel specified by a single cubic Bézier curve in
+ * normalised [0..1]² space (x = time progress 0..1, y = amplitude
+ * 0..1). The bus samples the curve at `taps` points, multiplies by
+ * exp(-decay × t) so the IR doesn't hum forever, and packs the result
+ * into a single-channel AudioBuffer fed to a ConvolverNode.
+ *
+ * Why Bézier (not raw sample list): two anchors + two handles is the
+ * intuitive "draw an attack/decay shape" UI. Storing 4 points (8
+ * floats) commits a tiny audio.json footprint vs. dumping a 256-sample
+ * array per entry.
+ */
+export interface KernelSpec {
+  /** Bézier endpoints + control points, all in [0..1]². */
+  p1:  [number, number]
+  cp1: [number, number]
+  cp2: [number, number]
+  p2:  [number, number]
+  /** Number of samples in the impulse response. Higher = longer tail
+   *  + more CPU. 256 ≈ 5.8ms @ 44.1kHz; 1024 ≈ 23ms. Capped at 1024
+   *  in the editor — longer IRs go through dedicated reverb. */
+  taps: number
+  /** Exponential decay rate applied to the curve so the kernel naturally
+   *  fades. 0 = no decay (raw curve). Larger = faster fade. */
+  decay: number
+  /** Output gain on the convolver branch. 0 disables; 1 = full kernel.
+   *  For events this sums with a parallel dry branch (so 0 = clean
+   *  signal, 1 = fully convolved). For loops the kernel is serial-
+   *  only — wet scales the kernel buffer values directly, which acts
+   *  as a dry/wet mix when the curve has an impulse near t=0. */
+  wet: number
 }
 export interface Registry {
   loops: LoopDef[]
@@ -209,6 +249,56 @@ interface LoopRuntime {
 // receives a deterministic chain (highpass → bandpass → lowpass = "trim
 // bottom, focus middle, trim top" in that order).
 const FILTER_NAMES = ['highpass', 'bandpass', 'lowpass'] as const
+/**
+ * Sample a cubic Bézier at t (0..1). Returns [x, y]. The kernel uses
+ * Bernstein form so all four control points contribute smoothly:
+ *   B(t) = (1-t)³·p1 + 3(1-t)²·t·cp1 + 3(1-t)·t²·cp2 + t³·p2
+ */
+function sampleCubicBezier(
+  p1: [number, number], cp1: [number, number],
+  cp2: [number, number], p2: [number, number],
+  t: number,
+): [number, number] {
+  const u = 1 - t
+  const u2 = u * u, u3 = u2 * u
+  const t2 = t * t, t3 = t2 * t
+  const x = u3 * p1[0] + 3 * u2 * t * cp1[0] + 3 * u * t2 * cp2[0] + t3 * p2[0]
+  const y = u3 * p1[1] + 3 * u2 * t * cp1[1] + 3 * u * t2 * cp2[1] + t3 * p2[1]
+  return [x, y]
+}
+
+/**
+ * Build a single-channel AudioBuffer from a KernelSpec (#65). Samples
+ * the curve at `taps` evenly-spaced t values, applies exp(-decay·t),
+ * scales by `wet`, normalises so peak = wet (so different decay rates
+ * produce comparable loudness). Curve y values can exceed [0..1] when
+ * control handles drive the spline outside the visible canvas — that's
+ * fine, sampleCubicBezier returns whatever the polynomial yields.
+ */
+function buildKernelBuffer(ctx: AudioContext, spec: KernelSpec): AudioBuffer {
+  const taps = Math.max(2, Math.min(1024, Math.floor(spec.taps)))
+  const buf = ctx.createBuffer(1, taps, ctx.sampleRate)
+  const data = buf.getChannelData(0)
+  // First pass: raw sampled curve × decay envelope.
+  let peak = 0
+  for (let i = 0; i < taps; i++) {
+    const t = i / (taps - 1)
+    const [, y] = sampleCubicBezier(spec.p1, spec.cp1, spec.cp2, spec.p2, t)
+    const env = spec.decay > 0 ? Math.exp(-spec.decay * t) : 1
+    const v = y * env
+    data[i] = v
+    const a = Math.abs(v)
+    if (a > peak) peak = a
+  }
+  // Normalise so the louder shape doesn't blow out vs. a quieter one.
+  // Then scale by wet — caller's "kernel intensity" knob.
+  if (peak > 1e-6) {
+    const scale = spec.wet / peak
+    for (let i = 0; i < taps; i++) data[i] *= scale
+  }
+  return buf
+}
+
 function buildFiltersForParams(ctx: AudioContext, params: Record<string, ParamSpec> | undefined): { nodes: BiquadFilterNode[]; map: Record<string, BiquadFilterNode> } {
   const map: Record<string, BiquadFilterNode> = {}
   const nodes: BiquadFilterNode[] = []
@@ -514,6 +604,33 @@ class AudioBus {
     return this.loops.get(key)?.def
   }
 
+  /** Set the kernel filter (#65) on a loop. Mutates audioLive (commit
+   *  source) AND triggers a reattach via registerLoop so the convolver
+   *  joins the filter chain. Brief audio glitch on swap is acceptable
+   *  for an authoring tool — perfect-smooth update would require
+   *  bypassing THREE.Audio's setFilters routing. Pass `undefined` to
+   *  remove the kernel. */
+  setLoopKernel(key: string, kernel: KernelSpec | undefined) {
+    const live = audioLive.loops.find(l => l.key === key)
+    if (live) {
+      if (kernel) live.kernel = kernel
+      else delete live.kernel
+      // Re-attach so the new convolver lands in setFilters.
+      this.registerLoop(live)
+    }
+  }
+
+  /** Set the kernel filter on an event. No re-attach needed — play()
+   *  reads def.kernel each call, so the next trigger uses the new
+   *  spec. */
+  setEventKernel(key: string, kernel: KernelSpec | undefined) {
+    const live = audioLive.events.find(e => e.key === key)
+    if (live) {
+      if (kernel) live.kernel = kernel
+      else delete live.kernel
+    }
+  }
+
   setWindStrengthSource(fn: () => number) {
     this.windStrengthGetter = fn
   }
@@ -674,10 +791,35 @@ class AudioBus {
         rate *= 1 - j + Math.random() * (2 * j)
       }
       src.playbackRate.value = rate
+      // Volume gain (event override × def). dst is what `src` actually
+      // connects to — either the volMul gain or sfxGain directly.
       const dst: AudioNode = volMul !== 1
         ? (() => { const g = ctx.createGain(); g.gain.value = volMul; g.connect(this.sfxGain!); return g })()
         : this.sfxGain
-      src.connect(dst)
+      // Kernel filter (#65) — convolve the source through a user-drawn
+      // impulse response. Per-play graph for events:
+      //
+      //   BufferSource → split:
+      //                    dry GainNode (gain = 1 - wet) ─→ dst
+      //                    ConvolverNode → wet GainNode (gain = 1) ─→ dst
+      //
+      // wet=0 → pure dry (convolver branch contributes nothing). wet=1
+      // → fully convolved + zero dry. The convolver's output gain is
+      // baked into the kernel buffer (peak normalised to wet), so the
+      // wet branch's GainNode stays at 1 and the dry branch's gain
+      // moves with (1 - wet). Net mix is constant-ish at unity.
+      if (def.kernel && def.kernel.wet > 0) {
+        const conv = ctx.createConvolver()
+        conv.buffer = buildKernelBuffer(ctx, def.kernel)
+        const dry = ctx.createGain()
+        dry.gain.value = Math.max(0, 1 - def.kernel.wet)
+        const wet = ctx.createGain()
+        wet.gain.value = 1
+        src.connect(dry); dry.connect(dst)
+        src.connect(conv); conv.connect(wet); wet.connect(dst)
+      } else {
+        src.connect(dst)
+      }
       // Track + auto-remove. 'ended' fires on natural finish AND on
       // explicit .stop() — same handler covers both paths.
       const list = this.activeEventSources.get(key) ?? []
@@ -1054,7 +1196,21 @@ class AudioBus {
         if (lr.def.rolloff != null) positional.setRolloffFactor(lr.def.rolloff)
         positional.setDistanceModel('linear'); if (lr.def.rolloff == null) positional.setRolloffFactor(1)
         const filters = buildFiltersForParams(ctx, lr.def.params)
-        if (filters.nodes.length) positional.setFilters(filters.nodes)
+        // Kernel convolver (#65) appends to the filter chain for loops.
+        // Serial-only — wet/dry split would require bypassing
+        // THREE.Audio's internal routing; not worth the complexity.
+        // Wet factor scales kernel buffer values (peak = wet), so a
+        // curve carrying an impulse near t=0 + wet=0.4 acts roughly
+        // like 60% dry / 40% reverb-tail.
+        const chain: AudioNode[] = [...filters.nodes]
+        if (lr.def.kernel && lr.def.kernel.wet > 0) {
+          const conv = ctx.createConvolver()
+          conv.buffer = buildKernelBuffer(ctx, lr.def.kernel)
+          chain.push(conv)
+        }
+        // THREE.Audio.setFilters is typed for BiquadFilterNode[] but
+        // accepts any AudioNode at runtime — the cast is safe.
+        if (chain.length) positional.setFilters(chain as BiquadFilterNode[])
         lr.filters = filters.map
         positional.setVolume(0)
         target.add(positional)
@@ -1070,7 +1226,13 @@ class AudioBus {
       a.setBuffer(buf)
       a.setLoop(true)
       const filters = buildFiltersForParams(ctx, lr.def.params)
-      if (filters.nodes.length) a.setFilters(filters.nodes)
+      const chain: AudioNode[] = [...filters.nodes]
+      if (lr.def.kernel && lr.def.kernel.wet > 0) {
+        const conv = ctx.createConvolver()
+        conv.buffer = buildKernelBuffer(ctx, lr.def.kernel)
+        chain.push(conv)
+      }
+      if (chain.length) a.setFilters(chain as BiquadFilterNode[])
       lr.filters = filters.map
       a.setVolume(0)
       const ovr = this.loopOverrides.get(lr.def.key)

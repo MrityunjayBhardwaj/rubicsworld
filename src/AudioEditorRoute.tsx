@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import App from './App'
-import { audioBus, type LoopDef, type EventDef, type ParamSpec } from './world/audio/bus'
+import { audioBus, type LoopDef, type EventDef, type ParamSpec, type KernelSpec } from './world/audio/bus'
 import { audioLive, audioBootSlug } from './world/audio/audioLive'
 import { useLastTriggered } from './world/audio/lastTriggered'
 import { ALL_TRIGGERS } from './world/audio/triggers'
@@ -410,6 +410,222 @@ function Inspector({ entry }: { entry: Entry | null }) {
           </>
         : <EventOverrides entry={entry.def} />
       }
+      <KernelEditor entry={entry} />
+    </div>
+  )
+}
+
+// ── KernelEditor — Bézier-curve convolution kernel (#65) ───────────────
+
+const DEFAULT_KERNEL: KernelSpec = {
+  p1:  [0, 0],
+  cp1: [0.1, 1],
+  cp2: [0.4, 0.4],
+  p2:  [1, 0],
+  taps: 256,
+  decay: 3,
+  wet: 0.4,
+}
+
+type CtrlPoint = 'p1' | 'cp1' | 'cp2' | 'p2'
+
+const CANVAS_W = 260
+const CANVAS_H = 110
+const PAD = 8
+const HANDLE_RADIUS = 6
+const HIT_RADIUS = 12
+
+/**
+ * Inspector section that lets the user draw a convolution kernel as a
+ * cubic Bézier. Drag any of the four control points; the bus rebuilds
+ * the impulse-response AudioBuffer on every change so subsequent
+ * triggers (events) or loop attaches use the new kernel.
+ *
+ * Coordinate system: canvas pixel (x, y) ↔ kernel space (u, v) where
+ *   u = (px - PAD) / drawW   ∈ [0..1]
+ *   v = 1 - (py - PAD) / drawH ∈ [0..1]   (canvas y flips)
+ */
+function KernelEditor({ entry }: { entry: Entry }) {
+  // Live state mirrors audioLive's kernel; default fills in if absent.
+  const initialKernel = entry.def.kernel ?? null
+  const [kernel, setKernel] = useState<KernelSpec | null>(initialKernel)
+  const dragRef = useRef<{ which: CtrlPoint; rect: DOMRect } | null>(null)
+
+  // Keep React state in sync if the user switches entries.
+  useEffect(() => {
+    setKernel(entry.def.kernel ?? null)
+  }, [entry.def.key, entry.def.kernel])
+
+  const drawW = CANVAS_W - PAD * 2
+  const drawH = CANVAS_H - PAD * 2
+
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const dpr = window.devicePixelRatio || 1
+    canvas.width = CANVAS_W * dpr
+    canvas.height = CANVAS_H * dpr
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.scale(dpr, dpr)
+    // Background + axes
+    ctx.fillStyle = '#0a0d12'
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+    ctx.strokeStyle = '#1e242e'
+    ctx.lineWidth = 1
+    // Zero-amplitude line (mid)
+    ctx.beginPath(); ctx.moveTo(PAD, CANVAS_H - PAD); ctx.lineTo(CANVAS_W - PAD, CANVAS_H - PAD); ctx.stroke()
+    if (!kernel) {
+      ctx.fillStyle = '#5a6270'
+      ctx.font = '11px system-ui'
+      ctx.textAlign = 'center'
+      ctx.fillText('No kernel — Add Kernel below', CANVAS_W / 2, CANVAS_H / 2)
+      return
+    }
+    // Map kernel-space → canvas-space helper
+    const toCanvas = (u: number, v: number): [number, number] => [
+      PAD + u * drawW,
+      PAD + (1 - v) * drawH,
+    ]
+    // Control polygon (faint dashed)
+    ctx.strokeStyle = '#2a323d'
+    ctx.setLineDash([3, 3])
+    ctx.beginPath()
+    const [x0, y0] = toCanvas(...kernel.p1)
+    const [xc1, yc1] = toCanvas(...kernel.cp1)
+    const [xc2, yc2] = toCanvas(...kernel.cp2)
+    const [x1, y1] = toCanvas(...kernel.p2)
+    ctx.moveTo(x0, y0); ctx.lineTo(xc1, yc1)
+    ctx.moveTo(x1, y1); ctx.lineTo(xc2, yc2)
+    ctx.stroke()
+    ctx.setLineDash([])
+    // Curve
+    ctx.strokeStyle = '#4a8eef'
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(x0, y0)
+    ctx.bezierCurveTo(xc1, yc1, xc2, yc2, x1, y1)
+    ctx.stroke()
+    // Decay envelope (so user sees the actual IR shape after exp decay)
+    if (kernel.decay > 0) {
+      ctx.strokeStyle = 'rgba(200, 80, 80, 0.6)'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      const N = 64
+      for (let i = 0; i <= N; i++) {
+        const t = i / N
+        const env = Math.exp(-kernel.decay * t)
+        const [px, py] = toCanvas(t, env)
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py)
+      }
+      ctx.stroke()
+    }
+    // Anchors + handles
+    const drawDot = (x: number, y: number, kind: 'anchor' | 'handle') => {
+      ctx.fillStyle = kind === 'anchor' ? '#cfd6e0' : '#4a8eef'
+      ctx.beginPath()
+      ctx.arc(x, y, HANDLE_RADIUS, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.strokeStyle = '#0a0d12'
+      ctx.lineWidth = 2
+      ctx.stroke()
+    }
+    drawDot(x0, y0, 'anchor')
+    drawDot(x1, y1, 'anchor')
+    drawDot(xc1, yc1, 'handle')
+    drawDot(xc2, yc2, 'handle')
+  }, [kernel, drawW, drawH])
+
+  const commitKernel = useCallback((next: KernelSpec) => {
+    setKernel(next)
+    if (entry.kind === 'loop') audioBus.setLoopKernel(entry.def.key, next)
+    else audioBus.setEventKernel(entry.def.key, next)
+    if (entry.kind === 'loop') editedParamKeys.add(entry.def.key)
+    else editedEventKeys.add(entry.def.key)
+  }, [entry])
+
+  const onPointerDown = useCallback((e: React.PointerEvent) => {
+    if (!kernel) return
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const px = e.clientX - rect.left
+    const py = e.clientY - rect.top
+    const points: Array<{ key: CtrlPoint; x: number; y: number }> = [
+      { key: 'p1',  x: PAD + kernel.p1[0]  * drawW, y: PAD + (1 - kernel.p1[1])  * drawH },
+      { key: 'p2',  x: PAD + kernel.p2[0]  * drawW, y: PAD + (1 - kernel.p2[1])  * drawH },
+      { key: 'cp1', x: PAD + kernel.cp1[0] * drawW, y: PAD + (1 - kernel.cp1[1]) * drawH },
+      { key: 'cp2', x: PAD + kernel.cp2[0] * drawW, y: PAD + (1 - kernel.cp2[1]) * drawH },
+    ]
+    let hit: CtrlPoint | null = null
+    let bestDist = HIT_RADIUS
+    for (const pt of points) {
+      const d = Math.hypot(pt.x - px, pt.y - py)
+      if (d < bestDist) { bestDist = d; hit = pt.key }
+    }
+    if (!hit) return
+    e.preventDefault()
+    dragRef.current = { which: hit, rect }
+    canvas.setPointerCapture(e.pointerId)
+  }, [kernel, drawW, drawH])
+
+  const onPointerMove = useCallback((e: React.PointerEvent) => {
+    const drag = dragRef.current
+    if (!drag || !kernel) return
+    const px = e.clientX - drag.rect.left
+    const py = e.clientY - drag.rect.top
+    // Allow control handles to extend past visible canvas — clamp only
+    // anchors to [0..1]² since they define the kernel's start/end times.
+    const u = (px - PAD) / drawW
+    const v = 1 - (py - PAD) / drawH
+    const isAnchor = drag.which === 'p1' || drag.which === 'p2'
+    const cu = isAnchor ? Math.max(0, Math.min(1, u)) : u
+    const cv = isAnchor ? Math.max(0, Math.min(1, v)) : v
+    commitKernel({ ...kernel, [drag.which]: [cu, cv] })
+  }, [kernel, drawW, drawH, commitKernel])
+
+  const onPointerUp = useCallback((e: React.PointerEvent) => {
+    dragRef.current = null
+    canvasRef.current?.releasePointerCapture(e.pointerId)
+  }, [])
+
+  return (
+    <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #1e242e' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <span style={{ fontSize: 10, opacity: 0.55, textTransform: 'uppercase', letterSpacing: 1 }}>
+          Kernel filter
+        </span>
+        {kernel
+          ? <button onClick={() => {
+              setKernel(null)
+              if (entry.kind === 'loop') audioBus.setLoopKernel(entry.def.key, undefined)
+              else audioBus.setEventKernel(entry.def.key, undefined)
+            }} style={smallBtn}>Remove</button>
+          : <button onClick={() => commitKernel({ ...DEFAULT_KERNEL })} style={smallBtn}>+ Add Kernel</button>
+        }
+      </div>
+      <canvas
+        ref={canvasRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        style={{
+          width: CANVAS_W, height: CANVAS_H, display: 'block',
+          borderRadius: 3, background: '#0a0d12',
+          touchAction: 'none', cursor: kernel ? 'pointer' : 'default',
+        }}
+      />
+      {kernel && (
+        <div style={{ marginTop: 8 }}>
+          <Slider label="taps (length)" value={kernel.taps} min={16} max={1024} step={16}
+                  onChange={v => commitKernel({ ...kernel, taps: v })} />
+          <Slider label="decay" value={kernel.decay} min={0} max={20} step={0.1}
+                  onChange={v => commitKernel({ ...kernel, decay: v })} />
+          <Slider label="wet" value={kernel.wet} min={0} max={1} step={0.01}
+                  onChange={v => commitKernel({ ...kernel, wet: v })} />
+        </div>
+      )}
     </div>
   )
 }
@@ -996,6 +1212,9 @@ function buildSparseAudioJson(): { loops?: LoopDef[]; events?: EventDef[] } {
       baked.params = { ...(baked.params ?? def.params ?? {}), vol: { ...(baked.params?.vol ?? def.params?.vol ?? {}), base: baseVol * ovr.vol } }
     }
     if (ovr?.radius != null) baked.radius = ovr.radius
+    // Kernel filter (#65) — persist whatever audioLive has now. Reload
+    // re-applies via boot XHR + setLoopKernel on attach.
+    if (def.kernel) baked.kernel = def.kernel
     loops.push(baked)
   }
   if (loops.length) out.loops = loops
@@ -1009,6 +1228,7 @@ function buildSparseAudioJson(): { loops?: LoopDef[]; events?: EventDef[] } {
     const baked: EventDef = { key: def.key, anchor: def.anchor, src: def.src }
     if (def.pitchJitter != null) baked.pitchJitter = def.pitchJitter
     if (def.polyphony != null) baked.polyphony = def.polyphony
+    if (def.kernel) baked.kernel = def.kernel
     events.push(baked)
   }
   if (events.length) out.events = events
