@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import App from './App'
-import { audioBus, type LoopDef, type EventDef, type ParamSpec } from './world/audio/bus'
+import { audioBus, type LoopDef, type EventDef, type ParamSpec, type ADSR } from './world/audio/bus'
 import { audioLive, audioBootSlug } from './world/audio/audioLive'
 import { useLastTriggered } from './world/audio/lastTriggered'
 import { ALL_TRIGGERS } from './world/audio/triggers'
@@ -854,15 +854,31 @@ function EventOverrides({ entry }: { entry: EventDef }) {
     audioBus.setEventOverride(entry.key, next)
     force(x => x + 1)
   }
-  // Polyphony lives on the EventDef (persistent), not in overrides
-  // (ephemeral). Mutate the audioLive entry directly — bus reads
-  // def.polyphony each play() call so the change is picked up next
-  // trigger without a registerEvent equivalent.
+  // Polyphony, gainJitter, pitchJitter, adsr live on the EventDef
+  // (persistent), not in overrides (ephemeral). Mutate the audioLive
+  // entry directly — bus reads def.* each play() so the change is
+  // picked up next trigger without a registerEvent equivalent.
   const setPolyphony = (v: number) => {
     entry.polyphony = v >= 16 ? undefined : v   // 16 = "unlimited" sentinel
     editedEventKeys.add(entry.key)
     force(x => x + 1)
   }
+  const setGainJitter = (v: number) => {
+    entry.gainJitter = v > 0 ? v : undefined
+    editedEventKeys.add(entry.key)
+    force(x => x + 1)
+  }
+  const setPitchJitter = (v: number) => {
+    entry.pitchJitter = v > 0 ? v : undefined
+    editedEventKeys.add(entry.key)
+    force(x => x + 1)
+  }
+  const setAdsr = (next: ADSR | undefined) => {
+    entry.adsr = next
+    editedEventKeys.add(entry.key)
+    force(x => x + 1)
+  }
+  const isSynth = entry.src.startsWith('synth:')
   // 0..15 maps to 1..15 voices; 16 maps to "unlimited" (undefined).
   const polySliderValue = entry.polyphony ?? 16
   return (
@@ -871,12 +887,230 @@ function EventOverrides({ entry }: { entry: EventDef }) {
       <Slider label="Speed mul"  value={ovr.speed ?? 1} min={0.25} max={2} step={0.01} onChange={v => set({ speed: v })} />
       <Toggle label="Mute" value={ovr.mute ?? false} onChange={v => set({ mute: v })} />
       <PolyphonySlider value={polySliderValue} onChange={setPolyphony} />
+      {!isSynth && (
+        <>
+          <Slider label="Pitch jitter" value={entry.pitchJitter ?? 0} min={0} max={1} step={0.01} onChange={setPitchJitter} />
+          <Slider label="Gain jitter"  value={entry.gainJitter  ?? 0} min={0} max={1} step={0.01} onChange={setGainJitter} />
+          <ADSREnvelopeEditor adsr={entry.adsr} onChange={setAdsr} />
+        </>
+      )}
       <button
         style={{ ...btn, marginTop: 8 }}
         onClick={() => audioBus.play(entry.key)}
       >
         ▶ Audition
       </button>
+    </div>
+  )
+}
+
+// ── ADSREnvelopeEditor ──────────────────────────────────────────────────
+
+const ADSR_DEFAULT: ADSR = { attack: 5, decay: 50, sustain: 0.8, release: 80 }
+const ADSR_MAX_AD_MS = 2000   // attack/decay slider cap
+const ADSR_MAX_R_MS  = 4000   // release slider cap (reverb tails want long release)
+const ADSR_CANVAS_W  = 200
+const ADSR_CANVAS_H  = 80
+
+/**
+ * 200×80 canvas with 4 draggable handles (attack-end, decay-end,
+ * sustain-hold-start, release-end) and 4 raw sliders below. The four
+ * handles map to ADSR like this:
+ *
+ *   y-axis = gain 0..1 (top = 1, bottom = 0)
+ *   x-axis = time, with the canvas split into proportional zones for
+ *            attack | decay | hold | release.
+ *
+ * The hold zone is a fixed 25% of canvas width — it's only there to make
+ * the sustain handle visible; it doesn't represent a real time. Drag
+ * targets:
+ *   handle 0: attack end       → x = attack ms (0..ADSR_MAX_AD_MS), y = 1 (locked)
+ *   handle 1: decay end        → x = attack+decay ms, y = sustain
+ *   handle 2: sustain hold end → x = attack+decay+hold (locked), y = sustain (mirrored from h1)
+ *   handle 3: release end      → x = total, y = 0 (locked)
+ */
+function ADSREnvelopeEditor({ adsr, onChange }: { adsr: ADSR | undefined; onChange: (next: ADSR | undefined) => void }) {
+  const enabled = adsr != null
+  const cur = adsr ?? ADSR_DEFAULT
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const dragRef = useRef<{ handle: number } | null>(null)
+  const [, force] = useState(0)
+
+  // Layout: x positions for the 4 phase boundaries, in canvas pixels.
+  // Total time budget = attack + decay + ADSR_MAX_AD_MS (hold) + release.
+  // We fit the whole budget into the canvas; the hold zone gets at least
+  // 20px so handle 2 stays visible.
+  const layout = useMemo(() => {
+    const A = cur.attack
+    const D = cur.decay
+    const R = cur.release
+    const HOLD_MS = ADSR_MAX_AD_MS
+    const total = A + D + HOLD_MS + R
+    const xA = (A / total) * ADSR_CANVAS_W
+    const xD = ((A + D) / total) * ADSR_CANVAS_W
+    const xH = ((A + D + HOLD_MS) / total) * ADSR_CANVAS_W
+    const xR = ADSR_CANVAS_W
+    const yS = ADSR_CANVAS_H - cur.sustain * ADSR_CANVAS_H
+    return { xA, xD, xH, xR, yS, total }
+  }, [cur.attack, cur.decay, cur.release, cur.sustain])
+
+  // Render
+  useEffect(() => {
+    const c = canvasRef.current
+    if (!c) return
+    const dpr = window.devicePixelRatio || 1
+    c.width = ADSR_CANVAS_W * dpr
+    c.height = ADSR_CANVAS_H * dpr
+    const ctx = c.getContext('2d')
+    if (!ctx) return
+    ctx.scale(dpr, dpr)
+    ctx.fillStyle = '#0a0d12'
+    ctx.fillRect(0, 0, ADSR_CANVAS_W, ADSR_CANVAS_H)
+    if (!enabled) {
+      ctx.fillStyle = '#3a4250'
+      ctx.font = '11px system-ui'
+      ctx.textAlign = 'center'
+      ctx.fillText('ADSR off — click to enable', ADSR_CANVAS_W / 2, ADSR_CANVAS_H / 2 + 4)
+      return
+    }
+    const { xA, xD, xH, xR, yS } = layout
+    // Envelope path: (0, bottom) → (xA, top) → (xD, yS) → (xH, yS) → (xR, bottom)
+    ctx.strokeStyle = '#4a8eef'
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.moveTo(0, ADSR_CANVAS_H)
+    ctx.lineTo(xA, 0)
+    ctx.lineTo(xD, yS)
+    ctx.lineTo(xH, yS)
+    ctx.lineTo(xR, ADSR_CANVAS_H)
+    ctx.stroke()
+    // Fill under the envelope
+    ctx.fillStyle = 'rgba(74, 142, 239, 0.12)'
+    ctx.lineTo(0, ADSR_CANVAS_H)
+    ctx.closePath()
+    ctx.fill()
+    // Handles
+    const handles = [
+      { x: xA, y: 0 },
+      { x: xD, y: yS },
+      { x: xH, y: yS },
+      { x: xR, y: ADSR_CANVAS_H },
+    ]
+    for (const h of handles) {
+      ctx.fillStyle = '#cfd6e0'
+      ctx.beginPath()
+      ctx.arc(h.x, h.y, 4, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }, [enabled, layout])
+
+  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!enabled) { onChange(ADSR_DEFAULT); return }
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    const { xA, xD, xH, xR, yS } = layout
+    const candidates = [
+      { i: 0, dx: x - xA, dy: y - 0 },
+      { i: 1, dx: x - xD, dy: y - yS },
+      { i: 2, dx: x - xH, dy: y - yS },
+      { i: 3, dx: x - xR, dy: y - ADSR_CANVAS_H },
+    ]
+    let best = candidates[0]
+    let bestD = Infinity
+    for (const c of candidates) {
+      const d = c.dx * c.dx + c.dy * c.dy
+      if (d < bestD) { bestD = d; best = c }
+    }
+    if (bestD > 25 * 25) return
+    dragRef.current = { handle: best.i }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+
+  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current
+    if (!drag) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = Math.max(0, Math.min(ADSR_CANVAS_W, e.clientX - rect.left))
+    const y = Math.max(0, Math.min(ADSR_CANVAS_H, e.clientY - rect.top))
+    // Convert canvas-x back to milliseconds. total = A+D+HOLD+R.
+    const HOLD_MS = ADSR_MAX_AD_MS
+    if (drag.handle === 0) {
+      // Attack endpoint — adjust attack while keeping decay/release fixed.
+      // Solve x = A / (A + D + H + R) * W → A = x * (D + H + R) / (W - x)
+      const D = cur.decay, R = cur.release
+      const newA = (x * (D + HOLD_MS + R)) / Math.max(1, ADSR_CANVAS_W - x)
+      onChange({ ...cur, attack: Math.max(1, Math.min(ADSR_MAX_AD_MS, newA)) })
+    } else if (drag.handle === 1) {
+      // Decay endpoint — x sets attack+decay split, y sets sustain.
+      const A = cur.attack, R = cur.release
+      const totalNoD = A + HOLD_MS + R
+      // x = (A + D) / (A + D + H + R) * W → D = x*(A+H+R)/(W-x) - A
+      const newAD = (x * totalNoD) / Math.max(1, ADSR_CANVAS_W - x)
+      const newD = Math.max(0, Math.min(ADSR_MAX_AD_MS, newAD - A))
+      const newSustain = Math.max(0, Math.min(1, 1 - y / ADSR_CANVAS_H))
+      onChange({ ...cur, decay: newD, sustain: newSustain })
+    } else if (drag.handle === 2) {
+      // Sustain hold-end — only the y (sustain level) is meaningful;
+      // x position is locked by hold zone width.
+      const newSustain = Math.max(0, Math.min(1, 1 - y / ADSR_CANVAS_H))
+      onChange({ ...cur, sustain: newSustain })
+    } else if (drag.handle === 3) {
+      // Release endpoint — x is always at canvas right edge; we read the
+      // user's drag delta as a release-time scale: dragging right of the
+      // anchor stretches release proportionally. Since x is clamped to
+      // canvas width we instead treat drag-y as a release adjustment too:
+      // not ideal but kept simple — use vertical position over the bottom
+      // half to scale release between current value and ADSR_MAX_R_MS.
+      const dy = (ADSR_CANVAS_H - y) / ADSR_CANVAS_H   // 0 at bottom, 1 at top
+      const newR = Math.max(1, dy * ADSR_MAX_R_MS)
+      onChange({ ...cur, release: newR })
+    }
+    force(n => n + 1)
+  }
+
+  const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (dragRef.current) {
+      try { e.currentTarget.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+      dragRef.current = null
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #1e242e' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <span style={{ fontSize: 10, opacity: 0.55, textTransform: 'uppercase', letterSpacing: 1 }}>
+          Envelope (ADSR)
+        </span>
+        <button
+          style={{ ...smallBtn, padding: '2px 6px', fontSize: 9 }}
+          onClick={() => onChange(enabled ? undefined : ADSR_DEFAULT)}
+        >
+          {enabled ? 'disable' : 'enable'}
+        </button>
+      </div>
+      <canvas
+        ref={canvasRef}
+        style={{
+          width: ADSR_CANVAS_W, height: ADSR_CANVAS_H,
+          display: 'block', borderRadius: 3,
+          background: '#0a0d12',
+          cursor: enabled ? 'grab' : 'pointer',
+          touchAction: 'none',
+        }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+      />
+      {enabled && (
+        <div style={{ marginTop: 6 }}>
+          <Slider label="attack (ms)"  value={cur.attack}  min={1} max={ADSR_MAX_AD_MS} step={1}    onChange={v => onChange({ ...cur, attack: v })} />
+          <Slider label="decay (ms)"   value={cur.decay}   min={0} max={ADSR_MAX_AD_MS} step={1}    onChange={v => onChange({ ...cur, decay: v })} />
+          <Slider label="sustain"      value={cur.sustain} min={0} max={1}              step={0.01} onChange={v => onChange({ ...cur, sustain: v })} />
+          <Slider label="release (ms)" value={cur.release} min={1} max={ADSR_MAX_R_MS}  step={1}    onChange={v => onChange({ ...cur, release: v })} />
+        </div>
+      )}
     </div>
   )
 }
@@ -1008,7 +1242,9 @@ function buildSparseAudioJson(): { loops?: LoopDef[]; events?: EventDef[] } {
     if (!hasOverride && !hasFieldEdit) continue
     const baked: EventDef = { key: def.key, anchor: def.anchor, src: def.src }
     if (def.pitchJitter != null) baked.pitchJitter = def.pitchJitter
+    if (def.gainJitter != null) baked.gainJitter = def.gainJitter
     if (def.polyphony != null) baked.polyphony = def.polyphony
+    if (def.adsr) baked.adsr = { ...def.adsr }
     events.push(baked)
   }
   if (events.length) out.events = events
