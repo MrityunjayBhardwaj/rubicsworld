@@ -649,5 +649,5 @@ function activeLevelBeacon(): Plugin {
 
 export default defineConfig({
   plugins: [react(), dioramaHotReload(), settingsCommit(), maskCommit(), hdriCommit(), dioramaCommit(), audioCommit(), activeLevelBeacon()],
-  server: { port: 7000 },
+  server: { port: 7001 },
 })
