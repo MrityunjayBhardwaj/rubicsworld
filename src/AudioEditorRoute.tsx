@@ -153,6 +153,14 @@ function AudioWorkspace() {
   }, [])
   void tick
 
+  // Dev-only handle to the audio bus — mirrors window.__planet. Lets
+  // Playwright read/seed bus state without DOM scraping. Stripped in prod.
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      ;(window as unknown as { __audioBus?: typeof audioBus }).__audioBus = audioBus
+    }
+  }, [])
+
   const entries: Entry[] = useMemo(() => [
     ...audioLive.loops.map((def): Entry => ({ kind: 'loop', def })),
     ...audioLive.events.map((def): Entry => ({ kind: 'event', def })),
@@ -174,6 +182,18 @@ function AudioWorkspace() {
   }, [lastKey, lastN])
 
   const selected = entries.find(e => e.def.key === selectedKey) ?? entries[0] ?? null
+
+  // Bumped on reset to remount the Inspector so every slider / ADSR / waveform
+  // re-reads the now-default values instead of its stale internal state.
+  const [resetNonce, setResetNonce] = useState(0)
+  const onResetEntry = useCallback((entry: Entry) => {
+    if (!audioBus.resetEntryToDefault(entry.def.key)) return
+    // Drop from the commit-tracking sets so a following Commit omits this
+    // entry from audio.json — reset must escape the persisted override too.
+    if (entry.kind === 'loop') editedParamKeys.delete(entry.def.key)
+    else editedEventKeys.delete(entry.def.key)
+    setResetNonce(n => n + 1)
+  }, [])
 
   const slug = audioBootSlug
   const [committing, setCommitting] = useState<'idle' | 'committing' | 'ok' | 'err'>('idle')
@@ -249,7 +269,11 @@ function AudioWorkspace() {
           onSelect={setSelectedKey}
           lockSelection={lockSelection}
         />
-        <Inspector entry={selected} />
+        <Inspector
+          entry={selected}
+          onReset={onResetEntry}
+          key={`${selected?.def.key ?? 'none'}:${resetNonce}`}
+        />
       </div>
     </>
   )
@@ -387,7 +411,7 @@ function EventList({
 
 // ── Inspector ──────────────────────────────────────────────────────────
 
-function Inspector({ entry }: { entry: Entry | null }) {
+function Inspector({ entry, onReset }: { entry: Entry | null; onReset: (entry: Entry) => void }) {
   if (!entry) {
     return (
       <div style={{ flex: '1 1 50%', padding: 16, opacity: 0.5, fontStyle: 'italic' }}>
@@ -395,9 +419,27 @@ function Inspector({ entry }: { entry: Entry | null }) {
       </div>
     )
   }
+  const canReset = audioBus.hasRegistryDefault(entry.def.key)
   return (
     <div style={{ flex: '1 1 50%', minHeight: 200, padding: 12, overflowY: 'auto' }}>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>{entry.def.key}</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.def.key}</span>
+        <button
+          disabled={!canReset}
+          title={canReset
+            ? 'Restore this sound to its registry.json default — discards live edits and overrides'
+            : 'No compiled-in default for this entry (e.g. a glb-imported sound)'}
+          onClick={() => {
+            if (!canReset) return
+            if (window.confirm(`Reset "${entry.def.key}" to its default?\n\nThis discards live edits and overrides for this sound.`)) {
+              onReset(entry)
+            }
+          }}
+          style={{ ...btn, padding: '4px 10px', fontSize: 11, whiteSpace: 'nowrap', opacity: canReset ? 1 : 0.4, cursor: canReset ? 'pointer' : 'not-allowed' }}
+        >
+          Reset to default
+        </button>
+      </div>
       <div style={{ fontSize: 11, opacity: 0.7, fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all', marginBottom: 8 }}>
         {entry.def.src}
       </div>
