@@ -62,9 +62,9 @@
     "dofDebugFixedDistance": false,
     "dofDebugFixedValue": 3.5,
     "toneExposure": 1.05,
-    "bloomEnabled": true,
-    "bloomIntensity": 0.6,
-    "bloomThreshold": 0.9,
+    "bloomEnabled": false,
+    "bloomIntensity": 1.8000000000000003,
+    "bloomThreshold": 0.06000000000000005,
     "bloomSmoothing": 0.2,
     "vignetteEnabled": true,
     "vignetteOffset": 0.5,
@@ -80,5 +80,8 @@
     "gradeBrightness": 0,
     "noiseEnabled": true,
     "noiseOpacity": 0.035
+  },
+  "walk": {
+    "playerHeight": 0.16
   }
 }
