@@ -25,12 +25,19 @@ export interface ParamSpec {
   min?: number
   max?: number
   invert?: boolean
-  // Filter resonance — only meaningful for lowpass/highpass/bandpass
+  // Filter resonance — only meaningful for lowpass/highpass/bandpass/peaking
   // params. Default 0.7 (transparent in lowpass, gentle peak in
-  // bandpass). Higher Q = narrower filter, more emphasis at cutoff.
-  // Read at applyParams time so the editor's Q slider takes effect on
-  // next tick without rebuilding the BiquadFilter.
+  // bandpass, moderate bell width for peaking). Higher Q = narrower
+  // filter, more emphasis at cutoff. Read at applyParams time so the
+  // editor's Q slider takes effect on next tick without rebuilding the
+  // BiquadFilter.
   q?: number
+  // Filter gain in dB — only meaningful for shelves and peaking filters
+  // (#81 — 3-band EQ). 0 = transparent, ±18 typical range. Ignored by
+  // lowpass/highpass/bandpass (BiquadFilterNode.gain has no effect for
+  // those types). Static — not modulator-driven — for now; sweeping EQ
+  // gain is rare in practice and adds smoothing complexity.
+  gain?: number
 }
 
 // Re-export so the editor can construct/mutate specs without poking the
@@ -224,11 +231,25 @@ interface LoopRuntime {
 }
 
 // Build the BiquadFilters declared by a loop's params. Keys are the filter
-// type — a registry param named `lowpass` / `highpass` / `bandpass` becomes
-// the matching BiquadFilter, returned in a stable order so setFilters()
-// receives a deterministic chain (highpass → bandpass → lowpass = "trim
-// bottom, focus middle, trim top" in that order).
-const FILTER_NAMES = ['highpass', 'bandpass', 'lowpass'] as const
+// type — a registry param named `lowpass` / `highpass` / `bandpass` /
+// `lowshelf` / `peaking` / `highshelf` becomes the matching BiquadFilter,
+// returned in a stable mastering order so setFilters() receives a
+// deterministic chain: cut bottom → shelf bottom → focus middle → bell
+// middle → shelf top → cut top. Order matters because biquads are not
+// linear-phase: swapping a peak before/after a shelf changes the audible
+// sum on overlap regions.
+const FILTER_NAMES = ['highpass', 'lowshelf', 'bandpass', 'peaking', 'highshelf', 'lowpass'] as const
+// Defaults per filter type — transparent (0 dB / open Q / sensible centre)
+// so an unattached newly-added filter doesn't audibly snap before the
+// editor writes a real value.
+const FILTER_DEFAULTS: Record<typeof FILTER_NAMES[number], { freq: number; q: number }> = {
+  highpass:  { freq: 20,    q: 0.7 },
+  lowshelf:  { freq: 200,   q: 0.7 },   // Q ignored for shelves; left for API uniformity
+  bandpass:  { freq: 1000,  q: 0.7 },
+  peaking:   { freq: 1000,  q: 1.0 },
+  highshelf: { freq: 5000,  q: 0.7 },
+  lowpass:   { freq: 22000, q: 0.7 },
+}
 function buildFiltersForParams(ctx: AudioContext, params: Record<string, ParamSpec> | undefined): { nodes: BiquadFilterNode[]; map: Record<string, BiquadFilterNode> } {
   const map: Record<string, BiquadFilterNode> = {}
   const nodes: BiquadFilterNode[] = []
@@ -237,10 +258,11 @@ function buildFiltersForParams(ctx: AudioContext, params: Record<string, ParamSp
     if (!params[name]) continue
     const f = ctx.createBiquadFilter()
     f.type = name as BiquadFilterType
-    // Sensible defaults so the filter is transparent until applyParams writes
-    // a real value (avoids a brief silence on attach if mod is mid-range).
-    f.frequency.value = name === 'lowpass' ? 22000 : name === 'highpass' ? 20 : 1000
-    f.Q.value = 0.7
+    const d = FILTER_DEFAULTS[name]
+    f.frequency.value = d.freq
+    f.Q.value = d.q
+    // gain.value defaults to 0 dB (transparent) — shelves/peaking pick it
+    // up from spec.gain in applyParams. Cut filters ignore it natively.
     map[name] = f
     nodes.push(f)
   }
@@ -513,11 +535,25 @@ class AudioBus {
    *  Mutates BOTH the runtime def (what applyParams reads) AND the
    *  audioLive entry (what the Commit button bakes into audio.json),
    *  so the two never drift mid-session.
+   *
+   *  When the spec being added is a filter type that isn't yet in the
+   *  loop's BiquadFilter chain (lr.filters), the chain is rebuilt
+   *  in-place via setFilters() — without this, `addParam('peaking')` etc.
+   *  would land the spec in audioLive (so Commit persists it) but leave
+   *  the audible chain unchanged until the next page reload. Fixes a
+   *  latent #54-era gap, also unblocks the #81 EQ "Add band" UX.
    */
   setLoopParamSpec(key: string, name: string, spec: ParamSpec) {
     const lr = this.loops.get(key)
     if (lr) {
       lr.def.params = { ...(lr.def.params ?? {}), [name]: { ...spec } }
+      // If `name` is a filter type and that filter isn't already wired,
+      // rebuild the chain. applyParams's "if (filt) {...}" branch on its
+      // next tick will then pick up the spec's freq/Q/gain.
+      const isFilter = (FILTER_NAMES as readonly string[]).includes(name)
+      if (isFilter && !(lr.filters && lr.filters[name])) {
+        this.rebuildLoopFilters(lr)
+      }
     }
     // audioLive is the editor's commit source; keep it in sync. Search
     // both static loops + runtimeLoops so glb-imported KHR_audio_emitter
@@ -531,11 +567,36 @@ class AudioBus {
     }
   }
 
+  /** Rebuild the BiquadFilter chain for a loop from its current params and
+   *  attach it via THREE.Audio.setFilters(). In-place — the audio source
+   *  node stays connected; only the inserted filters change. Safe to call
+   *  with no listener (no-op until attach). Sample loops only; synth loops
+   *  use their own param routing, not this chain. */
+  private rebuildLoopFilters(lr: LoopRuntime) {
+    if (!this.listener || !lr.node) return
+    const ctx = this.listener.context
+    const built = buildFiltersForParams(ctx, lr.def.params)
+    lr.filters = built.map
+    // setFilters() accepts BiquadFilterNode[] per its declared type. THREE
+    // re-wires the chain (source → filters → gain → destination) cleanly.
+    try { lr.node.setFilters(built.nodes) } catch { /* synth or detached — ignore */ }
+  }
+
   /** Read the current runtime def for a loop. Editor uses this to
    *  populate sliders with what applyParams is actually using right
    *  now (post any setLoopParamSpec edits). */
   getLoopRuntimeDef(key: string): LoopDef | undefined {
     return this.loops.get(key)?.def
+  }
+
+  /** Filter-type keys currently wired into the loop's BiquadFilter chain
+   *  (e.g. ['highpass', 'peaking', 'lowpass']). Distinct from the spec
+   *  set in audioLive — a key here means a BiquadFilterNode is actually
+   *  in the audible signal path, not just persisted for commit. Returns
+   *  [] for unregistered keys or pre-attach. */
+  getLoopFilterNames(key: string): string[] {
+    const lr = this.loops.get(key)
+    return lr?.filters ? Object.keys(lr.filters) : []
   }
 
   setWindStrengthSource(fn: () => number) {
@@ -925,15 +986,18 @@ class AudioBus {
         continue
       }
 
-      // Filter params (lowpass / highpass / bandpass) — smooth-sweep the
-      // sample-loop's BiquadFilter, OR a synth-exposed AudioParam. Q
-      // updates apply on the same tick — bus reads spec.q each frame so
-      // the editor's slider is heard immediately, with the same smoothSet
-      // ramp as frequency to avoid zipper noise on rapid drags.
+      // Filter params (lowpass / highpass / bandpass / lowshelf / peaking
+      // / highshelf) — smooth-sweep the sample-loop's BiquadFilter, OR a
+      // synth-exposed AudioParam. Q + gain updates apply on the same tick
+      // — bus reads spec.q / spec.gain each frame so the editor's sliders
+      // are heard immediately, with the same smoothSet ramp as frequency
+      // to avoid zipper noise on rapid drags. gain is dB (Web Audio
+      // native unit for BiquadFilterNode.gain); cut filters ignore it.
       const filt = lr.filters?.[name]
       if (filt) {
         smoothSet(filt.frequency, value, ctx, SMOOTH_HORIZON_FILT)
         if (spec.q != null) smoothSet(filt.Q, spec.q, ctx, SMOOTH_HORIZON_FILT)
+        if (spec.gain != null) smoothSet(filt.gain, spec.gain, ctx, SMOOTH_HORIZON_FILT)
         continue
       }
       const ap = lr.synth?.params?.[name]
