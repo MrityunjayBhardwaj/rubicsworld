@@ -1394,18 +1394,25 @@ class RUBICS_OT_Export(bpy.types.Operator):
             self.report({'ERROR'}, "Set Project Path in addon preferences first")
             return {'CANCELLED'}
 
+        scene = context.scene
+        ignore_errors   = getattr(scene, 'rubics_ignore_errors',   False)
+        ignore_warnings = getattr(scene, 'rubics_ignore_warnings', False)
+
         issues = validate_scene(context)
         errors = [m for (lvl, m) in issues if lvl == 'ERROR']
         warnings = [m for (lvl, m) in issues if lvl == 'WARNING']
 
-        if errors:
+        if errors and not ignore_errors:
             for m in errors[:5]:
                 self.report({'ERROR'}, m)
             self.report({'ERROR'}, f"{len(errors)} error(s) — aborting export")
             return {'CANCELLED'}
 
-        for m in warnings[:5]:
-            self.report({'WARNING'}, m)
+        if not ignore_warnings:
+            for m in warnings[:5]:
+                self.report({'WARNING'}, m)
+        if errors and ignore_errors:
+            self.report({'WARNING'}, f"Exported despite {len(errors)} error(s) (ignore errors ON)")
 
         os.makedirs(os.path.dirname(path), exist_ok=True)
         hidden = _isolate_hide_set(context) if context.scene.rubics_isolate_export else set()
@@ -1652,7 +1659,9 @@ class RUBICS_PT_Panel(bpy.types.Panel):
         col.operator(RUBICS_OT_Import.bl_idname,    icon='IMPORT')
         col.operator(RUBICS_OT_Export.bl_idname,    icon='EXPORT')
         col.operator(RUBICS_OT_Validate.bl_idname,  icon='CHECKMARK')
-        col.prop(context.scene, "rubics_isolate_export", text="Isolate: only export face-block content")
+        col.prop(context.scene, "rubics_isolate_export",  text="Isolate: only export face-block content")
+        col.prop(context.scene, "rubics_ignore_warnings", text="Ignore warnings on export")
+        col.prop(context.scene, "rubics_ignore_errors",   text="Ignore errors on export (force)")
 
         layout.separator()
         box = layout.box()
@@ -1741,6 +1750,19 @@ def register():
         ),
         default=True,
     )
+    bpy.types.Scene.rubics_ignore_warnings = bpy.props.BoolProperty(
+        name="Ignore Warnings",
+        description="Suppress validation warnings during Export (export proceeds without warning popups)",
+        default=False,
+    )
+    bpy.types.Scene.rubics_ignore_errors = bpy.props.BoolProperty(
+        name="Ignore Errors",
+        description=(
+            "Force export even when validation errors are found. "
+            "The export will still proceed but a warning is shown so you know errors were bypassed."
+        ),
+        default=False,
+    )
     # Per-.blend Live Link slot. AUTO mirrors the browser tab; pinning forces
     # exports into a specific level. Default to AUTO so a fresh open follows
     # whichever tab the user has up.
@@ -1761,14 +1783,12 @@ def unregister():
     # away — otherwise Blender holds references to dead operator classes and
     # crashes on the next depsgraph update.
     _live_stop()
-    try:
-        del bpy.types.Scene.rubics_isolate_export
-    except AttributeError:
-        pass
-    try:
-        del bpy.types.Scene.rubics_live_link_slug
-    except AttributeError:
-        pass
+    for prop in ('rubics_isolate_export', 'rubics_ignore_warnings',
+                 'rubics_ignore_errors', 'rubics_live_link_slug'):
+        try:
+            delattr(bpy.types.Scene, prop)
+        except AttributeError:
+            pass
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
 
