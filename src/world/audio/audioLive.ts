@@ -98,6 +98,15 @@ if (bootLevelSlug) {
  *  and the bus picks up the new values on its next tick. */
 export const audioLive: Registry = _live
 
+/** Pristine compiled-in defaults (`registry.json`), never mutated. The
+ *  editor's "Reset to default" (issue #75) restores an entry from here.
+ *  Kept as a SEPARATE clone from `audioLive` — which boot-merges per-level
+ *  overrides and then absorbs live edits in place — so the factory baseline
+ *  stays reachable no matter how much the live registry drifts. Per-level
+ *  audio.json is deliberately NOT merged in: "default" means the global
+ *  compiled-in value, so reset escapes a level override too. */
+export const audioDefaults: Registry = deepClone(registryJson) as unknown as Registry
+
 /** Mark this audio.json as live-loaded for THIS slug, so the editor's
  *  Commit endpoint knows where to write. Mirrors `bootLevelSlug`. */
 export const audioBootSlug: string | null = bootLevelSlug

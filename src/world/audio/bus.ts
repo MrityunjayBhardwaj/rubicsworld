@@ -128,7 +128,7 @@ export type Category = 'master' | 'ambient' | 'sfx'
 // type). Type-only re-import means no runtime cycle. The runtime value
 // (`audioLive`) is read on demand below, so the import resolves after both
 // modules' bodies have finished.
-import { audioLive } from './audioLive'
+import { audioLive, audioDefaults } from './audioLive'
 export const REGISTRY: Registry = audioLive
 
 type Modulator = () => number
@@ -588,6 +588,47 @@ class AudioBus {
   }
   getLoopOverride(key: string) { return this.loopOverrides.get(key) }
   getEventOverride(key: string) { return this.eventOverrides.get(key) }
+
+  /** True if `key` has a compiled-in registry.json default — i.e. reset is
+   *  meaningful. False for glb-imported KHR_audio_emitter runtime loops or
+   *  level-only entries, which have no factory baseline to restore. The
+   *  editor uses this to disable its "Reset to default" button. */
+  hasRegistryDefault(key: string): boolean {
+    return audioDefaults.loops.some(l => l.key === key)
+        || audioDefaults.events.some(e => e.key === key)
+  }
+
+  /** Reset a loop/event to its compiled-in registry.json default — issue #75.
+   *  Restores EVERY layer that feeds the effective sound: the audioLive entry
+   *  (commit source), the runtime def, and the ephemeral override map. The
+   *  editor additionally drops the key from its commit-tracking sets so a
+   *  following Commit omits the entry from audio.json. Returns false (no-op)
+   *  if `key` has no registry default — see hasRegistryDefault. */
+  resetEntryToDefault(key: string): boolean {
+    const defLoop = audioDefaults.loops.find(l => l.key === key)
+    if (defLoop) {
+      const restored = JSON.parse(JSON.stringify(defLoop)) as LoopDef
+      const idx = audioLive.loops.findIndex(l => l.key === key)
+      if (idx >= 0) audioLive.loops[idx] = restored
+      this.loopOverrides.delete(key)
+      // registerLoop is idempotent: tears down the existing node and re-attaches
+      // with the default src/params/radius. Picks up the default buffer if the
+      // sample was swapped.
+      this.registerLoop(restored)
+      return true
+    }
+    const defEvent = audioDefaults.events.find(e => e.key === key)
+    if (defEvent) {
+      // Events read their def from REGISTRY (=== audioLive) on every play(),
+      // so restoring the audioLive entry + clearing the override is sufficient;
+      // there's no separate runtime node to rebuild.
+      const idx = audioLive.events.findIndex(e => e.key === key)
+      if (idx >= 0) audioLive.events[idx] = JSON.parse(JSON.stringify(defEvent)) as EventDef
+      this.eventOverrides.delete(key)
+      return true
+    }
+    return false
+  }
   // For the visualiser — return the gain we last computed for this loop.
   getLastLoopGain(key: string): number {
     const lr = this.loops.get(key)
