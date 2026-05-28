@@ -455,9 +455,12 @@ function Inspector({ entry, onReset }: { entry: Entry | null; onReset: (entry: E
       {entry.kind === 'loop'
         ? <>
             <LoopOverrides entry={entry.def} />
-            <ParamsEditor loopKey={entry.def.key} />
+            <ParamsEditor entryKey={entry.def.key} kind="loop" />
           </>
-        : <EventOverrides entry={entry.def} />
+        : <>
+            <EventOverrides entry={entry.def} />
+            <ParamsEditor entryKey={entry.def.key} kind="event" />
+          </>
       }
     </div>
   )
@@ -674,9 +677,14 @@ function getResponseCalcCtx(): OfflineAudioContext | null {
   return _responseCalcCtx
 }
 
-function FrequencyResponseCanvas({ loopKey }: { loopKey: string }) {
+function FrequencyResponseCanvas({ entryKey, kind }: { entryKey: string; kind: 'loop' | 'event' }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const def = audioBus.getLoopRuntimeDef(loopKey)
+  // Loops have a runtime def with the live filter chain; events read def
+  // straight from audioLive (no persistent runtime). Either way, .params
+  // is the spec the canvas + the audible chain agree on.
+  const def = kind === 'loop'
+    ? audioBus.getLoopRuntimeDef(entryKey)
+    : audioBus.getEventRuntimeDef(entryKey)
   const params = def?.params ?? {}
 
   useEffect(() => {
@@ -750,10 +758,10 @@ function FrequencyResponseCanvas({ loopKey }: { loopKey: string }) {
       }
       ctx.stroke()
     }
-    // params is a fresh ref whenever setLoopParamSpec mutates the entry —
-    // exactly when we want to repaint. Intentional dep.
+    // params is a fresh ref whenever setLoopParamSpec / setEventParamSpec
+    // mutates the entry — exactly when we want to repaint. Intentional dep.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params, loopKey])
+  }, [params, entryKey, kind])
 
   return (
     <div style={{ marginTop: 10 }}>
@@ -787,28 +795,43 @@ function FrequencyResponseCanvas({ loopKey }: { loopKey: string }) {
  * AudioParam. So #54 falls out of the same UI: an "Add Filter" button
  * inserts a new param key with sensible defaults, then the row edits it.
  */
-function ParamsEditor({ loopKey }: { loopKey: string }) {
+function ParamsEditor({ entryKey, kind }: { entryKey: string; kind: 'loop' | 'event' }) {
   const [, force] = useState(0)
   const rerender = () => force(x => x + 1)
 
-  const def = audioBus.getLoopRuntimeDef(loopKey)
+  // Kind-aware lookup. Loops have a runtime def + filter chain (built at
+  // attach); events read def from audioLive at play time and rebuild
+  // filters per voice (#83). Both expose the same { params } shape.
+  const def = kind === 'loop'
+    ? audioBus.getLoopRuntimeDef(entryKey)
+    : audioBus.getEventRuntimeDef(entryKey)
   if (!def) {
     return (
       <div style={{ marginTop: 12, opacity: 0.5, fontSize: 11, fontStyle: 'italic' }}>
-        Loop not yet attached — params hidden until the bus initialises.
+        {kind === 'loop' ? 'Loop not yet attached — params hidden until the bus initialises.' : 'No event def in audioLive — params unavailable.'}
       </div>
     )
   }
 
   const params = def.params ?? {}
   const presentKeys = Object.keys(params) as ParamType[]
+  // Events don't accept vol/rate as params (they collide with the per-voice
+  // voiceGain / playbackRate); only filter types are addable for events.
+  const addable: readonly ParamType[] = kind === 'loop' ? PARAM_TYPES : FILTER_TYPES
   const missingFilters = FILTER_TYPES.filter(t => !presentKeys.includes(t))
   const modNames = audioBus.listModulatorNames()
 
   const updateParam = (name: string, partial: Partial<ParamSpec>) => {
     const cur = params[name] ?? {}
-    audioBus.setLoopParamSpec(loopKey, name, { ...cur, ...partial })
-    editedParamKeys.add(loopKey)
+    const next = { ...cur, ...partial }
+    if (kind === 'loop') {
+      audioBus.setLoopParamSpec(entryKey, name, next)
+      editedParamKeys.add(entryKey)
+    } else {
+      audioBus.setEventParamSpec(entryKey, name, next)
+      // editedEventKeys triggers full event-def emit on commit (incl. params).
+      editedEventKeys.add(entryKey)
+    }
     rerender()
   }
 
@@ -827,10 +850,16 @@ function ParamsEditor({ loopKey }: { loopKey: string }) {
       peaking:   { base: 1000, gain: 0, q: 1.0 },
       highshelf: { base: 5000, gain: 0 },
     }
-    audioBus.setLoopParamSpec(loopKey, name, defaults[name])
-    editedParamKeys.add(loopKey)
+    if (kind === 'loop') {
+      audioBus.setLoopParamSpec(entryKey, name, defaults[name])
+      editedParamKeys.add(entryKey)
+    } else {
+      audioBus.setEventParamSpec(entryKey, name, defaults[name])
+      editedEventKeys.add(entryKey)
+    }
     rerender()
   }
+  void addable  // (informational — used to render filter-only set for events below)
 
   return (
     <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #1e242e' }}>
@@ -852,10 +881,10 @@ function ParamsEditor({ loopKey }: { loopKey: string }) {
         />
       ))}
       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 8 }}>
-        {!presentKeys.includes('vol') && (
+        {kind === 'loop' && !presentKeys.includes('vol') && (
           <button onClick={() => addParam('vol')} style={smallBtn}>+ Volume</button>
         )}
-        {!presentKeys.includes('rate') && (
+        {kind === 'loop' && !presentKeys.includes('rate') && (
           <button onClick={() => addParam('rate')} style={smallBtn}>+ Pitch</button>
         )}
         {missingFilters.map(t => (
@@ -864,7 +893,7 @@ function ParamsEditor({ loopKey }: { loopKey: string }) {
           </button>
         ))}
       </div>
-      <FrequencyResponseCanvas loopKey={loopKey} />
+      <FrequencyResponseCanvas entryKey={entryKey} kind={kind} />
     </div>
   )
 }
@@ -1451,6 +1480,12 @@ function buildSparseAudioJson(): { loops?: LoopDef[]; events?: EventDef[] } {
     if (def.gainJitter != null) baked.gainJitter = def.gainJitter
     if (def.polyphony != null) baked.polyphony = def.polyphony
     if (def.adsr) baked.adsr = { ...def.adsr }
+    // Per-event EQ params (#83). Emitted verbatim so the boot XHR's keyed
+    // merge replaces the params block at this key — same pattern as loop
+    // params. Empty objects are omitted to keep audio.json clean.
+    if (def.params && Object.keys(def.params).length > 0) {
+      baked.params = { ...def.params }
+    }
     events.push(baked)
   }
   if (events.length) out.events = events

@@ -117,6 +117,14 @@ export interface EventDef {
   // Undefined = unlimited (legacy behaviour). Sample events only —
   // synth: voices ignore this for now (they're fire-and-forget).
   polyphony?: number
+  // Per-event filter chain (#83). Same shape as LoopDef.params but only
+  // filter types are honored — vol/rate already live as voiceGain /
+  // playbackRate in the play() per-voice graph, so they'd conflict. The
+  // chain is built fresh on each play() (sample events only; synth
+  // voices skip filters). MVP supports static base values; modulators
+  // are evaluated ONCE at play time, not per-frame — events are
+  // one-shots, so no smoothing is needed.
+  params?: Record<string, ParamSpec>
 }
 export interface Registry {
   loops: LoopDef[]
@@ -599,6 +607,40 @@ class AudioBus {
     return lr?.filters ? Object.keys(lr.filters) : []
   }
 
+  // ── Event param editing (#83) ───────────────────────────────────────
+  // Events have no persistent runtime def or filter chain — the filter
+  // chain is rebuilt per voice on each play(). So setEventParamSpec only
+  // mutates audioLive (the spec read at next play); there's nothing to
+  // re-wire in the audible graph synchronously. Subsequent voices pick
+  // up the change immediately. Currently-playing voices keep their
+  // already-instantiated filters (acceptable for one-shots).
+
+  /** Read the current event def (from audioLive — the live mirror of
+   *  registry.json + per-level overrides + editor edits). Mirrors
+   *  getLoopRuntimeDef for symmetry in the editor. */
+  getEventRuntimeDef(key: string): EventDef | undefined {
+    return audioLive.events.find(e => e.key === key)
+  }
+
+  /** Live-edit a param spec on an event. Mutates the audioLive entry so
+   *  the next play() picks it up. Filter types only — vol/rate would
+   *  conflict with the existing voiceGain / playbackRate per-voice
+   *  graph. */
+  setEventParamSpec(key: string, name: string, spec: ParamSpec) {
+    const def = audioLive.events.find(e => e.key === key)
+    if (!def) return
+    def.params = { ...(def.params ?? {}), [name]: { ...spec } }
+  }
+
+  /** Filter-type keys present in the event's spec (e.g. ['peaking',
+   *  'lowshelf']). For events there's no persistent runtime chain, so
+   *  "wired" === "specced" — same answer either way. */
+  getEventFilterNames(key: string): string[] {
+    const def = audioLive.events.find(e => e.key === key)
+    if (!def?.params) return []
+    return Object.keys(def.params).filter(n => (FILTER_NAMES as readonly string[]).includes(n))
+  }
+
   setWindStrengthSource(fn: () => number) {
     this.windStrengthGetter = fn
   }
@@ -840,11 +882,55 @@ class AudioBus {
         vg.connect(this.sfxGain)
         dst = vg
       }
-      if (adsrGain) {
-        adsrGain.connect(dst)
-        src.connect(adsrGain)
-      } else {
-        src.connect(dst)
+      // Per-event EQ chain (#83). Built fresh per voice; spec values
+      // resolved here (modulators evaluated at play time). Inserted
+      // BEFORE adsrGain so filters operate on the constant-level signal
+      // (post-ADSR the signal can be very quiet — filter movement reads
+      // best on the pre-envelope sound).
+      //   wiring: src → [eqFilters?] → [adsrGain?] → dst
+      let inputNode: AudioNode = adsrGain ?? dst
+      if (def.params) {
+        const built = buildFiltersForParams(ctx, def.params)
+        if (built.nodes.length) {
+          // Write the spec values into the filter nodes (frequency / Q / gain).
+          // applyParams runs only for loops; events get a one-shot write here.
+          for (const name of Object.keys(built.map)) {
+            const spec = def.params[name]
+            const filt = built.map[name]
+            // Match the loop math: base × modulator (modulator evaluated once),
+            // or remap min..max via modulator. For static specs the modulator
+            // factor is 1 and value = base.
+            const mod = this.combinedModulator(spec.modulator)
+            let value: number
+            if (spec.min != null && spec.max != null) {
+              const t = spec.invert ? (1 - mod) : mod
+              value = spec.min + t * (spec.max - spec.min)
+            } else {
+              value = (spec.base ?? filt.frequency.value) * mod
+            }
+            if (Number.isFinite(value)) filt.frequency.value = value
+            if (spec.q != null) filt.Q.value = spec.q
+            if (spec.gain != null) filt.gain.value = spec.gain
+          }
+          // Chain the filters in order: src → f0 → f1 → ... → (adsrGain | dst)
+          src.connect(built.nodes[0])
+          for (let i = 0; i < built.nodes.length - 1; i++) {
+            built.nodes[i].connect(built.nodes[i + 1])
+          }
+          built.nodes[built.nodes.length - 1].connect(inputNode)
+          // Filters now front the graph; skip the legacy src.connect below.
+          if (adsrGain) adsrGain.connect(dst)
+          inputNode = src   // sentinel — already wired
+        }
+      }
+      if (inputNode !== src) {
+        // Legacy path (no filters): wire src → adsrGain → dst, or src → dst.
+        if (adsrGain) {
+          adsrGain.connect(dst)
+          src.connect(adsrGain)
+        } else {
+          src.connect(dst)
+        }
       }
       // Track + auto-remove. 'ended' fires on natural finish AND on
       // explicit .stop() — same handler covers both paths.
