@@ -160,11 +160,16 @@ function AudioWorkspace() {
   }, [])
   void tick
 
-  // Dev-only handle to the audio bus — mirrors window.__planet. Lets
-  // Playwright read/seed bus state without DOM scraping. Stripped in prod.
+  // Dev-only handles for tests / live debugging — mirror window.__planet.
+  // __audioBus: bus singleton (set/read params, registered chain, overrides).
+  // __lastTriggered: editor's auto-select source — lets tests bypass the
+  // scene and publish keys directly, exercising the auto-select + grace
+  // logic in isolation (#84). Stripped in prod.
   useEffect(() => {
     if (import.meta.env.DEV) {
-      ;(window as unknown as { __audioBus?: typeof audioBus }).__audioBus = audioBus
+      const w = window as unknown as { __audioBus?: typeof audioBus; __lastTriggered?: typeof useLastTriggered }
+      w.__audioBus = audioBus
+      w.__lastTriggered = useLastTriggered
     }
   }, [])
 
@@ -179,12 +184,37 @@ function AudioWorkspace() {
     entries[0]?.def.key ?? null,
   )
   const lockSelection = useRef(false)
+  // Inspector-interaction grace window (#84). The embedded live scene keeps
+  // re-triggering axis_rotation via #78, which yanks the Inspector to that
+  // row mid-edit. Bumped on any pointerdown/keydown inside the Inspector
+  // pane; the auto-select effect skips publishes that arrive while the user
+  // is "warm" so a slider drag isn't interrupted. Resumes after idle —
+  // first-time discoverability ("rotate → see the sound") still works.
+  const lastInteractRef = useRef(0)
+  const INSPECTOR_INTERACT_GRACE_MS = 3000
+  const noteInspectorInteract = useCallback(() => {
+    lastInteractRef.current = Date.now()
+  }, [])
+  // Manual list-row click is user intent — make it sticky for the grace
+  // window too, so the scene can't steal selection back right after.
+  const selectManually = useCallback((key: string) => {
+    setSelectedKey(key)
+    lastInteractRef.current = Date.now()
+  }, [])
+  // DEV-only mirror of the grace timestamp for tests / debugging.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    const w = window as unknown as { __audioEditor?: { lastInteractAt: () => number } }
+    w.__audioEditor = { lastInteractAt: () => lastInteractRef.current }
+  }, [])
 
-  // Auto-select on lastTriggered fire (unless lock toggle is on).
+  // Auto-select on lastTriggered fire (unless lock toggle is on, OR the
+  // user just touched the Inspector — see lastInteractRef).
   const lastKey = useLastTriggered(s => s.key)
   const lastN = useLastTriggered(s => s.n)
   useEffect(() => {
     if (lockSelection.current) return
+    if (Date.now() - lastInteractRef.current < INSPECTOR_INTERACT_GRACE_MS) return
     if (lastKey) setSelectedKey(lastKey)
   }, [lastKey, lastN])
 
@@ -273,12 +303,13 @@ function AudioWorkspace() {
         <EventList
           entries={entries}
           selectedKey={selected?.def.key ?? null}
-          onSelect={setSelectedKey}
+          onSelect={selectManually}
           lockSelection={lockSelection}
         />
         <Inspector
           entry={selected}
           onReset={onResetEntry}
+          onInteract={noteInspectorInteract}
           key={`${selected?.def.key ?? 'none'}:${resetNonce}`}
         />
       </div>
@@ -418,17 +449,25 @@ function EventList({
 
 // ── Inspector ──────────────────────────────────────────────────────────
 
-function Inspector({ entry, onReset }: { entry: Entry | null; onReset: (entry: Entry) => void }) {
+function Inspector({ entry, onReset, onInteract }: {
+  entry: Entry | null
+  onReset: (entry: Entry) => void
+  /** Bumped on every pointerdown/keydown inside this pane (#84 grace
+   *  window). Capture phase so it fires even if a child stops propagation. */
+  onInteract?: () => void
+}) {
   if (!entry) {
     return (
-      <div style={{ flex: '1 1 50%', padding: 16, opacity: 0.5, fontStyle: 'italic' }}>
+      <div style={{ flex: '1 1 50%', padding: 16, opacity: 0.5, fontStyle: 'italic' }}
+           onPointerDownCapture={onInteract} onKeyDownCapture={onInteract}>
         No entry selected.
       </div>
     )
   }
   const canReset = audioBus.hasRegistryDefault(entry.def.key)
   return (
-    <div style={{ flex: '1 1 50%', minHeight: 200, padding: 12, overflowY: 'auto' }}>
+    <div style={{ flex: '1 1 50%', minHeight: 200, padding: 12, overflowY: 'auto' }}
+         onPointerDownCapture={onInteract} onKeyDownCapture={onInteract}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
         <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.def.key}</span>
         <button
