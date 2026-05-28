@@ -17,8 +17,15 @@ const editedParamKeys = new Set<string>()
 const editedEventKeys = new Set<string>()
 
 /** Filter-type params the editor knows how to add. Bus already wires
- *  BiquadFilters for these names (#54). */
-const FILTER_TYPES = ['lowpass', 'highpass', 'bandpass'] as const
+ *  BiquadFilters for these names (#54 + #81 for the EQ trio). Order
+ *  here mirrors the bus's mastering chain order so the Add buttons read
+ *  left-to-right the way the chain processes. */
+const FILTER_TYPES = ['highpass', 'lowshelf', 'bandpass', 'peaking', 'highshelf', 'lowpass'] as const
+/** Gainy filter types — render a gain (dB) slider in the editor. Shelves
+ *  + peaking ride on BiquadFilterNode.gain (dB); cuts/bandpass don't.
+ *  Q is also hidden for shelves (the WebAudio spec ignores Q for them). */
+const GAIN_FILTER_TYPES = ['lowshelf', 'peaking', 'highshelf'] as const
+const SHELF_TYPES = ['lowshelf', 'highshelf'] as const
 
 /** All knobs the editor can manage on a loop. `vol` and `rate` are
  *  always present once a user touches them; filters are opt-in via the
@@ -627,7 +634,144 @@ function WaveformCanvas({ src }: { src: string }) {
   )
 }
 
-// ── ParamsEditor — modulator + min/max + filters (#53, #54) ────────────
+// ── FrequencyResponseCanvas — combined EQ/cut chain magnitude (#81) ────
+
+/**
+ * Render the combined frequency response of all active filter params on
+ * a loop — re-uses BiquadFilterNode.getFrequencyResponse against a
+ * throwaway OfflineAudioContext, sums per-filter magnitudes in dB, plots
+ * log-x (20 Hz → 20 kHz), linear-y (±24 dB).
+ *
+ * Re-reads the runtime def on every render. ParamsEditor force-renders
+ * on every param edit, so dragging a slider updates the curve immediately
+ * — same path as the audible chain (bus reads the same spec on its next
+ * tick), so visual + audible stay in lockstep without a separate sync.
+ */
+const RESPONSE_NUM_POINTS = 256
+const RESPONSE_DB_MIN = -24
+const RESPONSE_DB_MAX = 24
+/** 256 log-spaced freqs from 20 Hz to 20 kHz. Computed once. */
+const RESPONSE_FREQS = (() => {
+  const a = new Float32Array(RESPONSE_NUM_POINTS)
+  for (let i = 0; i < RESPONSE_NUM_POINTS; i++) {
+    const t = i / (RESPONSE_NUM_POINTS - 1)
+    a[i] = 20 * Math.pow(1000, t)
+  }
+  return a
+})()
+
+/** Single shared OfflineAudioContext for getFrequencyResponse() calc.
+ *  Browsers cap AudioContexts per page (~6 in Chrome); creating one per
+ *  render would throw after a handful of heartbeat re-renders and crash
+ *  the panel. Lazily created, reused forever — the BiquadFilterNodes built
+ *  against it are throwaway and never connected to a destination. */
+let _responseCalcCtx: OfflineAudioContext | null | undefined
+function getResponseCalcCtx(): OfflineAudioContext | null {
+  if (_responseCalcCtx !== undefined) return _responseCalcCtx
+  const Ctx = window.OfflineAudioContext
+            ?? (window as unknown as { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext
+  _responseCalcCtx = Ctx ? new Ctx(1, 1, 44100) : null
+  return _responseCalcCtx
+}
+
+function FrequencyResponseCanvas({ loopKey }: { loopKey: string }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const def = audioBus.getLoopRuntimeDef(loopKey)
+  const params = def?.params ?? {}
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const dpr = window.devicePixelRatio ?? 1
+    const w = canvas.clientWidth || 320
+    const h = canvas.clientHeight || 90
+    canvas.width = w * dpr
+    canvas.height = h * dpr
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.scale(dpr, dpr)
+    ctx.clearRect(0, 0, w, h)
+
+    // Build BiquadFilters mirroring the loop's active filter params, then
+    // sum magnitudes in dB. Browsers cap the number of AudioContexts per
+    // page (~6 in Chrome), so we must NOT create one per render/heartbeat —
+    // reuse a single shared OfflineAudioContext (responseCalcCtx). The
+    // nodes built here are never wired to a destination, just used as
+    // getFrequencyResponse() calculators.
+    const oc = getResponseCalcCtx()
+    if (!oc) return
+    const sumDb = new Float32Array(RESPONSE_NUM_POINTS)
+    const mag = new Float32Array(RESPONSE_NUM_POINTS)
+    const phase = new Float32Array(RESPONSE_NUM_POINTS)
+    const filterNames = ['highpass', 'lowshelf', 'bandpass', 'peaking', 'highshelf', 'lowpass'] as const
+    let activeCount = 0
+    for (const name of filterNames) {
+      const spec = params[name]
+      if (!spec) continue
+      activeCount++
+      const f = oc.createBiquadFilter()
+      f.type = name as BiquadFilterType
+      // base × modulator isn't accessible without a running tick — show
+      // the static base. Live modulation isn't graphable without picking a
+      // moment in time anyway, and the user reaches for this panel to
+      // shape the static EQ curve.
+      f.frequency.value = spec.base ?? 1000
+      if (spec.q != null) f.Q.value = spec.q
+      if (spec.gain != null) f.gain.value = spec.gain
+      f.getFrequencyResponse(RESPONSE_FREQS, mag, phase)
+      for (let i = 0; i < RESPONSE_NUM_POINTS; i++) {
+        sumDb[i] += 20 * Math.log10(Math.max(mag[i], 1e-6))
+      }
+    }
+
+    // Plot space helpers.
+    const yOf = (db: number) => h * (1 - (db - RESPONSE_DB_MIN) / (RESPONSE_DB_MAX - RESPONSE_DB_MIN))
+    const xOf = (i: number) => (i / (RESPONSE_NUM_POINTS - 1)) * w
+
+    // ±12 dB + 0 dB grid lines.
+    ctx.lineWidth = 1
+    for (const db of [-12, 12]) {
+      ctx.strokeStyle = '#141a23'
+      ctx.beginPath(); ctx.moveTo(0, yOf(db)); ctx.lineTo(w, yOf(db)); ctx.stroke()
+    }
+    ctx.strokeStyle = '#1e242e'
+    ctx.beginPath(); ctx.moveTo(0, yOf(0)); ctx.lineTo(w, yOf(0)); ctx.stroke()
+
+    // Magnitude curve. Skip rendering if no filters active — leaves the
+    // grid as a quiet hint that the canvas IS the EQ preview surface.
+    if (activeCount > 0) {
+      ctx.strokeStyle = '#7aa8ef'
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      for (let i = 0; i < RESPONSE_NUM_POINTS; i++) {
+        const x = xOf(i)
+        const y = yOf(sumDb[i])
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+      }
+      ctx.stroke()
+    }
+    // params is a fresh ref whenever setLoopParamSpec mutates the entry —
+    // exactly when we want to repaint. Intentional dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params, loopKey])
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ fontSize: 10, opacity: 0.55, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+        Frequency response
+      </div>
+      <canvas
+        ref={canvasRef}
+        style={{ width: '100%', height: 90, display: 'block', borderRadius: 3, background: '#0a0d12' }}
+      />
+      <div style={{ fontSize: 9, opacity: 0.4, marginTop: 2, display: 'flex', justifyContent: 'space-between', fontFamily: 'ui-monospace, monospace' }}>
+        <span>20 Hz</span><span>200</span><span>2 k</span><span>20 kHz</span>
+      </div>
+    </div>
+  )
+}
+
+// ── ParamsEditor — modulator + min/max + filters (#53, #54, #81) ───────
 
 /**
  * Edits the persistent param spec (`{ base, modulator, min, max, invert }`)
@@ -669,14 +813,19 @@ function ParamsEditor({ loopKey }: { loopKey: string }) {
   }
 
   const addParam = (name: ParamType) => {
-    // Sensible defaults per param type. Filters open at midband so the
-    // user can immediately drag toward the sound they want.
+    // Sensible defaults per param type. Cut filters open at midband; EQ
+    // bands (#81) start transparent (0 dB) at typical centre frequencies
+    // so adding one is audibly a no-op until the user reaches for the
+    // gain slider — matches the mental model "add the band, then shape".
     const defaults: Record<ParamType, ParamSpec> = {
-      vol:      { base: 1 },
-      rate:     { base: 1 },
-      lowpass:  { base: 4000 },
-      highpass: { base: 200 },
-      bandpass: { base: 1500 },
+      vol:       { base: 1 },
+      rate:      { base: 1 },
+      lowpass:   { base: 4000 },
+      highpass:  { base: 200 },
+      bandpass:  { base: 1500 },
+      lowshelf:  { base: 200,  gain: 0 },
+      peaking:   { base: 1000, gain: 0, q: 1.0 },
+      highshelf: { base: 5000, gain: 0 },
     }
     audioBus.setLoopParamSpec(loopKey, name, defaults[name])
     editedParamKeys.add(loopKey)
@@ -715,6 +864,7 @@ function ParamsEditor({ loopKey }: { loopKey: string }) {
           </button>
         ))}
       </div>
+      <FrequencyResponseCanvas loopKey={loopKey} />
     </div>
   )
 }
@@ -728,6 +878,10 @@ function ParamRow({
   onChange: (partial: Partial<ParamSpec>) => void
 }) {
   const isFilter = (FILTER_TYPES as readonly string[]).includes(name)
+  // Shelves + peaking carry a gain (dB) AudioParam; cuts/bandpass don't.
+  // Shelves additionally ignore Q per WebAudio spec — hide that slider.
+  const isGainFilter = (GAIN_FILTER_TYPES as readonly string[]).includes(name)
+  const isShelf = (SHELF_TYPES as readonly string[]).includes(name)
   // Filter cutoffs span 20Hz – 20kHz; vol is 0–2; rate is 0.25–4. Pick
   // the slider range that matches what the user expects.
   const range = isFilter ? { min: 20, max: 20000, step: 1 }
@@ -795,7 +949,17 @@ function ParamRow({
                 onChange={v => onChange({ invert: v || undefined })} />
       )}
 
-      {isFilter && (
+      {isGainFilter && (
+        <Slider
+          label="gain (dB)"
+          value={spec.gain ?? 0}
+          min={-18}
+          max={18}
+          step={0.1}
+          onChange={v => onChange({ gain: v })}
+        />
+      )}
+      {isFilter && !isShelf && (
         <Slider
           label="Q (resonance)"
           value={spec.q ?? 0.7}
