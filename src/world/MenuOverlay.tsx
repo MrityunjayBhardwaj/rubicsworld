@@ -6,7 +6,7 @@ import { PLANETS } from './planetManifest'
  * Title screen + in-game pause menu.
  *
  * Two visual modes driven by store:
- *   gamePhase === 'title'                 → title screen ("Rubic's World" + Begin)
+ *   gamePhase === 'title'                 → title screen ("FlipFace" + Begin)
  *   gamePhase === 'playing' && menuOpen   → pause overlay (Resume / Audio / Return)
  *
  * Esc handling lives here as a global keydown (capture phase) so it works
@@ -124,7 +124,7 @@ function TitleView({ faded, audioMuted, onBegin, onSelectLevel, onPreferences, o
   return (
     <div style={{ ...overlayBase, opacity: faded ? 1 : 0, transition: 'opacity 1200ms ease-out' }}>
       <div style={titleStack}>
-        <h1 style={titleText}>Rubic&rsquo;s World</h1>
+        <h1 style={titleText}>FlipFace</h1>
         <div style={taglineText}>Solve the world. Then be in it.</div>
         <button style={primaryButton} onClick={onBegin} autoFocus>Begin</button>
         <button style={secondaryButton} onClick={onSelectLevel}>Select level</button>
