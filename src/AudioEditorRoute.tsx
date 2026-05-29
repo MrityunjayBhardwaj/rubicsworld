@@ -1180,6 +1180,10 @@ function LoopOverrides({ entry }: { entry: LoopDef }) {
     audioBus.setLoopOverride(entry.key, next)
     force(x => x + 1)
   }
+  // #90 coalesce: ovr.normalize shadows def.normalize. On reload, override
+  // map starts empty so the persisted def.normalize drives the initial
+  // checkbox state — toggling writes to the override.
+  const normalizeOn = ovr.normalize ?? entry.normalize ?? false
   return (
     <div>
       <Slider label="Volume mul" value={ovr.vol ?? 1} min={0} max={2} step={0.01} onChange={v => set({ vol: v })} />
@@ -1188,6 +1192,9 @@ function LoopOverrides({ entry }: { entry: LoopDef }) {
         <Slider label="Radius" value={ovr.radius ?? entry.radius} min={1} max={50} step={0.5} onChange={v => set({ radius: v })} />
       )}
       <Toggle label="Mute" value={ovr.mute ?? false} onChange={v => set({ mute: v })} />
+      {!entry.src.startsWith('synth:') && (
+        <Toggle label="Normalize (0 dBFS)" value={normalizeOn} onChange={v => set({ normalize: v })} />
+      )}
     </div>
   )
 }
@@ -1231,6 +1238,13 @@ function EventOverrides({ entry }: { entry: EventDef }) {
       <Slider label="Volume mul" value={ovr.vol ?? 1} min={0} max={2} step={0.01} onChange={v => set({ vol: v })} />
       <Slider label="Speed mul"  value={ovr.speed ?? 1} min={0.25} max={2} step={0.01} onChange={v => set({ speed: v })} />
       <Toggle label="Mute" value={ovr.mute ?? false} onChange={v => set({ mute: v })} />
+      {!isSynth && (
+        <Toggle
+          label="Normalize (0 dBFS)"
+          value={ovr.normalize ?? entry.normalize ?? false}
+          onChange={v => set({ normalize: v })}
+        />
+      )}
       <PolyphonySlider value={polySliderValue} onChange={setPolyphony} />
       {!isSynth && (
         <>
@@ -1556,7 +1570,7 @@ function buildSparseAudioJson(): { loops?: LoopDef[]; events?: EventDef[] } {
   const loops: LoopDef[] = []
   for (const def of audioLive.loops) {
     const ovr = audioBus.getLoopOverride(def.key)
-    const hasOverride = ovr && (ovr.vol != null || ovr.speed != null || ovr.radius != null || ovr.mute)
+    const hasOverride = ovr && (ovr.vol != null || ovr.speed != null || ovr.radius != null || ovr.mute || ovr.normalize != null)
     const hasParamEdit = editedParamKeys.has(def.key)
     if (!hasOverride && !hasParamEdit) continue
     const baked: LoopDef = { key: def.key, anchor: def.anchor, src: def.src }
@@ -1575,6 +1589,11 @@ function buildSparseAudioJson(): { loops?: LoopDef[]; events?: EventDef[] } {
       baked.params = { ...(baked.params ?? def.params ?? {}), vol: { ...(baked.params?.vol ?? def.params?.vol ?? {}), base: baseVol * ovr.vol } }
     }
     if (ovr?.radius != null) baked.radius = ovr.radius
+    // #90 normalize — emit when overridden or set on the def. ovr takes
+    // precedence so toggling OFF a previously-persisted normalize writes
+    // false (not omits) and reloads consistently.
+    if (ovr?.normalize != null) baked.normalize = ovr.normalize
+    else if (def.normalize != null) baked.normalize = def.normalize
     loops.push(baked)
   }
   if (loops.length) out.loops = loops
@@ -1582,7 +1601,7 @@ function buildSparseAudioJson(): { loops?: LoopDef[]; events?: EventDef[] } {
   const events: EventDef[] = []
   for (const def of audioLive.events) {
     const ovr = audioBus.getEventOverride(def.key)
-    const hasOverride = ovr && (ovr.vol != null || ovr.speed != null || ovr.mute)
+    const hasOverride = ovr && (ovr.vol != null || ovr.speed != null || ovr.mute || ovr.normalize != null)
     const hasFieldEdit = editedEventKeys.has(def.key)
     if (!hasOverride && !hasFieldEdit) continue
     const baked: EventDef = { key: def.key, anchor: def.anchor, src: def.src }
@@ -1596,6 +1615,9 @@ function buildSparseAudioJson(): { loops?: LoopDef[]; events?: EventDef[] } {
     if (def.params && Object.keys(def.params).length > 0) {
       baked.params = { ...def.params }
     }
+    // #90 normalize — same precedence as loops (override wins).
+    if (ovr?.normalize != null) baked.normalize = ovr.normalize
+    else if (def.normalize != null) baked.normalize = def.normalize
     events.push(baked)
   }
   if (events.length) out.events = events
