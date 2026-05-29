@@ -779,6 +779,104 @@ class AudioBus {
   setCategoryVolume(c: Category, v: number) { this.categoryVol[c] = v; this.applyGraphGains(); this.applyAllVolumes() }
   setCategoryMute(c: Category, m: boolean) { this.categoryMute[c] = m; this.applyGraphGains(); this.applyAllVolumes() }
 
+  /** Preview a sample-backed loop in the audio editor (#89). Plays N
+   *  iterations of the loop's AudioBuffer with all modulator-driven
+   *  params forced to their max value, so the sound is audible regardless
+   *  of scene state. Respects per-sound vol/speed/mute overrides; ignores
+   *  the Blender envelope (preview is "source quality", not "in-context").
+   *
+   *  Sample loops only — synth loops are continuous oscillator graphs
+   *  with no natural iteration boundary; the button is hidden for them.
+   *
+   *  Returns a stop() function (idempotent). Auto-stops when the
+   *  scheduled BufferSource end fires.
+   */
+  previewLoop(key: string, iterations = 5): (() => void) | null {
+    if (!this.listener || !this.masterGain) return null
+    const def = this.getLoopRuntimeDef(key)
+    if (!def || def.src.startsWith('synth:')) return null
+    const ovr = this.loopOverrides.get(key)
+    if (ovr?.mute) return null
+    const ctx = this.listener.context
+    if (ctx.state === 'suspended') ctx.resume().catch(() => { /* ignore */ })
+
+    let cancelled = false
+    let stopFn: (() => void) | null = null
+    const stop = () => {
+      cancelled = true
+      const fn = stopFn
+      stopFn = null
+      fn?.()
+    }
+
+    void this.loadBuffer(def.src).then(buf => {
+      if (cancelled || !this.listener || !this.masterGain) return
+      const ctx2 = this.listener.context
+      const params = def.params ?? {}
+      const maxOf = (spec: ParamSpec | undefined, fallback: number): number => {
+        if (!spec) return fallback
+        if (spec.min != null && spec.max != null) {
+          // Modulator at 1 → t=1 (or 0 if inverted) → max (or min) end of the range.
+          return spec.invert ? spec.min : spec.max
+        }
+        return spec.base ?? fallback
+      }
+
+      const src = ctx2.createBufferSource()
+      src.buffer = buf
+      src.loop = true
+      const speedMul = ovr?.speed ?? 1
+      const rateMax = maxOf(params.rate, 1)
+      src.playbackRate.value = Number.isFinite(rateMax) ? rateMax * speedMul : speedMul
+
+      const gain = ctx2.createGain()
+      const userVol = ovr?.vol ?? 1
+      const volMax = maxOf(params.vol, 1)
+      gain.gain.value = Math.max(0, volMax * userVol)
+
+      // Per-voice filter chain — same builder as the event path (bus.ts:880-919).
+      // Force frequency to the modulator-at-max value; Q + gain are static.
+      const built = buildFiltersForParams(ctx2, params)
+      for (const name of Object.keys(built.map)) {
+        const spec = params[name]
+        const filt = built.map[name]
+        const v = maxOf(spec, filt.frequency.value)
+        if (Number.isFinite(v)) filt.frequency.value = v
+        if (spec?.q != null) filt.Q.value = spec.q
+        if (spec?.gain != null) filt.gain.value = spec.gain
+      }
+      // Wiring: src → f0 → f1 → ... → gain → masterGain.
+      let node: AudioNode = src
+      for (const f of built.nodes) {
+        node.connect(f)
+        node = f
+      }
+      node.connect(gain).connect(this.masterGain)
+
+      // Strict N iterations: loop=true plus scheduled stop at exactly
+      // buf.duration * N seconds (in buffer time, not wall-clock — the
+      // playbackRate scales how long that takes to actually play).
+      const totalBufferSeconds = buf.duration * iterations
+      const wallSeconds = totalBufferSeconds / Math.max(0.001, Math.abs(src.playbackRate.value))
+      src.start()
+      try { src.stop(ctx2.currentTime + wallSeconds) } catch { /* already stopped */ }
+
+      const teardown = () => {
+        try { src.stop() } catch { /* already stopped */ }
+        try { src.disconnect() } catch { /* not connected */ }
+        try { gain.disconnect() } catch { /* not connected */ }
+        for (const f of built.nodes) { try { f.disconnect() } catch { /* not connected */ } }
+      }
+      stopFn = teardown
+      src.onended = () => {
+        if (stopFn === teardown) stopFn = null
+        teardown()
+      }
+    }).catch(() => { cancelled = true })
+
+    return stop
+  }
+
   // Trigger an event from registry by key. Supports synth: voices and
   // sample events (audio/<file>.ogg) routed through sfxGain. Sample events
   // load + cache the buffer on first call; subsequent plays reuse it.

@@ -470,21 +470,26 @@ function Inspector({ entry, onReset, onInteract }: {
          onPointerDownCapture={onInteract} onKeyDownCapture={onInteract}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
         <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.def.key}</span>
-        <button
-          disabled={!canReset}
-          title={canReset
-            ? 'Restore this sound to its registry.json default — discards live edits and overrides'
-            : 'No compiled-in default for this entry (e.g. a glb-imported sound)'}
-          onClick={() => {
-            if (!canReset) return
-            if (window.confirm(`Reset "${entry.def.key}" to its default?\n\nThis discards live edits and overrides for this sound.`)) {
-              onReset(entry)
-            }
-          }}
-          style={{ ...btn, padding: '4px 10px', fontSize: 11, whiteSpace: 'nowrap', opacity: canReset ? 1 : 0.4, cursor: canReset ? 'pointer' : 'not-allowed' }}
-        >
-          Reset to default
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {entry.kind === 'loop' && !entry.def.src.startsWith('synth:') && (
+            <LoopPreviewButton entryKey={entry.def.key} />
+          )}
+          <button
+            disabled={!canReset}
+            title={canReset
+              ? 'Restore this sound to its registry.json default — discards live edits and overrides'
+              : 'No compiled-in default for this entry (e.g. a glb-imported sound)'}
+            onClick={() => {
+              if (!canReset) return
+              if (window.confirm(`Reset "${entry.def.key}" to its default?\n\nThis discards live edits and overrides for this sound.`)) {
+                onReset(entry)
+              }
+            }}
+            style={{ ...btn, padding: '4px 10px', fontSize: 11, whiteSpace: 'nowrap', opacity: canReset ? 1 : 0.4, cursor: canReset ? 'pointer' : 'not-allowed' }}
+          >
+            Reset to default
+          </button>
+        </div>
       </div>
       <div style={{ fontSize: 11, opacity: 0.7, fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all', marginBottom: 8 }}>
         {entry.def.src}
@@ -502,6 +507,72 @@ function Inspector({ entry, onReset, onInteract }: {
           </>
       }
     </div>
+  )
+}
+
+// ── LoopPreviewButton — play loop 5x with modulators forced to max (#89) ──
+//
+// Drives audioBus.previewLoop(key, 5), which builds an ephemeral BufferSource
+// → filter chain → gain graph routed through masterGain. Modulator-driven
+// params resolve to their max value so the loop is audible regardless of
+// scene state. Click again while running to stop early.
+//
+// Cleanup: previewLoop's BufferSource.onended fires on natural completion
+// AND on manual src.stop() — both paths run teardown(). The local stopRef
+// guards against double-call and clears the playing state.
+
+function LoopPreviewButton({ entryKey }: { entryKey: string }) {
+  const [playing, setPlaying] = useState(false)
+  const stopRef = useRef<(() => void) | null>(null)
+
+  // If the user navigates away or selects a different sound mid-preview,
+  // stop the playback. Keying the effect on entryKey gives cleanup-on-switch
+  // for free.
+  useEffect(() => {
+    return () => {
+      stopRef.current?.()
+      stopRef.current = null
+    }
+  }, [entryKey])
+
+  const onClick = useCallback(() => {
+    if (stopRef.current) {
+      stopRef.current()
+      stopRef.current = null
+      setPlaying(false)
+      return
+    }
+    const stop = audioBus.previewLoop(entryKey, 5)
+    if (!stop) return
+    setPlaying(true)
+    // Wrap so the natural-end path (BufferSource.onended → teardown) also
+    // clears UI state. We can't observe onended here directly; instead we
+    // poll-clear via a fallback timer that's long enough to cover any sane
+    // buffer×5 duration. Defensive only — the stop() call from bus.ts is
+    // idempotent.
+    stopRef.current = () => { stop(); setPlaying(false) }
+  }, [entryKey])
+
+  // Heuristic max preview length: most loops are <10s, 5x is <50s.
+  // Auto-reset UI state after 60s as a safety net so the button doesn't
+  // stay stuck in "Stop" if something prevents onended from firing.
+  useEffect(() => {
+    if (!playing) return
+    const t = window.setTimeout(() => {
+      if (stopRef.current) { stopRef.current(); stopRef.current = null }
+      setPlaying(false)
+    }, 60_000)
+    return () => window.clearTimeout(t)
+  }, [playing])
+
+  return (
+    <button
+      title={playing ? 'Stop preview' : 'Preview this loop 5 times with all modulators at max'}
+      onClick={onClick}
+      style={{ ...btn, padding: '4px 10px', fontSize: 11, whiteSpace: 'nowrap' }}
+    >
+      {playing ? '◼ Stop' : '▶ Preview ×5'}
+    </button>
   )
 }
 
