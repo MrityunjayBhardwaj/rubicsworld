@@ -76,7 +76,6 @@ export interface LoopDef {
   key: string
   anchor: AnchorRef
   src: string
-  adsr?: ADSR
   // New shape: per-param bindings. Common keys:
   //   `vol`     — volume (sample loops via setVolume; synth 2D via synthGain;
   //               synth POSITIONAL via positional setVolume)
@@ -324,6 +323,17 @@ class AudioBus {
   // its 1/peak coefficient without re-scanning the buffer. Populated lazily
   // on buffer decode; absent for synth sources.
   private peakCoefficients = new Map<string, number>()
+  // #72 per-play graph allocation probe — Lokayata before optimizing
+  // the ADSR + voiceVol "extra GainNode" path. Public so devtools /
+  // window.__audioBus.probe can read counters during sustained
+  // trigger spam (e.g. footsteps while walking). reset() zeroes them.
+  // Cheap enough to ship in prod — three counter writes per play.
+  probe = {
+    plays: 0,            // total play() calls (excluding mute-gated returns)
+    gainNodesTotal: 0,   // sum of GainNodes allocated across all plays
+    doubleGainPlays: 0,  // plays where BOTH adsrGain + voiceGain were created
+    reset() { this.plays = 0; this.gainNodesTotal = 0; this.doubleGainPlays = 0 },
+  }
   // Active BufferSourceNodes per event key. Pushed on play(), removed on
   // 'ended'. Polyphony cap enforced by stopping voices[0] (oldest first).
   private activeEventSources = new Map<string, AudioBufferSourceNode[]>()
@@ -939,15 +949,15 @@ class AudioBus {
     void this.loadBuffer(def.src).then(buf => {
       if (!this.sfxGain) return
       // Polyphony gate — if at the cap, evict the oldest active voice
-      // BEFORE adding the new one. With ADSR present we trigger the
-      // release ramp on the old voice; without ADSR we stop immediately.
-      // 'ended' fires once src.stop completes either way, so the list
-      // self-prunes — we also shift here so the slot is synchronously free.
+      // BEFORE adding the new one. stopVoice handles the ADSR-vs-no-ADSR
+      // fork internally (fade or hard stop). 'ended' fires once src.stop
+      // completes either way, so the list self-prunes — we also shift
+      // here so the slot is synchronously free.
       if (def.polyphony != null && def.polyphony >= 1) {
         const list = this.activeEventSources.get(key) ?? []
         while (list.length >= def.polyphony) {
           const old = list.shift()
-          if (old) this.releaseAndStop(old)
+          if (old) this.stopVoice(old)
         }
         this.activeEventSources.set(key, list)
       }
@@ -974,24 +984,37 @@ class AudioBus {
       // adsrGain is only inserted when adsr is set (idle-default = no node,
       // identical to legacy path). voiceGain only inserted when voiceVol≠1
       // (matches prior behaviour to keep the unmodulated graph small).
+      // #72 probe: count this play + whether double-gain (adsr + voiceVol≠1)
+      // is hit. Cheap unconditional increments — see AudioBus.probe docs.
+      this.probe.plays++
+      if (def.adsr && voiceVol !== 1) this.probe.doubleGainPlays++
       const adsr = def.adsr
       let adsrGain: GainNode | null = null
       const now = ctx.currentTime
       if (adsr) {
         adsrGain = ctx.createGain()
-        const A = Math.max(0.001, (adsr.attack ?? 0) / 1000)
-        const D = Math.max(0, (adsr.decay ?? 0) / 1000)
+        this.probe.gainNodesTotal++
+        let A = Math.max(0.001, (adsr.attack ?? 0) / 1000)
+        let D = Math.max(0, (adsr.decay ?? 0) / 1000)
         const S = Math.max(0, Math.min(1, adsr.sustain ?? 1))
-        const R = Math.max(0.001, (adsr.release ?? 0) / 1000)
+        let R = Math.max(0.001, (adsr.release ?? 0) / 1000)
         const effDur = buf.duration / Math.max(0.0001, rate)
+        // #70 budget check. If the requested A+D+R exceeds the audible
+        // buffer length, scale all three proportionally to fit. Preserves
+        // attack/decay/release shape relative to one another instead of
+        // letting release tail past the BufferSource's natural end (where
+        // the gain ramp lands on a silent voice).
+        const total = A + D + R
+        if (total > effDur) {
+          const k = effDur / total
+          A *= k; D *= k; R *= k
+        }
         const g = adsrGain.gain
         g.setValueAtTime(0, now)
         g.linearRampToValueAtTime(1, now + A)
         g.linearRampToValueAtTime(S, now + A + D)
-        // Schedule release so the voice tails to silence right at
-        // effective end-of-buffer. If A+D leaves no room for R, push the
-        // release start to the latest moment that still fits.
-        const releaseStart = Math.max(now + A + D, now + Math.max(0, effDur - R))
+        // After squeeze: A+D+R ≤ effDur, so the release window always fits.
+        const releaseStart = now + Math.max(A + D, effDur - R)
         g.setValueAtTime(S, releaseStart)
         g.linearRampToValueAtTime(0, releaseStart + R)
         this.eventAdsrInfo.set(src, { gain: adsrGain, releaseSec: R })
@@ -1002,6 +1025,7 @@ class AudioBus {
         vg.gain.value = voiceVol
         vg.connect(this.sfxGain)
         dst = vg
+        this.probe.gainNodesTotal++
       }
       // Per-event EQ chain (#83). Built fresh per voice; spec values
       // resolved here (modulators evaluated at play time). Inserted
@@ -1079,11 +1103,13 @@ class AudioBus {
     return this.loadBuffer(src)
   }
 
-  /** Stop a per-play sample event with ADSR-aware fade. If the voice has
-   *  an ADSR gain, cancel pending automation, ramp the current value to
-   *  0 over `releaseSec`, then defer src.stop until the ramp completes.
-   *  Without ADSR, falls back to immediate stop (legacy behaviour). */
-  private releaseAndStop(src: AudioBufferSourceNode) {
+  /** #71 Stop a per-play sample event. When the voice has an ADSR
+   *  sidecar, fade out over `releaseSec` (cancel pending automation,
+   *  ramp current value → 0, defer src.stop until the ramp lands).
+   *  Without ADSR, calls src.stop() immediately — there's no envelope
+   *  to fade. Voice-stealing + auto-cleanup callers route through here
+   *  so both paths share the same "do the right thing per voice" logic. */
+  private stopVoice(src: AudioBufferSourceNode) {
     const info = this.eventAdsrInfo.get(src)
     const ctx = this.listener?.context
     if (!info || !ctx) {
