@@ -1143,8 +1143,29 @@ class AudioBus {
       }
       return cached
     }
-    const promise = new Promise<AudioBuffer>((resolve, reject) => {
-      this.audioLoader.load(url, resolve, undefined, reject)
+    // #74 Safari/iOS mp3 fallback. Pipeline:
+    //   1. Try the original URL (typically .ogg).
+    //   2. On decode/fetch failure AND if the url ends in .ogg, retry the
+    //      .mp3 sibling. Chrome/Firefox/desktop Safari 17+ never see this
+    //      branch — their .ogg decodes succeed first try. Safari ≤ 16 and
+    //      iOS WebAudio fail on Opus-in-Ogg, take the fallback, get audio.
+    // We cache the FINAL resolved promise under the ORIGINAL url key so:
+    //   - subsequent loadBuffer calls share the same buffer
+    //   - peak coefficient is keyed on the original url (peak content
+    //     is the same regardless of which format actually decoded)
+    const loadOne = (u: string) => new Promise<AudioBuffer>((resolve, reject) => {
+      this.audioLoader.load(u, resolve, undefined, reject)
+    })
+    const promise = loadOne(url).catch(err => {
+      if (!/\.ogg$/i.test(url)) throw err
+      const mp3Url = url.replace(/\.ogg$/i, '.mp3')
+      // eslint-disable-next-line no-console
+      console.info(`[audio] ${url} failed to decode (likely Safari/iOS + Opus), trying mp3 fallback: ${mp3Url}`)
+      return loadOne(mp3Url).catch(mp3Err => {
+        // eslint-disable-next-line no-console
+        console.warn(`[audio] mp3 fallback also failed for ${url}:`, mp3Err)
+        throw err  // surface the ORIGINAL error so debugging starts there
+      })
     }).then(buf => {
       this.computePeak(url, buf)
       return buf
