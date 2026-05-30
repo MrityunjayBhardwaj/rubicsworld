@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Pre-commit guard: block staged .glb files that exceed GitHub's 100 MB
+# push limit. Triggered when committing a level diorama that got
+# accidentally bloated during Blender authoring (see #80 — lvl_2
+# ballooned 145 KB → 255 MB in a single session, caught only at push).
+#
+# To enable in a fresh clone:
+#   git config core.hooksPath .githooks
+#
+# Bypass (when you genuinely need to commit a large file going to LFS):
+#   git commit --no-verify
+#
+# Limit picked at 95 MB (5 MB headroom under GitHub's hard 100 MB).
+set -e
+
+LIMIT_MB=95
+LIMIT_BYTES=$((LIMIT_MB * 1024 * 1024))
+BAD=0
+
+# git diff --cached lists staged paths; --diff-filter=A|M catches additions
+# AND modifications. -z + null delimit handles paths with spaces correctly.
+while IFS= read -r -d '' path; do
+  case "$path" in
+    *.glb|*.GLB) ;;
+    *) continue ;;
+  esac
+  # Read the staged blob's size (not the working-tree size — they can differ
+  # if the user has unstaged edits on top). `git cat-file -s :path` returns
+  # the size of the staged content in bytes.
+  size=$(git cat-file -s ":$path" 2>/dev/null || echo 0)
+  if [ "$size" -gt "$LIMIT_BYTES" ]; then
+    mb=$(awk -v s="$size" 'BEGIN { printf "%.1f", s/1024/1024 }')
+    echo "ERROR: $path is ${mb} MB — exceeds ${LIMIT_MB} MB limit" >&2
+    echo "  GitHub blocks any single file > 100 MB on push." >&2
+    echo "  See scripts/repack-glb-textures.py for repacking, or move the" >&2
+    echo "  file to Git LFS if it genuinely needs to be that large." >&2
+    BAD=1
+  fi
+done < <(git diff --cached --name-only -z --diff-filter=AM)
+
+if [ "$BAD" -ne 0 ]; then
+  echo "" >&2
+  echo "Bypass (last resort): git commit --no-verify" >&2
+  exit 1
+fi
+exit 0

@@ -76,7 +76,6 @@ export interface LoopDef {
   key: string
   anchor: AnchorRef
   src: string
-  adsr?: ADSR
   // New shape: per-param bindings. Common keys:
   //   `vol`     — volume (sample loops via setVolume; synth 2D via synthGain;
   //               synth POSITIONAL via positional setVolume)
@@ -100,6 +99,11 @@ export interface LoopDef {
   // envelope[time] into the loop's gain on each tick. Authored entirely
   // in Blender; not present for non-glb-imported loops.
   envelope?: VolumeEnvelope
+  // Per-sound peak normalize to 0 dBFS (#90). When true, the bus
+  // multiplies playback gain by 1/peak (computed once on buffer load,
+  // cached on the bus). Live-toggleable via setLoopOverride. Sample
+  // sources only — synth voices ignore.
+  normalize?: boolean
 }
 export interface EventDef {
   key: string
@@ -125,6 +129,10 @@ export interface EventDef {
   // are evaluated ONCE at play time, not per-frame — events are
   // one-shots, so no smoothing is needed.
   params?: Record<string, ParamSpec>
+  // Per-sound peak normalize to 0 dBFS (#90). When true, the per-voice
+  // graph multiplies gain by 1/peak (computed once on buffer load).
+  // Sample events only; synth voices ignore.
+  normalize?: boolean
 }
 export interface Registry {
   loops: LoopDef[]
@@ -308,8 +316,24 @@ class AudioBus {
   // multipliers on top of the registry base; mute forces 0; radius (meters)
   // overrides the registry's `radius`/`maxDist` directly so user can drag
   // the reach in real time.
-  private loopOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean; radius?: number }>()
-  private eventOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean }>()
+  private loopOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean; radius?: number; normalize?: boolean }>()
+  private eventOverrides = new Map<string, { vol?: number; speed?: number; mute?: boolean; normalize?: boolean }>()
+  // #90 peak normalize cache. Keyed by the SAME normalized URL loadBuffer
+  // uses ('/' + src), so any code path that reaches a sample can look up
+  // its 1/peak coefficient without re-scanning the buffer. Populated lazily
+  // on buffer decode; absent for synth sources.
+  private peakCoefficients = new Map<string, number>()
+  // #72 per-play graph allocation probe — Lokayata before optimizing
+  // the ADSR + voiceVol "extra GainNode" path. Public so devtools /
+  // window.__audioBus.probe can read counters during sustained
+  // trigger spam (e.g. footsteps while walking). reset() zeroes them.
+  // Cheap enough to ship in prod — three counter writes per play.
+  probe = {
+    plays: 0,            // total play() calls (excluding mute-gated returns)
+    gainNodesTotal: 0,   // sum of GainNodes allocated across all plays
+    doubleGainPlays: 0,  // plays where BOTH adsrGain + voiceGain were created
+    reset() { this.plays = 0; this.gainNodesTotal = 0; this.doubleGainPlays = 0 },
+  }
   // Active BufferSourceNodes per event key. Pushed on play(), removed on
   // 'ended'. Polyphony cap enforced by stopping voices[0] (oldest first).
   private activeEventSources = new Map<string, AudioBufferSourceNode[]>()
@@ -670,7 +694,7 @@ class AudioBus {
   }
 
   // ── Per-sound overrides ─────────────────────────────────────────────
-  setLoopOverride(key: string, override: { vol?: number; speed?: number; mute?: boolean; radius?: number }) {
+  setLoopOverride(key: string, override: { vol?: number; speed?: number; mute?: boolean; radius?: number; normalize?: boolean }) {
     const prev = this.loopOverrides.get(key) ?? {}
     const next = { ...prev, ...override }
     this.loopOverrides.set(key, next)
@@ -685,7 +709,7 @@ class AudioBus {
       try { lr.node.setMaxDistance(next.radius) } catch { /* ignore */ }
     }
   }
-  setEventOverride(key: string, override: { vol?: number; speed?: number; mute?: boolean }) {
+  setEventOverride(key: string, override: { vol?: number; speed?: number; mute?: boolean; normalize?: boolean }) {
     const prev = this.eventOverrides.get(key) ?? {}
     this.eventOverrides.set(key, { ...prev, ...override })
   }
@@ -832,7 +856,11 @@ class AudioBus {
       const gain = ctx2.createGain()
       const userVol = ovr?.vol ?? 1
       const volMax = maxOf(params.vol, 1)
-      gain.gain.value = Math.max(0, volMax * userVol)
+      // #90 fold in normalize so the preview matches what a play in the
+      // running scene would sound like with normalize on. ovr shadows def.
+      const normOn = ovr?.normalize ?? def.normalize ?? false
+      const normMul = this.normalizeGain(def.src, normOn)
+      gain.gain.value = Math.max(0, volMax * userVol * normMul)
 
       // Per-voice filter chain — same builder as the event path (bus.ts:880-919).
       // Force frequency to the modulator-at-max value; Q + gain are static.
@@ -921,15 +949,15 @@ class AudioBus {
     void this.loadBuffer(def.src).then(buf => {
       if (!this.sfxGain) return
       // Polyphony gate — if at the cap, evict the oldest active voice
-      // BEFORE adding the new one. With ADSR present we trigger the
-      // release ramp on the old voice; without ADSR we stop immediately.
-      // 'ended' fires once src.stop completes either way, so the list
-      // self-prunes — we also shift here so the slot is synchronously free.
+      // BEFORE adding the new one. stopVoice handles the ADSR-vs-no-ADSR
+      // fork internally (fade or hard stop). 'ended' fires once src.stop
+      // completes either way, so the list self-prunes — we also shift
+      // here so the slot is synchronously free.
       if (def.polyphony != null && def.polyphony >= 1) {
         const list = this.activeEventSources.get(key) ?? []
         while (list.length >= def.polyphony) {
           const old = list.shift()
-          if (old) this.releaseAndStop(old)
+          if (old) this.stopVoice(old)
         }
         this.activeEventSources.set(key, list)
       }
@@ -946,29 +974,47 @@ class AudioBus {
         const j = Math.min(1, def.gainJitter)
         voiceVol *= Math.max(0, 1 - j + Math.random() * (2 * j))
       }
+      // #90 normalize multiplier — fold into voiceVol so the voiceGain
+      // insertion gate (voiceVol !== 1) naturally extends to normalized
+      // sources (peak coefficient is >1 for any non-clipping sample).
+      const normOn = ovr?.normalize ?? def.normalize ?? false
+      voiceVol *= this.normalizeGain(def.src, normOn)
       // Per-play graph:
       //   src → [adsrGain?] → [voiceGain?] → sfxGain
       // adsrGain is only inserted when adsr is set (idle-default = no node,
       // identical to legacy path). voiceGain only inserted when voiceVol≠1
       // (matches prior behaviour to keep the unmodulated graph small).
+      // #72 probe: count this play + whether double-gain (adsr + voiceVol≠1)
+      // is hit. Cheap unconditional increments — see AudioBus.probe docs.
+      this.probe.plays++
+      if (def.adsr && voiceVol !== 1) this.probe.doubleGainPlays++
       const adsr = def.adsr
       let adsrGain: GainNode | null = null
       const now = ctx.currentTime
       if (adsr) {
         adsrGain = ctx.createGain()
-        const A = Math.max(0.001, (adsr.attack ?? 0) / 1000)
-        const D = Math.max(0, (adsr.decay ?? 0) / 1000)
+        this.probe.gainNodesTotal++
+        let A = Math.max(0.001, (adsr.attack ?? 0) / 1000)
+        let D = Math.max(0, (adsr.decay ?? 0) / 1000)
         const S = Math.max(0, Math.min(1, adsr.sustain ?? 1))
-        const R = Math.max(0.001, (adsr.release ?? 0) / 1000)
+        let R = Math.max(0.001, (adsr.release ?? 0) / 1000)
         const effDur = buf.duration / Math.max(0.0001, rate)
+        // #70 budget check. If the requested A+D+R exceeds the audible
+        // buffer length, scale all three proportionally to fit. Preserves
+        // attack/decay/release shape relative to one another instead of
+        // letting release tail past the BufferSource's natural end (where
+        // the gain ramp lands on a silent voice).
+        const total = A + D + R
+        if (total > effDur) {
+          const k = effDur / total
+          A *= k; D *= k; R *= k
+        }
         const g = adsrGain.gain
         g.setValueAtTime(0, now)
         g.linearRampToValueAtTime(1, now + A)
         g.linearRampToValueAtTime(S, now + A + D)
-        // Schedule release so the voice tails to silence right at
-        // effective end-of-buffer. If A+D leaves no room for R, push the
-        // release start to the latest moment that still fits.
-        const releaseStart = Math.max(now + A + D, now + Math.max(0, effDur - R))
+        // After squeeze: A+D+R ≤ effDur, so the release window always fits.
+        const releaseStart = now + Math.max(A + D, effDur - R)
         g.setValueAtTime(S, releaseStart)
         g.linearRampToValueAtTime(0, releaseStart + R)
         this.eventAdsrInfo.set(src, { gain: adsrGain, releaseSec: R })
@@ -979,6 +1025,7 @@ class AudioBus {
         vg.gain.value = voiceVol
         vg.connect(this.sfxGain)
         dst = vg
+        this.probe.gainNodesTotal++
       }
       // Per-event EQ chain (#83). Built fresh per voice; spec values
       // resolved here (modulators evaluated at play time). Inserted
@@ -1056,11 +1103,13 @@ class AudioBus {
     return this.loadBuffer(src)
   }
 
-  /** Stop a per-play sample event with ADSR-aware fade. If the voice has
-   *  an ADSR gain, cancel pending automation, ramp the current value to
-   *  0 over `releaseSec`, then defer src.stop until the ramp completes.
-   *  Without ADSR, falls back to immediate stop (legacy behaviour). */
-  private releaseAndStop(src: AudioBufferSourceNode) {
+  /** #71 Stop a per-play sample event. When the voice has an ADSR
+   *  sidecar, fade out over `releaseSec` (cancel pending automation,
+   *  ramp current value → 0, defer src.stop until the ramp lands).
+   *  Without ADSR, calls src.stop() immediately — there's no envelope
+   *  to fade. Voice-stealing + auto-cleanup callers route through here
+   *  so both paths share the same "do the right thing per voice" logic. */
+  private stopVoice(src: AudioBufferSourceNode) {
     const info = this.eventAdsrInfo.get(src)
     const ctx = this.listener?.context
     if (!info || !ctx) {
@@ -1083,12 +1132,51 @@ class AudioBus {
     // SPA fallback HTML → decodeAudioData EncodingError.
     const url = src.startsWith('/') ? src : '/' + src
     const cached = this.bufferCache.get(url)
-    if (cached) return cached
+    if (cached) {
+      // The cache may have been populated by a consumer that ran before
+      // the peak-compute logic existed (or by a parallel ensureBuffer call
+      // from the editor's WaveformCanvas). Ensure the peak gets computed
+      // for THIS url too — guarded by peakCoefficients.has so we only scan
+      // the buffer once across the lifetime of the bus.
+      if (!this.peakCoefficients.has(url)) {
+        cached.then(buf => this.computePeak(url, buf)).catch(() => { /* loader errors already surface to the original consumer */ })
+      }
+      return cached
+    }
     const promise = new Promise<AudioBuffer>((resolve, reject) => {
       this.audioLoader.load(url, resolve, undefined, reject)
+    }).then(buf => {
+      this.computePeak(url, buf)
+      return buf
     })
     this.bufferCache.set(url, promise)
     return promise
+  }
+
+  /** #90 peak-normalize coefficient compute. One-shot per url — repeated
+   *  calls short-circuit on peakCoefficients.has. Silent samples
+   *  (peak ≈ 0) get coefficient 1 since 1/0 would explode any gain read. */
+  private computePeak(url: string, buf: AudioBuffer) {
+    if (this.peakCoefficients.has(url)) return
+    let peak = 0
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const data = buf.getChannelData(c)
+      for (let i = 0; i < data.length; i++) {
+        const v = data[i] < 0 ? -data[i] : data[i]
+        if (v > peak) peak = v
+      }
+    }
+    this.peakCoefficients.set(url, peak > 1e-6 ? 1 / peak : 1)
+  }
+
+  /** Normalize gain multiplier for `src`, gated by `on`. Returns 1 when
+   *  off or when the peak hasn't been computed yet (sample not loaded;
+   *  the next play will pick it up post-load). */
+  private normalizeGain(src: string, on: boolean): number {
+    if (!on) return 1
+    if (src.startsWith('synth:')) return 1
+    const url = src.startsWith('/') ? src : '/' + src
+    return this.peakCoefficients.get(url) ?? 1
   }
 
   // Internal — called by a per-frame tick. AudioBus passes dt so we can
@@ -1143,7 +1231,11 @@ class AudioBus {
         // loop length).
         const env = lr.def.envelope
         const envMul = env ? sampleEnvelope(env, ctx.currentTime) : 1
-        const raw = muted ? 0 : this.computeFinalGain(lr.def.key, value * userVol * envMul, 1)
+        // #90 normalize multiplier — override shadows def, falls back to
+        // 1 when the buffer hasn't decoded yet (next tick picks it up).
+        const normOn = ovr?.normalize ?? lr.def.normalize ?? false
+        const normMul = this.normalizeGain(lr.def.src, normOn)
+        const raw = muted ? 0 : this.computeFinalGain(lr.def.key, value * userVol * envMul * normMul, 1)
         const finalGain = Number.isFinite(raw) ? raw : 0
         lr.lastGain = finalGain
         // Bypass THREE.Audio.setVolume / direct .value writes — those step
