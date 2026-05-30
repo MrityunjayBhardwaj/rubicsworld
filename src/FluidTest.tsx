@@ -28,6 +28,7 @@ import { button, folder, Leva, useControls } from 'leva'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { attachDracoLoader } from './diorama/dracoLoader'
 import {
   attachFlowAttributes,
   createFlowMaterial,
@@ -94,6 +95,7 @@ function FluidScene() {
 
   useEffect(() => {
     const loader = new GLTFLoader()
+    attachDracoLoader(loader)
     loader.load('/fluid.glb', (g) => {
       let geom: THREE.BufferGeometry | null = null
       g.scene.traverse(o => {

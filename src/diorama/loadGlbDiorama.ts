@@ -13,6 +13,7 @@
  */
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { attachDracoLoader } from './dracoLoader'
 import type { DioramaScene } from './buildDiorama'
 import { buildGrass, grassRefs } from './buildGrass'
 import { weldCubeNetSeams } from './weldSeams'
@@ -95,6 +96,12 @@ export async function loadGlbDiorama(
 ): Promise<DioramaScene | null> {
   const { includeMeadow = true } = opts
   const loader = new GLTFLoader()
+  // #80 stage 2: attach Draco decoder so KHR_draco_mesh_compression
+  // geometry decodes. Without this the load succeeds but every
+  // Draco-compressed mesh comes through as empty geometry (silently
+  // invisible — would look identical to a stub glb). Idempotent + harmless
+  // for non-Draco glbs.
+  attachDracoLoader(loader)
   // Register the KHR_audio_emitter parser plugin BEFORE load so emitter
   // afterRoot fires on the loaded GLTF. baseUrl resolves audio.uri relative
   // to the glb's location (typically /diorama.glb → audio at /audio/foo.ogg).
