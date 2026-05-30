@@ -709,6 +709,92 @@ def _patch_glb_with_audio(path: str, speakers: list[dict]) -> bool:
         return False
 
 
+# ── Post-export texture repack (#80) ───────────────────────────────────
+#
+# Blender's glTF exporter embeds source textures at their authored
+# resolution. Asset packs from CGTrader / Sketchfab routinely ship 4-8K
+# VRayCompleteMap PNGs at ~25 MB each — lvl_2 ballooned 1700× in one
+# session (145 KB → 255 MB) and got rejected at GitHub's 100 MB push limit.
+# This helper runs scripts/repack-glb-textures.py against the freshly-
+# written GLB to resize oversized embedded images down to a configured
+# max_edge (default 1024).
+#
+# Blender ships its own Python and does NOT bundle Pillow; the repack
+# script needs Pillow. So we shell out to the SYSTEM python3 found on
+# PATH, which on a dev machine has Pillow installed. Failure is non-fatal
+# — the original GLB is left in place and the user gets a clear error.
+
+
+def _find_repack_script(project_path: str) -> str | None:
+    """Locate scripts/repack-glb-textures.py under the configured project
+    root. Returns None if missing (e.g. user is on a branch that pre-dates
+    #80, or project_path is misconfigured)."""
+    abs_root = bpy.path.abspath(project_path or "") if project_path else ""
+    if not abs_root:
+        return None
+    candidate = os.path.join(abs_root, "scripts", "repack-glb-textures.py")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _find_host_python() -> str | None:
+    """Find a system python3 binary with Pillow available. Tries the
+    common locations + PATH. Returns None if none works."""
+    import shutil
+    candidates: list[str] = []
+    # PATH-resolved python3 / python is the most common case.
+    for name in ("python3", "python"):
+        p = shutil.which(name)
+        if p:
+            candidates.append(p)
+    # macOS Homebrew + common venv locations as fallbacks.
+    for p in ("/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"):
+        if os.path.isfile(p) and p not in candidates:
+            candidates.append(p)
+    for py in candidates:
+        try:
+            import subprocess
+            r = subprocess.run(
+                [py, "-c", "import PIL; print(PIL.__version__)"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                return py
+        except Exception:
+            continue
+    return None
+
+
+def _repack_textures_in_place(path: str, max_edge: int, project_path: str) -> tuple[bool, str]:
+    """Run scripts/repack-glb-textures.py against `path` (overwriting it).
+    Returns (ok, message). Non-fatal — caller logs the message but keeps
+    the export valid even if repack failed."""
+    if not os.path.isfile(path):
+        return False, "repack skipped: glb missing"
+    before_bytes = os.path.getsize(path)
+    script = _find_repack_script(project_path)
+    if not script:
+        return False, "repack skipped: scripts/repack-glb-textures.py not found in project"
+    py = _find_host_python()
+    if not py:
+        return False, "repack skipped: system python3 with Pillow not found (pip install Pillow)"
+    import subprocess
+    try:
+        r = subprocess.run(
+            [py, script, path, path, "--max-edge", str(int(max_edge))],
+            capture_output=True, text=True, timeout=120,
+        )
+        if r.returncode != 0:
+            return False, f"repack failed: {(r.stderr or r.stdout).strip()[:200]}"
+        after_bytes = os.path.getsize(path)
+        saved_mb = (before_bytes - after_bytes) / 1024 / 1024
+        after_mb = after_bytes / 1024 / 1024
+        return True, f"repack ok: {after_mb:.1f} MB (saved {saved_mb:.1f} MB, max-edge {max_edge})"
+    except subprocess.TimeoutExpired:
+        return False, "repack failed: timeout after 120s"
+    except Exception as e:
+        return False, f"repack failed: {e}"
+
+
 def _do_export_current(path: str) -> tuple[bool, int]:
     """Run the glTF exporter with the pipeline flags. Returns (ok, size).
     Safe to call from a timer — doesn't touch the active operator's stack.
@@ -757,6 +843,17 @@ def _do_export_current(path: str) -> tuple[bool, int]:
         # Failure is non-fatal — geometry export still succeeded.
         if speakers:
             _patch_glb_with_audio(path, speakers)
+        # Post-process: repack oversized embedded textures (#80). MUST run
+        # AFTER the audio patch — repack rewrites the BIN chunk, and the
+        # audio patch only touches the JSON chunk, so order doesn't conflict
+        # but doing audio first means the size-printout reflects the final
+        # bytes. Failure is non-fatal — the original GLB stays on disk.
+        scene = bpy.context.scene
+        if getattr(scene, "rubics_repack_textures", False):
+            prefs = bpy.context.preferences.addons[__name__].preferences
+            max_edge = int(getattr(scene, "rubics_repack_max_edge", 1024))
+            ok, msg = _repack_textures_in_place(path, max_edge, prefs.project_path)
+            print(f"[rubics-live] {msg}")
         size = os.path.getsize(path) if os.path.exists(path) else 0
         return True, size
     except Exception as e:
@@ -1430,11 +1527,22 @@ class RUBICS_OT_Export(bpy.types.Operator):
                 use_visible=True,
                 export_extras=True,
             )
+        # Post-process: repack oversized embedded textures (#80). Non-fatal
+        # — surface success/failure via self.report so the user sees it in
+        # Blender's bottom status bar.
+        repack_msg = ""
+        if getattr(scene, "rubics_repack_textures", False):
+            prefs = context.preferences.addons[__name__].preferences
+            max_edge = int(getattr(scene, "rubics_repack_max_edge", 1024))
+            ok, msg = _repack_textures_in_place(path, max_edge, prefs.project_path)
+            self.report({'INFO' if ok else 'WARNING'}, msg)
+            repack_msg = f" ({msg})"
         size = os.path.getsize(path) if os.path.exists(path) else 0
+        size_mb = size / 1024 / 1024
         if hidden:
-            self.report({'INFO'}, f"Exported {size} bytes → {path} (isolated: {len(hidden)} objects skipped)")
+            self.report({'INFO'}, f"Exported {size_mb:.1f} MB → {path} (isolated: {len(hidden)} objects skipped){repack_msg}")
         else:
-            self.report({'INFO'}, f"Exported {size} bytes → {path}")
+            self.report({'INFO'}, f"Exported {size_mb:.1f} MB → {path}{repack_msg}")
         return {'FINISHED'}
 
 
@@ -1662,6 +1770,11 @@ class RUBICS_PT_Panel(bpy.types.Panel):
         col.prop(context.scene, "rubics_isolate_export",  text="Isolate: only export face-block content")
         col.prop(context.scene, "rubics_ignore_warnings", text="Ignore warnings on export")
         col.prop(context.scene, "rubics_ignore_errors",   text="Ignore errors on export (force)")
+        # #80 — texture repack to keep glb under GitHub's 100 MB push limit.
+        col.prop(context.scene, "rubics_repack_textures", text="Repack textures (resize on export)")
+        if getattr(context.scene, "rubics_repack_textures", False):
+            row = col.row(align=True)
+            row.prop(context.scene, "rubics_repack_max_edge", text="  Max edge")
 
         layout.separator()
         box = layout.box()
@@ -1776,6 +1889,30 @@ def register():
         items=LEVEL_SLUG_ITEMS,
         default='AUTO',
     )
+    # #80 texture repack — default ON. Asset packs from CGTrader / Sketchfab
+    # routinely embed 4-8K source textures, and one bad import can push the
+    # glb past GitHub's 100 MB hard limit (lvl_2 went 145 KB → 255 MB in one
+    # session). 1024 max-edge matches lvl_1's working size and looks fine for
+    # the stylised distant-view diorama style.
+    bpy.types.Scene.rubics_repack_textures = bpy.props.BoolProperty(
+        name="Repack Textures on Export",
+        description=(
+            "After export, downsample embedded PNG/JPEG textures whose max "
+            "edge exceeds Max Edge. Runs scripts/repack-glb-textures.py "
+            "(needs system python3 with Pillow installed). Lossless format "
+            "preservation — PNG stays PNG, JPEG stays JPEG. Saves the bulk "
+            "of glb bloat from oversized source textures."
+        ),
+        default=True,
+    )
+    bpy.types.Scene.rubics_repack_max_edge = bpy.props.IntProperty(
+        name="Max Edge",
+        description="Texture max width/height in pixels after repack. 1024 is the lvl_1 baseline; bump to 2048 for sharper closeup detail at ~50% larger files.",
+        default=1024,
+        min=256,
+        max=4096,
+        step=256,
+    )
 
 
 def unregister():
@@ -1784,7 +1921,8 @@ def unregister():
     # crashes on the next depsgraph update.
     _live_stop()
     for prop in ('rubics_isolate_export', 'rubics_ignore_warnings',
-                 'rubics_ignore_errors', 'rubics_live_link_slug'):
+                 'rubics_ignore_errors', 'rubics_live_link_slug',
+                 'rubics_repack_textures', 'rubics_repack_max_edge'):
         try:
             delattr(bpy.types.Scene, prop)
         except AttributeError:
