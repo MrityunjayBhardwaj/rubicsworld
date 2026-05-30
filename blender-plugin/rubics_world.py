@@ -838,6 +838,14 @@ def _do_export_current(path: str) -> tuple[bool, int]:
                 export_force_sampling=True,
                 export_optimize_animation_size=False,
                 export_frame_step=1,
+                # #80 stage 2 — Draco mesh compression. Roughly 8-10× reduction
+                # on positions/normals/UVs/indices, decoded at load time by
+                # three.js's DRACOLoader (wired in src/diorama/dracoLoader.ts).
+                # Toggle-gated since the consumer side (weldSeams + grass
+                # ground-mesh lookup) hasn't been verified against real
+                # Draco-decoded geometry yet — P44-family risk.
+                export_draco_mesh_compression_enable=bool(getattr(bpy.context.scene, "rubics_draco_mesh_compression", False)),
+                export_draco_mesh_compression_level=int(getattr(bpy.context.scene, "rubics_draco_level", 6)),
             )
         # Post-process: inject KHR_audio_emitter into the freshly-written glb.
         # Failure is non-fatal — geometry export still succeeded.
@@ -1526,6 +1534,10 @@ class RUBICS_OT_Export(bpy.types.Operator):
                 export_lights=False,
                 use_visible=True,
                 export_extras=True,
+                # #80 stage 2 — Draco mesh compression (see _do_export_current
+                # for the rationale + risk note).
+                export_draco_mesh_compression_enable=bool(getattr(scene, "rubics_draco_mesh_compression", False)),
+                export_draco_mesh_compression_level=int(getattr(scene, "rubics_draco_level", 6)),
             )
         # Post-process: repack oversized embedded textures (#80). Non-fatal
         # — surface success/failure via self.report so the user sees it in
@@ -1775,6 +1787,13 @@ class RUBICS_PT_Panel(bpy.types.Panel):
         if getattr(context.scene, "rubics_repack_textures", False):
             row = col.row(align=True)
             row.prop(context.scene, "rubics_repack_max_edge", text="  Max edge")
+        # #80 stage 2 — Draco mesh compression. Default OFF until the consumer
+        # side (weldSeams + grass ground-mesh lookup) is verified against real
+        # Draco-decoded geometry. Safe to flip on once UAT'd.
+        col.prop(context.scene, "rubics_draco_mesh_compression", text="Draco mesh compression (experimental)")
+        if getattr(context.scene, "rubics_draco_mesh_compression", False):
+            row = col.row(align=True)
+            row.prop(context.scene, "rubics_draco_level", text="  Level")
 
         layout.separator()
         box = layout.box()
@@ -1913,6 +1932,29 @@ def register():
         max=4096,
         step=256,
     )
+    # #80 stage 2 — Draco mesh compression. Default OFF: turns on the glTF
+    # exporter's built-in KHR_draco_mesh_compression. Three.js's DRACOLoader
+    # is already wired in src/diorama/dracoLoader.ts so decode works either
+    # way; flip ON once verified against the project's mesh consumers
+    # (weldSeams, grass ground-mesh lookup) — P44-family risk.
+    bpy.types.Scene.rubics_draco_mesh_compression = bpy.props.BoolProperty(
+        name="Draco Mesh Compression",
+        description=(
+            "Compress mesh positions/normals/UVs/indices via Draco "
+            "(KHR_draco_mesh_compression). Typically 8-10× smaller geometry. "
+            "EXPERIMENTAL: not yet verified against all mesh consumers (e.g. "
+            "weldSeams may need adjustment if Draco decode produces "
+            "non-standard attribute layouts)."
+        ),
+        default=False,
+    )
+    bpy.types.Scene.rubics_draco_level = bpy.props.IntProperty(
+        name="Draco Level",
+        description="Draco compression level. 0 = no quantization (largest, lossless-ish), 10 = max quantization (smallest, lossier). 6 is the typical sweet spot.",
+        default=6,
+        min=0,
+        max=10,
+    )
 
 
 def unregister():
@@ -1922,7 +1964,8 @@ def unregister():
     _live_stop()
     for prop in ('rubics_isolate_export', 'rubics_ignore_warnings',
                  'rubics_ignore_errors', 'rubics_live_link_slug',
-                 'rubics_repack_textures', 'rubics_repack_max_edge'):
+                 'rubics_repack_textures', 'rubics_repack_max_edge',
+                 'rubics_draco_mesh_compression', 'rubics_draco_level'):
         try:
             delattr(bpy.types.Scene, prop)
         except AttributeError:
