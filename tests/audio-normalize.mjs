@@ -23,15 +23,23 @@ await page.goto(URL, { waitUntil: 'domcontentloaded' })
 await page.waitForFunction(() => !!(window).__audioBus, null, { timeout: 15000 })
 await page.waitForTimeout(600)
 
-// Kick the buffer load by calling previewLoop briefly — that path
-// resolves loadBuffer, which populates peakCoefficients.
+// Kick the buffer load via the public ensureBuffer wrapper, which calls
+// the same loadBuffer path that schedules computePeak. Crucially we
+// AWAIT the buffer promise inside evaluate — without that, headless
+// Chrome can keep the promise pending while waitForTimeout idles
+// (background XHR throttling). The await forces resolution before we
+// move on.
 await page.evaluate(async () => {
   const bus = (window).__audioBus
-  const stop = bus.previewLoop('theme_music', 5)
-  // give the buffer fetch + decode + peak scan time to land
-  await new Promise(r => setTimeout(r, 1500))
-  if (typeof stop === 'function') stop()
+  await bus.loadSampleBuffer('audio/theme.ogg').catch(() => {})
 })
+// Microtask drain — give the loadBuffer .then chain (which calls
+// computePeak) a tick to run after the awaited promise resolves.
+await page.waitForFunction(
+  () => (window).__audioBus?.peakCoefficients?.get('/audio/theme.ogg') != null,
+  null,
+  { timeout: 5_000 },
+).catch(() => { /* fall through — test assertion will report the miss */ })
 
 const probe = await page.evaluate(() => {
   const bus = (window).__audioBus
@@ -57,7 +65,7 @@ const probe = await page.evaluate(() => {
 
 // UI: render normalize toggle for the sample loop currently selected.
 await page.evaluate(() => (window).__lastTriggered?.getState?.().publish?.('theme_music'))
-await page.waitForTimeout(300)
+await page.waitForTimeout(800)
 const normalizeVisibleSampleLoop = await page.evaluate(() => {
   return [...document.querySelectorAll('label, span, div')]
     .some(el => /Normalize\s*\(0\s*dBFS\)/i.test(el.textContent || ''))
@@ -65,7 +73,7 @@ const normalizeVisibleSampleLoop = await page.evaluate(() => {
 
 // Hidden for synth loop.
 await page.evaluate(() => (window).__lastTriggered?.getState?.().publish?.('windmill_whoosh'))
-await page.waitForTimeout(300)
+await page.waitForTimeout(800)
 const normalizeHiddenSynthLoop = await page.evaluate(() => {
   return ![...document.querySelectorAll('label, span, div')]
     .some(el => /Normalize\s*\(0\s*dBFS\)/i.test(el.textContent || ''))
