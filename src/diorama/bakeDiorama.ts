@@ -23,6 +23,7 @@
  */
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { attachDracoLoader } from './dracoLoader'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { dedupeMaterials } from './loadGlbDiorama'
 import { weldCubeNetSeams } from './weldSeams'
@@ -142,6 +143,10 @@ export async function bakeDioramaGlb(opts: BakeOptions = {}): Promise<BakeResult
   }
 
   const loader = new GLTFLoader()
+  // #80 stage 2: decode Draco-compressed meshes if present. Without this
+  // a Draco-authored source glb parses into empty geometry — the bake
+  // would re-export an invisible scene with no errors.
+  attachDracoLoader(loader)
   const gltf = await new Promise<Awaited<ReturnType<GLTFLoader['parseAsync']>>>((resolve, reject) => {
     loader.parse(sourceBytes, '', resolve, reject)
   })
